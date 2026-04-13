@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 
@@ -34,7 +35,15 @@ func newExecCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
   mvm exec my-vm -it -- bash
   mvm exec my-vm -e FOO=bar -- env
   echo "data" | mvm exec my-vm -- cat`,
-		Args: cobra.MinimumNArgs(2),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				return fmt.Errorf("missing VM name and command\n\nUsage: mvm exec <vm-name> -- <command>\nExample: mvm exec my-vm -- ls /")
+			}
+			if len(args) == 1 {
+				return fmt.Errorf("missing command\n\nUsage: mvm exec %s -- <command>\nExample: mvm exec %s -- ls /", args[0], args[0])
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			remoteArgs := args[1:]
@@ -58,7 +67,9 @@ func runExec(limaClient *lima.Client, store *state.Store, name string, remoteArg
 	if !interactive {
 		sc := server.DefaultClient()
 		if sc.IsAvailable() {
-			exitCode, err := sc.ExecStream(context.Background(), name, script, os.Stdout, os.Stderr)
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+			defer stop()
+			exitCode, err := sc.ExecStream(ctx, name, script, os.Stdout, os.Stderr)
 			if err == nil {
 				if exitCode != 0 {
 					return fmt.Errorf("exit code %d", exitCode)

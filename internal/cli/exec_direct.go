@@ -42,14 +42,13 @@ func runExecDirect2(guestIP, command string) error {
 	}
 	defer conn.Close()
 
-	// Build request JSON
+	// Send exec_stream request (streaming — output arrives in real-time)
 	reqJSON, _ := json.Marshal(map[string]interface{}{
-		"type": "exec",
+		"type": "exec_stream",
 		"id":   "e",
 		"exec": map[string]string{"command": command},
 	})
 
-	// Write length-prefixed request
 	length := make([]byte, 4)
 	length[0] = byte(len(reqJSON) >> 24)
 	length[1] = byte(len(reqJSON) >> 16)
@@ -58,36 +57,44 @@ func runExecDirect2(guestIP, command string) error {
 	conn.Write(length)
 	conn.Write(reqJSON)
 
-	// Read length-prefixed response
-	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
-	respLen := make([]byte, 4)
-	if _, err := readFullConn(conn, respLen); err != nil {
-		return fmt.Errorf("read response: %w", err)
-	}
-	size := int(respLen[0])<<24 | int(respLen[1])<<16 | int(respLen[2])<<8 | int(respLen[3])
-	respData := make([]byte, size)
-	if _, err := readFullConn(conn, respData); err != nil {
-		return fmt.Errorf("read response body: %w", err)
-	}
+	// Read streaming frames — output as they arrive
+	for {
+		conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
 
-	var resp struct {
-		Data     []byte `json:"data"`
-		ExitCode int    `json:"exit_code"`
-		Error    string `json:"error"`
-	}
-	if err := json.Unmarshal(respData, &resp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-	if resp.Error != "" {
-		return fmt.Errorf("agent: %s", resp.Error)
-	}
+		respLen := make([]byte, 4)
+		if _, err := readFullConn(conn, respLen); err != nil {
+			return fmt.Errorf("read response: %w", err)
+		}
+		size := int(respLen[0])<<24 | int(respLen[1])<<16 | int(respLen[2])<<8 | int(respLen[3])
+		respData := make([]byte, size)
+		if _, err := readFullConn(conn, respData); err != nil {
+			return fmt.Errorf("read response body: %w", err)
+		}
 
-	os.Stdout.Write(resp.Data)
+		var resp struct {
+			Type     string `json:"type"`
+			Data     []byte `json:"data"`
+			ExitCode int    `json:"exit_code"`
+			Error    string `json:"error"`
+		}
+		if err := json.Unmarshal(respData, &resp); err != nil {
+			return fmt.Errorf("parse response: %w", err)
+		}
 
-	if resp.ExitCode != 0 {
-		os.Exit(resp.ExitCode)
+		switch resp.Type {
+		case "stdout":
+			os.Stdout.Write(resp.Data)
+		case "stderr":
+			os.Stderr.Write(resp.Data)
+		case "exit":
+			if resp.ExitCode != 0 {
+				os.Exit(resp.ExitCode)
+			}
+			return nil
+		case "error":
+			return fmt.Errorf("agent: %s", resp.Error)
+		}
 	}
-	return nil
 }
 
 func readFullConn(conn net.Conn, buf []byte) (int, error) {

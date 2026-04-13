@@ -180,7 +180,12 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	s.store.UpdateVM(name, func(v *state.VM) { v.LastActivity = &now })
 
-	// Direct TCP to guest agent (daemon runs inside Lima — same network)
+	if req.Stream {
+		s.handleExecStream(w, r, vm.GuestIP, req)
+		return
+	}
+
+	// Non-streaming: buffered response (30 min idle timeout)
 	out, exitCode, execErr := execOnGuest(vm.GuestIP, req.Command, req.Stdin)
 	if execErr != nil {
 		httpError(w, execErr, http.StatusInternalServerError)
@@ -189,6 +194,102 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ExecResponse{Output: out, ExitCode: exitCode})
+}
+
+// handleExecStream sends exec_stream to the agent and forwards NDJSON frames in real-time.
+func (s *Server) handleExecStream(w http.ResponseWriter, r *http.Request, guestIP string, req ExecRequest) {
+	conn, err := net.DialTimeout("tcp", guestIP+":5123", 5*time.Second)
+	if err != nil {
+		httpError(w, fmt.Errorf("agent not reachable: %w", err), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Close agent connection if client disconnects (Ctrl+C)
+	go func() {
+		<-r.Context().Done()
+		conn.Close()
+	}()
+
+	// Send exec_stream request
+	agentReq, _ := json.Marshal(map[string]interface{}{
+		"type": "exec_stream",
+		"id":   "e",
+		"exec": map[string]string{"command": req.Command, "stdin": req.Stdin},
+	})
+	lenBuf := make([]byte, 4)
+	lenBuf[0] = byte(len(agentReq) >> 24)
+	lenBuf[1] = byte(len(agentReq) >> 16)
+	lenBuf[2] = byte(len(agentReq) >> 8)
+	lenBuf[3] = byte(len(agentReq))
+	conn.Write(lenBuf)
+	conn.Write(agentReq)
+
+	// Stream NDJSON response
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpError(w, fmt.Errorf("streaming not supported"), http.StatusInternalServerError)
+		conn.Close()
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+
+	type ndjsonFrame struct {
+		Type     string `json:"type"`
+		Data     string `json:"data,omitempty"`
+		ExitCode int    `json:"exit_code,omitempty"`
+		Error    string `json:"error,omitempty"`
+	}
+
+	for {
+		// 30-min idle timeout per read
+		conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
+
+		// Read length prefix
+		respLen := make([]byte, 4)
+		if _, err := readFull(conn, respLen); err != nil {
+			json.NewEncoder(w).Encode(ndjsonFrame{Type: "error", Error: err.Error()})
+			flusher.Flush()
+			return
+		}
+		size := int(respLen[0])<<24 | int(respLen[1])<<16 | int(respLen[2])<<8 | int(respLen[3])
+		respData := make([]byte, size)
+		if _, err := readFull(conn, respData); err != nil {
+			json.NewEncoder(w).Encode(ndjsonFrame{Type: "error", Error: err.Error()})
+			flusher.Flush()
+			return
+		}
+
+		// Parse agent frame (Data is []byte, json.Unmarshal decodes base64 → raw bytes)
+		var agentResp struct {
+			Type     string `json:"type"`
+			Data     []byte `json:"data,omitempty"`
+			ExitCode int    `json:"exit_code,omitempty"`
+			Error    string `json:"error,omitempty"`
+		}
+		json.Unmarshal(respData, &agentResp)
+
+		// Forward as NDJSON with string data (not base64)
+		switch agentResp.Type {
+		case "stdout":
+			json.NewEncoder(w).Encode(ndjsonFrame{Type: "stdout", Data: string(agentResp.Data)})
+			flusher.Flush()
+		case "stderr":
+			json.NewEncoder(w).Encode(ndjsonFrame{Type: "stderr", Data: string(agentResp.Data)})
+			flusher.Flush()
+		case "exit":
+			json.NewEncoder(w).Encode(ndjsonFrame{Type: "exit", ExitCode: agentResp.ExitCode})
+			flusher.Flush()
+			conn.Close()
+			return
+		case "error":
+			json.NewEncoder(w).Encode(ndjsonFrame{Type: "error", Error: agentResp.Error})
+			flusher.Flush()
+			conn.Close()
+			return
+		}
+	}
 }
 
 // execOnGuest sends an exec request to the guest agent via direct TCP.
@@ -213,7 +314,7 @@ func execOnGuest(guestIP, command, stdin string) (string, int, error) {
 	conn.Write(reqBytes)
 
 	// Read length-prefixed response
-	conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+	conn.SetReadDeadline(time.Now().Add(30 * time.Minute))
 	respLen := make([]byte, 4)
 	if _, err := readFull(conn, respLen); err != nil {
 		return "", -1, fmt.Errorf("read response length: %w", err)
