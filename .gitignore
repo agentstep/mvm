@@ -1,0 +1,10 @@
+/bin/
+dist/
+*.exe
+*.test
+*.out
+.DS_Store
+vz/.build/
+vz/.swiftpm/
+.claude/settings.local.json
+mvm

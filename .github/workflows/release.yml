@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm:
+    runs-on: macos-latest
+    needs: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Build Go binary
+        run: |
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME#v} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o npm-platform/bin/mvm ./cmd/mvm
+          chmod +x npm-platform/bin/mvm
+          ls -lh npm-platform/bin/mvm
+
+      - name: Sync versions from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd npm && npm version "$VERSION" --no-git-tag-version --allow-same-version
+          cd ../npm-platform && npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Publish platform package first
+        run: cd npm-platform && npm publish --access public || echo "Version already published"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Wait for platform package to propagate
+        run: sleep 10
+
+      - name: Publish wrapper package
+        run: cd npm && npm publish --access public || echo "Version already published"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

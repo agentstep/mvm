@@ -1,0 +1,28 @@
+{
+  "name": "@agentstep/mvm",
+  "version": "0.2.3",
+  "description": "Hardware-isolated Linux VMs on your Mac in 0.35s. Safe sandboxes for AI coding agents.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentstep/mvm.git",
+    "directory": "npm"
+  },
+  "homepage": "https://github.com/agentstep/mvm",
+  "bin": {
+    "mvm": "./bin/mvm"
+  },
+  "files": [
+    "bin",
+    "install.js"
+  ],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "optionalDependencies": {
+    "@agentstep/mvm-darwin-arm64": "0.2.3"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

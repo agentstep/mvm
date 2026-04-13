@@ -1,0 +1,41 @@
+version: 2
+project_name: mvm
+
+builds:
+  - main: ./cmd/mvm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+# Homebrew tap (requires PAT with repo scope — enable later)
+# brews:
+#   - repository:
+#       owner: agentstep
+#       name: homebrew-tap
+#     name: mvm
+#     homepage: "https://github.com/agentstep/mvm"
+#     description: "Run Firecracker microVMs on macOS Apple Silicon"
+#     license: Apache-2.0
+#     install: |
+#       bin.install "mvm"
+#     test: |
+#       system "#{bin}/mvm", "version"

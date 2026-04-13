@@ -1,0 +1,20 @@
+{
+  "name": "@agentstep/mvm-darwin-arm64",
+  "version": "0.2.3",
+  "description": "mvm binary for macOS ARM64 (Apple Silicon)",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentstep/mvm.git"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "preferUnplugged": true,
+  "files": [
+    "bin"
+  ]
+}
