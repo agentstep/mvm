@@ -1,11 +1,21 @@
-#!/bin/sh
+#!/bin/bash
 set -e
-# Configure Alpine rootfs for Firecracker microVMs.
+# Configure Debian rootfs for Firecracker microVMs.
 # Runs INSIDE the chroot — no quoting layers, no nesting issues.
 # Env: MINIMAL (0 or 1)
 
 # --- Packages ---
-apk add --no-cache git curl wget python3 py3-pip nodejs npm iptables libgcc libstdc++ ripgrep
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y --no-install-recommends \
+    git curl wget python3 python3-pip \
+    nodejs npm \
+    iptables iproute2 ripgrep \
+    busybox-static ca-certificates procps \
+    >/dev/null 2>&1
+
+# busybox init — symlink so kernel finds it at /sbin/init
+ln -sf /bin/busybox /sbin/init
 
 # --- Hostname + DNS ---
 echo "mvm" > /etc/hostname
@@ -20,7 +30,7 @@ export PATH=/usr/local/bin:/root/.local/bin:$PATH
 export NODE_COMPILE_CACHE=/tmp/v8-cache
 ENVEOF
 
-# --- Minimal busybox inittab (no OpenRC, no SSH, ~2s boot) ---
+# --- Minimal busybox inittab (no systemd, ~2s boot) ---
 cat > /etc/inittab << 'INITTAB'
 ::sysinit:/bin/mkdir -p /proc /sys /dev /tmp /run /dev/pts /dev/shm /tmp/v8-cache
 ::sysinit:/bin/mount -t proc proc /proc
@@ -77,9 +87,11 @@ chmod +x /etc/local.d/network-watchdog.start
 
 # --- Install AI agents (unless minimal) ---
 if [ "$MINIMAL" != "1" ]; then
-    echo "Installing Claude Code..."
-    npm install -g @anthropic-ai/claude-code 2>/dev/null || true
+    # Claude Code native binary (Bun-based, ~2s startup on glibc)
+    echo "Installing Claude Code (native)..."
+    curl -fsSL https://claude.ai/install.sh | bash 2>/dev/null || true
 
+    # Codex CLI (native Rust binary)
     echo "Installing Codex CLI (native)..."
     curl -fsSL https://github.com/openai/codex/releases/latest/download/install.sh | sh 2>/dev/null || true
 fi
@@ -96,6 +108,10 @@ You are inside an mvm microVM — a hardware-isolated Firecracker VM on macOS.
 - Node.js (node, npm), Python 3 (python3, pip)
 - git, curl, wget, ripgrep
 - Claude Code (claude), Codex (codex)
+- Base OS: Debian Bookworm (aarch64)
+
+## Package management
+- Install packages: apt-get install -y <package>
 
 ## Tips
 - Writable root filesystem — install anything you need
@@ -104,7 +120,8 @@ SKILLS
 cp /.mvm/SKILLS.md /root/CLAUDE.md
 cp /.mvm/SKILLS.md /root/AGENTS.md
 
-# Cleanup
-rm -f /tmp/chroot-setup.sh
+# --- Cleanup to reduce image size ---
+apt-get clean
+rm -rf /var/lib/apt/lists/* /tmp/chroot-setup.sh
 
 echo "Chroot setup complete"

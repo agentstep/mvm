@@ -48,7 +48,7 @@ sudo mount -t tmpfs tmpfs "$MNT/tmp"
 sudo cp /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || true
 
 # Run command in chroot (no set -e — we capture the exit code ourselves)
-sudo chroot "$MNT" /bin/sh -c %s
+sudo chroot "$MNT" /bin/bash -c %s
 exit $?
 `, safeRootfs, safeCommand)
 

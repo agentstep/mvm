@@ -65,8 +65,8 @@ echo "Firecracker installed successfully"
 	return nil
 }
 
-// DownloadImages downloads the kernel and builds an Alpine Linux rootfs.
-// Minimal init (no OpenRC, no SSH) — boots in ~2s. Vsock agent only.
+// DownloadImages downloads the kernel and builds a Debian Linux rootfs.
+// Minimal busybox init (no systemd, no SSH) — boots in ~2s. Vsock agent only.
 // If minimal is true, only base packages are installed (no AI agents).
 func DownloadImages(limaClient *lima.Client, cacheDir string, minimal bool) error {
 	minimalFlag := "0"

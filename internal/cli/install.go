@@ -20,12 +20,12 @@ func newInstallCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 
 This bypasses the double-virtualization penalty by running the command
 in Lima's chroot instead of inside the nested Firecracker VM. ~10x faster
-for CPU-heavy operations like npm install, pip install, apk add.
+for CPU-heavy operations like npm install, pip install, apt-get install.
 
 The VM is briefly stopped while the command runs, then restarted.
 
-  mvm install my-app -- npm install -g openclaw
-  mvm install my-app -- apk add postgresql
+  mvm install my-app -- npm install -g typescript
+  mvm install my-app -- apt-get install -y postgresql
   mvm install my-app -- pip install flask`,
 		// DisableFlagParsing so flags after -- aren't eaten by cobra
 		DisableFlagParsing: true,

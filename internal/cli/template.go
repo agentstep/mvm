@@ -120,7 +120,7 @@ echo "Python template ready. Run: cd /app && python3 main.py"
 		setup: `#!/bin/sh
 # PostgreSQL template setup — runs inside the VM after boot
 set -e
-apk add --no-cache postgresql postgresql-client
+apt-get install -y postgresql postgresql-client
 mkdir -p /var/lib/postgresql/data
 chown postgres:postgres /var/lib/postgresql/data
 

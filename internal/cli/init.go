@@ -340,9 +340,9 @@ func buildRootfsViaDocker(dest string, minimal bool) error {
 	}
 
 	script := fmt.Sprintf(`
-docker run --rm --platform linux/arm64 -v "$(dirname %s):/output" alpine:3.21 sh -c '
+docker run --rm --platform linux/arm64 -v "$(dirname %s):/output" debian:bookworm bash -c '
 set -e
-apk add --no-cache %s e2fsprogs
+apt-get update -qq && apt-get install -y --no-install-recommends %s e2fsprogs >/dev/null
 mkdir -p /rootfs
 cp -a /bin /etc /home /lib /root /run /sbin /srv /tmp /usr /var /rootfs/
 mkdir -p /rootfs/dev /rootfs/proc /rootfs/sys /rootfs/mnt
