@@ -71,6 +71,14 @@ enum VMConfigBuilder {
         vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
+        // Vsock device — out-of-band control plane to the in-guest agent.
+        // The Go side reaches the agent via the helper's IPC socket: the
+        // helper calls VZVirtioSocketDevice.connect(toPort:) and ships the
+        // resulting fd back via SCM_RIGHTS. With this device wired, the
+        // agent listens on vsock port 5123 and the Go agentclient never
+        // has to touch the guest's TAP IP.
+        vzConfig.socketDevices = [VZVirtioSocketDeviceConfiguration()]
+
         // VirtioFS shared directories
         var dirSharingDevices: [VZDirectorySharingDeviceConfiguration] = []
         for share in config.shares {

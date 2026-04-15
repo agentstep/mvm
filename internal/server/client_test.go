@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -362,70 +361,7 @@ func TestExecStreamNonNDJSONResponse(t *testing.T) {
 	}
 }
 
-// === readFull ===
-
-func TestReadFullComplete(t *testing.T) {
-	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
-
-	go func() {
-		server.Write([]byte("hello"))
-	}()
-
-	buf := make([]byte, 5)
-	n, err := readFull(client, buf)
-	if err != nil {
-		t.Fatalf("readFull: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("n = %d, want 5", n)
-	}
-	if string(buf) != "hello" {
-		t.Errorf("buf = %q, want hello", string(buf))
-	}
-}
-
-func TestReadFullPartialReads(t *testing.T) {
-	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
-
-	// Write in chunks to simulate partial reads
-	go func() {
-		server.Write([]byte("hel"))
-		time.Sleep(10 * time.Millisecond)
-		server.Write([]byte("lo"))
-	}()
-
-	buf := make([]byte, 5)
-	n, err := readFull(client, buf)
-	if err != nil {
-		t.Fatalf("readFull: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("n = %d, want 5", n)
-	}
-	if string(buf) != "hello" {
-		t.Errorf("buf = %q, want hello", string(buf))
-	}
-}
-
-func TestReadFullEOF(t *testing.T) {
-	server, client := net.Pipe()
-	defer client.Close()
-
-	go func() {
-		server.Write([]byte("hi"))
-		server.Close() // close before buffer is full
-	}()
-
-	buf := make([]byte, 10)
-	_, err := readFull(client, buf)
-	if err == nil {
-		t.Error("should error when connection closes before buffer is full")
-	}
-	if err != io.EOF {
-		t.Errorf("error should be EOF, got: %v", err)
-	}
-}
+// (Tests for the old TCP-via-TAP readFull helper were removed when
+// internal/server/routes.go switched to internal/agentclient over
+// Firecracker's vsock UDS bridge. Coverage for the new transport
+// lives in internal/agentclient/client_test.go.)

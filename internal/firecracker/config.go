@@ -20,6 +20,15 @@ func SocketPath(name string) string {
 	return fmt.Sprintf("%s/%s.socket", RunDir, name)
 }
 
+// VsockUDSPath returns the path to the Firecracker vsock-to-Unix-socket
+// bridge for a VM. Host→guest connections write "CONNECT <port>\n" to this
+// socket and read "OK <hostcid>\n" before the bidirectional stream begins.
+//
+// This must match the uds_path field set in fcConfig.Vsock (see GenerateConfig).
+func VsockUDSPath(name string) string {
+	return fmt.Sprintf("%s/%s.vsock", RunDir, name)
+}
+
 // VMDir returns the per-VM directory inside Lima.
 func VMDir(name string) string {
 	return fmt.Sprintf("%s/%s", VMsDir, name)

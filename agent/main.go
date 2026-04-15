@@ -98,6 +98,14 @@ func handleConnection(conn net.Conn) {
 				continue
 			}
 
+		case protocol.ReqExecPty:
+			if req.Pty == nil {
+				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: "missing pty request"}
+			} else {
+				handler.HandleExecPty(conn, req.Pty, req.ID)
+				return // PTY takes over the connection
+			}
+
 		case protocol.ReqWriteFile:
 			if req.File == nil {
 				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: "missing file request"}

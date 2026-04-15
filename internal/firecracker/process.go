@@ -183,6 +183,13 @@ func ApplySeccompViaAgent(ex Executor, vm *state.VM, profile string) error {
 // agentExec runs a command on the guest agent via TCP.
 // Works both from macOS (through executor's nc) and from inside Lima (direct TCP).
 // AgentExec runs a command on the guest agent via direct TCP.
+//
+// DEPRECATED: this is the macOS-side fallback used when the in-Lima daemon
+// is unavailable. The daemon path now uses internal/agentclient with the
+// Firecracker vsock UDS bridge (see internal/server/routes.go). The remaining
+// callers here (SetupGuestNetworkViaAgent, StopViaAgent, ApplyNetworkPolicyViaAgent,
+// ApplySeccompViaAgent) will be migrated to agentclient in PR #2 once we add
+// a Lima-aware dialer that forwards the UDS through the daemon socket.
 func AgentExec(ex Executor, guestIP, command string) error {
 	return agentExec(ex, guestIP, command)
 }

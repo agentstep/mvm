@@ -12,6 +12,7 @@ const (
 	ReqPing       = "ping"
 	ReqExec       = "exec"
 	ReqExecStream = "exec_stream"
+	ReqExecPty    = "exec_pty"
 	ReqWriteFile  = "write_file"
 	ReqReadFile   = "read_file"
 	ReqPoweroff   = "poweroff"
@@ -25,12 +26,15 @@ const (
 	RespStdout = "stdout"
 	RespStderr = "stderr"
 	RespExit   = "exit"
+	RespStdin  = "stdin"  // client→agent: stdin data
+	RespResize = "resize" // client→agent: terminal resize
 )
 
 type Request struct {
 	Type    string          `json:"type"`
 	ID      string          `json:"id"`
 	Exec    *ExecRequest    `json:"exec,omitempty"`
+	Pty     *ExecPtyRequest `json:"pty,omitempty"`
 	File    *FileRequest    `json:"file,omitempty"`
 	Network *NetworkRequest `json:"network,omitempty"`
 }
@@ -40,6 +44,15 @@ type ExecRequest struct {
 	Env     map[string]string `json:"env,omitempty"`
 	WorkDir string            `json:"workdir,omitempty"`
 	Stdin   string            `json:"stdin,omitempty"`
+}
+
+type ExecPtyRequest struct {
+	Command string            `json:"command"`
+	Env     map[string]string `json:"env,omitempty"`
+	WorkDir string            `json:"workdir,omitempty"`
+	Rows    uint16            `json:"rows"`
+	Cols    uint16            `json:"cols"`
+	Term    string            `json:"term,omitempty"`
 }
 
 type FileRequest struct {

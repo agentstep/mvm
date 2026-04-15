@@ -108,6 +108,8 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /vms/{name}/exec", s.handleExec)
 	mux.HandleFunc("DELETE /vms/{name}", s.handleDeleteVM)
 	mux.HandleFunc("POST /vms/{name}/stop", s.handleStopVM)
+	mux.HandleFunc("POST /vms/{name}/pause", s.handlePauseVM)
+	mux.HandleFunc("POST /vms/{name}/resume", s.handleResumeVM)
 	mux.HandleFunc("GET /pool", s.handlePoolStatus)
 	mux.HandleFunc("POST /pool/warm", s.handlePoolWarm)
 

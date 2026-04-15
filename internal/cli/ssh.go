@@ -1,12 +1,11 @@
 package cli
 
 import (
-	"github.com/agentstep/mvm/internal/lima"
 	"github.com/agentstep/mvm/internal/state"
 	"github.com/spf13/cobra"
 )
 
-func newSSHCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newSSHCmd(store *state.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "ssh <name> [-- <command>]",
 		Short: "Open a shell in a running microVM",
@@ -26,7 +25,7 @@ func newSSHCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 				}
 			}
 			// Delegate to exec with interactive flag
-			return runExec(limaClient, store, name, remoteArgs, true, "", nil, "")
+			return runExec(store, name, remoteArgs, true, "", nil, "")
 		},
 	}
 }

@@ -1,15 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/agentstep/mvm/internal/firecracker"
-	"github.com/agentstep/mvm/internal/lima"
-	"github.com/agentstep/mvm/internal/state"
 	"github.com/spf13/cobra"
 )
 
-func newDeleteCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newDeleteCmd() *cobra.Command {
 	var (
 		force bool
 		all   bool
@@ -31,9 +29,9 @@ func newDeleteCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if all {
-				return runDeleteAll(limaClient, store, force)
+				return runDeleteAll(force)
 			}
-			return runDelete(limaClient, store, args[0], force)
+			return runDelete(args[0], force)
 		},
 	}
 
@@ -43,46 +41,64 @@ func newDeleteCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 	return cmd
 }
 
-func runDelete(limaClient *lima.Client, store *state.Store, name string, force bool) error {
-	vm, err := store.GetVM(name)
+func runDelete(name string, force bool) error {
+	sc, err := requireDaemon()
 	if err != nil {
 		return err
 	}
 
-	if vm.Status == "running" {
+	ctx := context.Background()
+
+	// Check VM status via listing
+	vms, err := sc.ListVMs(ctx)
+	if err != nil {
+		return err
+	}
+
+	var found bool
+	var status string
+	for _, vm := range vms {
+		if vm.Name == name {
+			found = true
+			status = vm.Status
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("microVM %q not found", name)
+	}
+
+	if status == "running" {
 		if !force {
 			return fmt.Errorf("microVM %q is running. Stop it first (mvm stop %s) or use --force", name, name)
 		}
 		fmt.Printf("Stopping microVM '%s'...\n", name)
-	}
-
-	// Ensure Lima is running for cleanup
-	if err := limaClient.EnsureRunning(); err != nil {
-		return err
+		if err := sc.StopVM(ctx, name, true); err != nil {
+			return err
+		}
 	}
 
 	fmt.Printf("Deleting microVM '%s'...\n", name)
-
-	// Clean up all resources inside Lima
-	if err := firecracker.Cleanup(limaClient, vm); err != nil {
-		fmt.Printf("  Warning: cleanup error: %v\n", err)
-	}
-	fmt.Println("  ✓ Resources cleaned up")
-
-	// Remove from state
-	if err := store.RemoveVM(name); err != nil {
+	if err := sc.DeleteVM(ctx, name); err != nil {
 		return err
 	}
-	fmt.Println("  ✓ State removed")
+	fmt.Println("  ✓ Deleted")
 
 	return nil
 }
 
-func runDeleteAll(limaClient *lima.Client, store *state.Store, force bool) error {
-	vms, err := store.ListVMs()
+func runDeleteAll(force bool) error {
+	sc, err := requireDaemon()
 	if err != nil {
 		return err
 	}
+
+	ctx := context.Background()
+	vms, err := sc.ListVMs(ctx)
+	if err != nil {
+		return err
+	}
+
 	if len(vms) == 0 {
 		fmt.Println("No microVMs to delete.")
 		return nil
@@ -98,7 +114,7 @@ func runDeleteAll(limaClient *lima.Client, store *state.Store, force bool) error
 	}
 
 	for _, vm := range vms {
-		if err := runDelete(limaClient, store, vm.Name, force); err != nil {
+		if err := runDelete(vm.Name, force); err != nil {
 			fmt.Printf("  Warning: failed to delete %s: %v\n", vm.Name, err)
 		}
 	}

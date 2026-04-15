@@ -43,16 +43,16 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 	rootCmd.AddCommand(
 		newVersionCmd(version, commit, date),
 		newInitCmd(limaClient, store),
-		newStartCmd(limaClient, store),
-		newStopCmd(limaClient, store),
-		newPauseCmd(limaClient, store),
-		newResumeCmd(limaClient, store),
-		newSSHCmd(limaClient, store),
-		newExecCmd(limaClient, store),
+		newStartCmd(store),
+		newStopCmd(store),
+		newPauseCmd(store),
+		newResumeCmd(store),
+		newSSHCmd(store),
+		newExecCmd(store),
 		newLogsCmd(limaClient, store),
-		newListCmd(limaClient, store),
-		newDeleteCmd(limaClient, store),
-		newPoolCmd(limaClient, store),
+		newListCmd(),
+		newDeleteCmd(),
+		newPoolCmd(),
 		newDoctorCmd(limaClient, store),
 		newUpdateCmd(version),
 		newDiffCmd(limaClient, store),
@@ -62,7 +62,6 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newInstallCmd(limaClient, store),
 		newServeCmd(limaClient, store),
 		newMenuCmd(),
-		newExecDirectCmd(),
 	)
 
 	return rootCmd

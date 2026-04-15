@@ -65,3 +65,28 @@ func TestAppleVZIsRunningWithHighPID(t *testing.T) {
 		t.Error("nonexistent PID should not be running")
 	}
 }
+
+func TestAppleVZIPCSocketPath(t *testing.T) {
+	b := NewAppleVZBackend("/home/me/.mvm")
+	got := b.IPCSocketPath("foo")
+	want := "/home/me/.mvm/run/vz-foo.sock"
+	if got != want {
+		t.Errorf("IPCSocketPath = %q, want %q", got, want)
+	}
+}
+
+func TestAppleVZAgentClientNotNil(t *testing.T) {
+	b := NewAppleVZBackend("/home/me/.mvm")
+	c := b.AgentClient("foo")
+	if c == nil {
+		t.Fatal("AgentClient returned nil")
+	}
+}
+
+func TestAppleVZHelperClientNotNil(t *testing.T) {
+	b := NewAppleVZBackend("/home/me/.mvm")
+	c := b.HelperClient("foo")
+	if c == nil {
+		t.Fatal("HelperClient returned nil")
+	}
+}

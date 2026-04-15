@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -199,8 +200,14 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 			}
 
 			if now.Sub(lastActive) > timeout {
-				// Pause the VM
-				if err := firecracker.Pause(limaClient, vm); err == nil {
+				// Pause the VM via daemon if available, fall back to direct.
+				sc, scErr := requireDaemon()
+				if scErr == nil {
+					if err := sc.PauseVM(context.Background(), vm.Name); err == nil {
+						vm.Status = "paused"
+						fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
+					}
+				} else if err := firecracker.Pause(limaClient, vm); err == nil {
 					vm.Status = "paused"
 					fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
 				}

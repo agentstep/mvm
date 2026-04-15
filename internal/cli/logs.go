@@ -68,7 +68,7 @@ func runLogs(limaClient *lima.Client, store *state.Store, name string, follow, b
 			logCmd = "tail -f /var/log/messages 2>/dev/null || dmesg -w"
 		}
 		// Follow mode needs interactive TTY
-		return runExec(limaClient, store, name, []string{"sh", "-c", logCmd}, true, "", nil, "")
+		return runExec(store, name, []string{"sh", "-c", logCmd}, true, "", nil, "")
 	}
 
 	if tail > 0 {
@@ -76,7 +76,7 @@ func runLogs(limaClient *lima.Client, store *state.Store, name string, follow, b
 	} else {
 		logCmd = "cat /var/log/messages 2>/dev/null || dmesg"
 	}
-	return runExec(limaClient, store, name, []string{"sh", "-c", logCmd}, false, "", nil, "")
+	return runExec(store, name, []string{"sh", "-c", logCmd}, false, "", nil, "")
 }
 
 func showBootLog(limaClient *lima.Client, vm *state.VM, follow bool, tail int) error {

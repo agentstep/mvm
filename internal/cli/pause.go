@@ -1,15 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/agentstep/mvm/internal/firecracker"
-	"github.com/agentstep/mvm/internal/lima"
 	"github.com/agentstep/mvm/internal/state"
 	"github.com/spf13/cobra"
 )
 
-func newPauseCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newPauseCmd(store *state.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "pause <name>",
 		Short: "Pause a running microVM (checkpoint in memory)",
@@ -20,45 +19,37 @@ Resume instantly with 'mvm resume'. No CPU is consumed while paused.
   mvm resume my-app   # instant resume`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPause(limaClient, store, args[0])
+			return runPause(store, args[0])
 		},
 	}
 }
 
-func newResumeCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newResumeCmd(store *state.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <name>",
 		Short: "Resume a paused microVM",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runResume(limaClient, store, args[0])
+			return runResume(store, args[0])
 		},
 	}
 }
 
-func runPause(limaClient *lima.Client, store *state.Store, name string) error {
-	vm, err := store.GetVM(name)
+func runPause(store *state.Store, name string) error {
+	// Check for Apple VZ backend (not supported)
+	vm, _ := store.GetVM(name)
+	if vm != nil && vm.Backend == "applevz" {
+		return fmt.Errorf("pause/resume is not supported on the Apple VZ backend. It requires Firecracker's snapshot support (M3+)")
+	}
+
+	// Firecracker path — use daemon API
+	sc, err := requireDaemon()
 	if err != nil {
 		return err
 	}
-	if vm.Backend == "applevz" {
-		return fmt.Errorf("pause/resume is not supported on the Apple VZ backend. It requires Firecracker's snapshot support (M3+)")
-	}
-	if vm.Status != "running" {
-		return fmt.Errorf("microVM %q is not running (status: %s)", name, vm.Status)
-	}
 
-	if err := limaClient.EnsureRunning(); err != nil {
-		return err
-	}
-
-	if err := firecracker.Pause(limaClient, vm); err != nil {
-		return err
-	}
-
-	if err := store.UpdateVM(name, func(v *state.VM) {
-		v.Status = "paused"
-	}); err != nil {
+	ctx := context.Background()
+	if err := sc.PauseVM(ctx, name); err != nil {
 		return err
 	}
 
@@ -66,29 +57,21 @@ func runPause(limaClient *lima.Client, store *state.Store, name string) error {
 	return nil
 }
 
-func runResume(limaClient *lima.Client, store *state.Store, name string) error {
-	vm, err := store.GetVM(name)
+func runResume(store *state.Store, name string) error {
+	// Check for Apple VZ backend (not supported)
+	vm, _ := store.GetVM(name)
+	if vm != nil && vm.Backend == "applevz" {
+		return fmt.Errorf("pause/resume is not supported on the Apple VZ backend")
+	}
+
+	// Firecracker path — use daemon API
+	sc, err := requireDaemon()
 	if err != nil {
 		return err
 	}
-	if vm.Backend == "applevz" {
-		return fmt.Errorf("pause/resume is not supported on the Apple VZ backend")
-	}
-	if vm.Status != "paused" {
-		return fmt.Errorf("microVM %q is not paused (status: %s)", name, vm.Status)
-	}
 
-	if err := limaClient.EnsureRunning(); err != nil {
-		return err
-	}
-
-	if err := firecracker.Resume(limaClient, vm); err != nil {
-		return err
-	}
-
-	if err := store.UpdateVM(name, func(v *state.VM) {
-		v.Status = "running"
-	}); err != nil {
+	ctx := context.Background()
+	if err := sc.ResumeVM(ctx, name); err != nil {
 		return err
 	}
 

@@ -8,18 +8,16 @@ import (
 	"time"
 
 	"os"
-	"os/exec"
 	"path/filepath"
 
-	"github.com/agentstep/mvm/internal/firecracker"
-	"github.com/agentstep/mvm/internal/lima"
+	"github.com/agentstep/mvm/internal/agentclient"
 	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 	"github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 )
 
-func newStartCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newStartCmd(store *state.Store) *cobra.Command {
 	var (
 		detach    bool
 		ports     []string
@@ -51,7 +49,7 @@ func newStartCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runStart(limaClient, store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB)
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB)
 		},
 	}
 
@@ -92,7 +90,7 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 	return result, nil
 }
 
-func runStart(limaClient *lima.Client, store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int) error {
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int) error {
 	initialized, err := store.IsInitialized()
 	if err != nil {
 		return err
@@ -108,156 +106,32 @@ func runStart(limaClient *lima.Client, store *state.Store, name string, detach b
 		return runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes)
 	}
 
-	// Fast path: route through daemon (direct syscalls inside Lima, no SSH)
-	sc := server.DefaultClient()
-	if sc.IsAvailable() {
-		resp, err := sc.CreateVM(context.Background(), server.CreateVMRequest{
-			Name:      name,
-			Cpus:      cpus,
-			MemoryMB:  memoryMB,
-			Ports:     ports,
-			NetPolicy: netPolicy,
-		})
-		if err == nil {
-			fmt.Printf("\n  %s is running!\n", resp.Name)
-			fmt.Printf("    IP:   %s\n", resp.GuestIP)
-			fmt.Printf("    Exec: mvm exec %s -- <command>\n", resp.Name)
-			return nil
-		}
-		// Daemon failed — fall through to direct path
-	}
-
-	// Firecracker path — ensure Lima is running
-	if err := limaClient.EnsureRunning(); err != nil {
-		return err
-	}
-
-	// Atomically reserve name + net index before doing any work.
-	// This prevents two concurrent `mvm start` from picking the same slot.
-	now := time.Now()
-	vm := &state.VM{
-		Name:      name,
-		Status:    "starting",
-		Ports:     ports,
-		NetPolicy: netPolicy,
-		Cpus:      cpus,
-		MemoryMB:  memoryMB,
-		CreatedAt: now,
-	}
-	netIndex, err := store.ReserveVM(vm)
+	// Firecracker path: route through daemon
+	sc, err := requireDaemon()
 	if err != nil {
 		return err
 	}
-	alloc := state.AllocateNet(netIndex)
 
-	fmt.Printf("Starting microVM '%s'...\n", name)
-
-	// Declare before cleanup closure so it captures by reference
-	var pid int
-	var socketPath string
-	fromPool := false
-
-	// If anything fails after reservation, clean up state + any running resources
-	cleanup := func() {
-		cleanupVM := &state.VM{
-			Name:       name,
-			PID:        pid,
-			SocketPath: socketPath,
-			TAPDevice:  alloc.TAPDev,
-		}
-		firecracker.Cleanup(limaClient, cleanupVM)
-		store.RemoveVM(name)
-	}
-
-	// Only claim from pool if using default resources (pool VMs have fixed config)
-	usePool := (cpus <= 0 || cpus == firecracker.GuestVcpuCount) && (memoryMB <= 0 || memoryMB == firecracker.GuestMemSizeMiB)
-	if usePool {
-		var claimErr error
-		var claimedSocket string
-		pid, claimedSocket, claimErr = firecracker.ClaimPoolSlot(limaClient, name, alloc)
-		if claimErr == nil && pid > 0 {
-			fromPool = true
-			socketPath = claimedSocket
-			fmt.Println("  Claimed from warm pool (instant)")
-			firecracker.ReplenishPool(limaClient)
-		}
-	}
-
-	if !fromPool {
-		socketPath = firecracker.SocketPath(name)
-		useSnapshot := firecracker.HasSnapshot(limaClient)
-		if useSnapshot {
-			pid, err = firecracker.StartFromSnapshot(limaClient, name, alloc)
-			if err != nil {
-				useSnapshot = false
-			}
-		}
-		if !useSnapshot {
-			pid, err = firecracker.Start(limaClient, name, alloc, cpus, memoryMB)
-			if err != nil {
-				cleanup()
-				return err
-			}
-		}
-	}
-
-	// Update the reservation with runtime details
-	if err := store.UpdateVM(name, func(v *state.VM) {
-		v.Status = "running"
-		v.GuestIP = alloc.GuestIP
-		v.TAPIP = alloc.TAPIP
-		v.TAPDevice = alloc.TAPDev
-		v.GuestMAC = alloc.GuestMAC
-		v.SocketPath = socketPath
-		v.PID = pid
-		v.RootfsPath = firecracker.VMDir(name) + "/rootfs.ext4"
-	}); err != nil {
-		cleanup()
+	ctx := context.Background()
+	resp, err := sc.CreateVM(ctx, server.CreateVMRequest{
+		Name:      name,
+		Cpus:      cpus,
+		MemoryMB:  memoryMB,
+		Ports:     ports,
+		NetPolicy: netPolicy,
+		Volumes:   volumes,
+		Seccomp:   seccomp,
+	})
+	if err != nil {
 		return err
 	}
 
-	// Refresh the local vm with the fields we just persisted
-	vm.Status = "running"
-	vm.GuestIP = alloc.GuestIP
-	vm.TAPIP = alloc.TAPIP
-	vm.TAPDevice = alloc.TAPDev
-	vm.GuestMAC = alloc.GuestMAC
-	vm.SocketPath = socketPath
-	vm.PID = pid
-	vm.RootfsPath = firecracker.VMDir(name) + "/rootfs.ext4"
-
-	// Apply post-boot configuration (same for pool and fresh boot)
-	applyPostBoot := func() {
-		firecracker.SetupPortForwarding(limaClient, vm)
-		firecracker.ApplyNetworkPolicyViaAgent(limaClient, vm)
-		firecracker.SetupVolumeMounts(limaClient, vm, volumes)
-		firecracker.ApplySeccompViaAgent(limaClient, vm, seccomp)
+	fmt.Printf("\n  %s is running!\n", resp.Name)
+	fmt.Printf("    IP:   %s\n", resp.GuestIP)
+	for _, p := range resp.Ports {
+		fmt.Printf("    Port: localhost:%d -> %s:%d/%s\n", p.HostPort, resp.GuestIP, p.GuestPort, p.Proto)
 	}
-
-	if fromPool {
-		applyPostBoot()
-		fmt.Printf("\n  %s is running!\n", name)
-		fmt.Printf("    IP:   %s\n", alloc.GuestIP)
-		printPorts(vm)
-		fmt.Printf("    SSH:  mvm ssh %s\n", name)
-		if watch != "" {
-			return runWatch(limaClient, vm, watch)
-		}
-		return nil
-	}
-
-	// Apply post-boot config in background (don't block on guest readiness)
-	go func() {
-		if firecracker.WaitForGuest(limaClient, alloc.GuestIP, 120*time.Second) {
-			firecracker.SetupGuestNetworkViaAgent(limaClient, alloc.GuestIP, alloc.TAPIP)
-			applyPostBoot()
-		}
-	}()
-
-	fmt.Printf("\n  %s is running!\n", name)
-	fmt.Printf("    IP:   %s\n", alloc.GuestIP)
-	printPorts(vm)
-	fmt.Printf("    Exec: mvm exec %s -- <command>\n", name)
+	fmt.Printf("    Exec: mvm exec %s -- <command>\n", resp.Name)
 
 	return nil
 }
@@ -268,33 +142,12 @@ func printPorts(vm *state.VM) {
 	}
 }
 
-// runWatch watches a local directory for changes and syncs to the guest.
-func runWatch(limaClient *lima.Client, vm *state.VM, dir string) error {
-	if !isDirectory(dir) {
-		return fmt.Errorf("watch path %q is not a directory", dir)
-	}
-
-	fmt.Printf("\n  Watching %s for changes (Ctrl-C to stop)...\n", dir)
-
-	hash, err := hashDirectory(dir)
-	if err != nil {
-		return fmt.Errorf("watch: %w", err)
-	}
-
-	for {
-		newHash, err := watchDirectory(dir, 1*time.Second, hash)
-		if err != nil {
-			return err
-		}
-		hash = newHash
-
-		fmt.Printf("  Change detected, syncing to %s...\n", vm.Name)
-		firecracker.SetupVolumeMounts(limaClient, vm, []string{dir + ":/app"})
-		fmt.Println("  Synced.")
-	}
-}
-
 // runStartAppleVZ starts a VM using the Apple Virtualization.framework backend.
+//
+// As of PR #2 this path drives the in-guest agent over vsock via the
+// per-VM mvm-vz helper IPC socket — no SSH, no TAP-IP TCP, no Lima.
+// The previous SSH-based post-boot path (and the applyPostBootDirect
+// helper that went with it) has been removed.
 func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string) error {
 	now := time.Now()
 	vmEntry := &state.VM{
@@ -331,7 +184,6 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		alloc.GuestIP, alloc.TAPIP)
 
 	vzBackend := vm.NewAppleVZBackend(filepath.Join(home, ".mvm"))
-	logPath := filepath.Join(vmDir, "console.log")
 
 	fmt.Printf("Starting microVM '%s' (Apple VZ)...\n", name)
 
@@ -343,13 +195,12 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	if vzMem <= 0 {
 		vzMem = 1024
 	}
-	pid, err := vzBackend.StartVM(name, kernelPath, vmRootfs, bootArgs, alloc.GuestMAC, vzCpus, vzMem, volumes)
+	startResult, err := vzBackend.StartVM(name, kernelPath, vmRootfs, bootArgs, alloc.GuestMAC, vzCpus, vzMem, volumes)
 	if err != nil {
 		store.RemoveVM(name)
 		return fmt.Errorf("start VM: %w", err)
 	}
-
-	_ = logPath
+	pid := startResult.PID
 
 	if err := store.UpdateVM(name, func(v *state.VM) {
 		v.Status = "running"
@@ -366,86 +217,104 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	}
 
 	updatedVM := &state.VM{
-		Name:      name,
-		Status:    "running",
-		GuestIP:   alloc.GuestIP,
-		TAPIP:     alloc.TAPIP,
-		GuestMAC:  alloc.GuestMAC,
-		PID:       pid,
+		Name:       name,
+		Status:     "running",
+		GuestIP:    alloc.GuestIP,
+		TAPIP:      alloc.TAPIP,
+		GuestMAC:   alloc.GuestMAC,
+		PID:        pid,
 		RootfsPath: vmRootfs,
-		Backend:   "applevz",
-		Ports:     ports,
-		NetPolicy: netPolicy,
+		Backend:    "applevz",
+		Ports:      ports,
+		NetPolicy:  netPolicy,
 	}
 
-	// Wait for SSH to become ready (direct from macOS, no Lima)
-	keyPath := filepath.Join(mvmDir, "keys", "mvm.id_ed25519")
-	fmt.Println("  Waiting for SSH...")
-	sshReady := false
-	deadline := time.Now().Add(120 * time.Second)
-	for time.Now().Before(deadline) {
-		cmd := exec.Command("ssh", "-i", keyPath,
-			"-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=no",
-			"-o", "UserKnownHostsFile=/dev/null",
-			fmt.Sprintf("root@%s", alloc.GuestIP), "echo SSH_OK")
-		if out, err := cmd.Output(); err == nil && strings.Contains(string(out), "SSH_OK") {
-			sshReady = true
-			break
+	// Wait for the in-guest agent to be reachable over vsock. The helper
+	// IPC socket was already bound before StartVM returned (we read the
+	// status line), so any failure here is the agent not being up yet.
+	agent := vzBackend.AgentClient(name)
+	fmt.Println("  Waiting for guest agent...")
+	agentReady := waitForAgent(agent, 60*time.Second)
+
+	if agentReady {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// Configure guest networking via the agent.
+		setupCmd := fmt.Sprintf(
+			"ip route add default via %s dev eth0 2>/dev/null; echo 'nameserver 8.8.8.8' > /etc/resolv.conf",
+			alloc.TAPIP,
+		)
+		if _, err := agent.Exec(ctx, setupCmd, ""); err != nil {
+			fmt.Printf("  Warning: setup network: %v\n", err)
 		}
-		time.Sleep(250 * time.Millisecond)
-	}
 
-	if sshReady {
-		// Configure guest networking
-		exec.Command("ssh", "-i", keyPath,
-			"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-			fmt.Sprintf("root@%s", alloc.GuestIP),
-			fmt.Sprintf("ip route add default via %s dev eth0 2>/dev/null; echo 'nameserver 8.8.8.8' > /etc/resolv.conf", alloc.TAPIP),
-		).Run()
-
-		// Apply post-boot config via direct SSH
-		applyPostBootDirect(updatedVM, keyPath, ports, netPolicy)
+		// Apply network policy via the agent.
+		if err := applyVZNetworkPolicy(ctx, agent, netPolicy); err != nil {
+			fmt.Printf("  Warning: apply network policy: %v\n", err)
+		}
 
 		fmt.Printf("\n  %s is running! (Apple VZ)\n", name)
 		fmt.Printf("    IP:   %s\n", alloc.GuestIP)
 		printPorts(updatedVM)
-		fmt.Printf("    SSH:  mvm ssh %s\n", name)
+		fmt.Printf("    Exec: mvm exec %s -- <command>\n", name)
 	} else {
-		fmt.Printf("\n  %s started but SSH not ready yet.\n", name)
-		fmt.Printf("    SSH:  mvm ssh %s (when ready)\n", name)
+		fmt.Printf("\n  %s started but agent not reachable yet.\n", name)
+		fmt.Printf("    Exec: mvm exec %s -- <command>  (when ready)\n", name)
 	}
-	fmt.Println("    Note: pause/resume not available on Apple VZ backend")
 	return nil
 }
 
-// applyPostBootDirect applies port forwarding and network policy via direct SSH (Apple VZ).
-func applyPostBootDirect(vm *state.VM, keyPath string, ports []state.PortMap, netPolicy string) {
-	if netPolicy != "" && netPolicy != "open" {
-		// Apply iptables rules inside guest via direct SSH
-		var rules string
-		if netPolicy == "deny" {
-			rules = "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; iptables -A OUTPUT -p udp --dport 53 -j ACCEPT; iptables -A OUTPUT -o lo -j ACCEPT; iptables -A OUTPUT -j DROP"
-		} else if strings.HasPrefix(netPolicy, "allow:") {
-			domains := strings.TrimPrefix(netPolicy, "allow:")
-			rules = "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; iptables -A OUTPUT -p udp --dport 53 -j ACCEPT; iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT; iptables -A OUTPUT -o lo -j ACCEPT"
-			for _, domain := range strings.Split(domains, ",") {
-				domain = strings.TrimSpace(domain)
-				if domain != "" {
-					rules += fmt.Sprintf("; for ip in $(getent hosts %s 2>/dev/null | awk '{print $1}'); do iptables -A OUTPUT -d $ip -j ACCEPT; done", domain)
-				}
-			}
-			rules += "; iptables -A OUTPUT -j DROP"
+// waitForAgent polls the agent client until Ping succeeds or the deadline
+// is hit.
+func waitForAgent(c *agentclient.Client, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := c.Ping(ctx)
+		cancel()
+		if err == nil {
+			return true
 		}
-		if rules != "" {
-			exec.Command("ssh", "-i", keyPath,
-				"-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-				fmt.Sprintf("root@%s", vm.GuestIP), rules,
-			).Run()
-		}
+		time.Sleep(250 * time.Millisecond)
 	}
-	// Note: port forwarding on Apple VZ uses NAT, not iptables DNAT in Lima.
-	// Ports are logged but forwarding depends on VZ network configuration.
+	return false
+}
+
+// applyVZNetworkPolicy enforces a network policy by issuing iptables rules
+// inside the guest via the agent. This is the same shape as the FC path
+// in internal/firecracker/process.go ApplyNetworkPolicyViaAgent — a
+// follow-up will move both to a host-side packet filter.
+func applyVZNetworkPolicy(ctx context.Context, agent *agentclient.Client, netPolicy string) error {
+	if netPolicy == "" || netPolicy == "open" {
+		return nil
+	}
+	var rules string
+	switch {
+	case netPolicy == "deny":
+		rules = "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; " +
+			"iptables -A OUTPUT -p udp --dport 53 -j ACCEPT; " +
+			"iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT; " +
+			"iptables -A OUTPUT -o lo -j ACCEPT; " +
+			"iptables -A OUTPUT -j DROP"
+	case strings.HasPrefix(netPolicy, "allow:"):
+		domains := strings.TrimPrefix(netPolicy, "allow:")
+		rules = "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; " +
+			"iptables -A OUTPUT -p udp --dport 53 -j ACCEPT; " +
+			"iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT; " +
+			"iptables -A OUTPUT -o lo -j ACCEPT"
+		for _, domain := range strings.Split(domains, ",") {
+			domain = strings.TrimSpace(domain)
+			if domain != "" {
+				rules += fmt.Sprintf("; for ip in $(getent hosts %s 2>/dev/null | awk '{print $1}'); do iptables -A OUTPUT -d $ip -j ACCEPT; done", domain)
+			}
+		}
+		rules += "; iptables -A OUTPUT -j DROP"
+	default:
+		return fmt.Errorf("unknown network policy: %s", netPolicy)
+	}
+	_, err := agent.Exec(ctx, rules, "")
+	return err
 }
 
 // execLocal is defined in init.go
-

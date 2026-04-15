@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,24 +9,21 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/agentstep/mvm/internal/firecracker"
-	"github.com/agentstep/mvm/internal/lima"
-	"github.com/agentstep/mvm/internal/state"
 	"github.com/spf13/cobra"
 )
 
-func newListCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newListCmd() *cobra.Command {
 	var (
 		jsonOutput bool
 		quiet      bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "list",
-		Short: "List all microVMs",
+		Use:     "list",
+		Short:   "List all microVMs",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runList(limaClient, store, jsonOutput, quiet)
+			return runList(jsonOutput, quiet)
 		},
 	}
 
@@ -35,30 +33,16 @@ func newListCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 	return cmd
 }
 
-func runList(limaClient *lima.Client, store *state.Store, jsonOutput, quiet bool) error {
-	vms, err := store.ListVMs()
+func runList(jsonOutput, quiet bool) error {
+	sc, err := requireDaemon()
 	if err != nil {
 		return err
 	}
 
-	// Reconcile state with reality
-	limaRunning := false
-	if err := limaClient.EnsureRunning(); err == nil {
-		limaRunning = true
-	}
-
-	if limaRunning {
-		for _, vm := range vms {
-			if vm.Status == "running" && !firecracker.IsRunning(limaClient, vm.PID) {
-				now := time.Now()
-				store.UpdateVM(vm.Name, func(v *state.VM) {
-					v.Status = "stopped"
-					v.StoppedAt = &now
-				})
-				vm.Status = "stopped"
-				vm.StoppedAt = &now
-			}
-		}
+	ctx := context.Background()
+	vms, err := sc.ListVMs(ctx)
+	if err != nil {
+		return err
 	}
 
 	if len(vms) == 0 {
