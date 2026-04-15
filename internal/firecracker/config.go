@@ -203,6 +203,78 @@ echo "PID:$FC_PID"
 		configJSON)
 }
 
+// StartScriptWithImage generates a start script that copies from a custom image
+// instead of the default base.ext4.
+func StartScriptWithImage(name string, alloc state.NetAllocation, cpus, memMB int, imageName string) string {
+	socketPath := SocketPath(name)
+	vmDir := VMDir(name)
+
+	configJSON, _ := GenerateConfig(name, alloc, cpus, memMB)
+
+	imagePath := CacheDir + "/" + imageName + ".ext4"
+
+	return fmt.Sprintf(`#!/bin/bash
+set -e
+
+VM_NAME="%s"
+SOCKET_PATH="%s"
+VM_DIR="%s"
+IMAGE_PATH="%s"
+RUN_DIR="%s"
+TAP_DEV="%s"
+TAP_IP="%s"
+
+echo "Preparing microVM '${VM_NAME}' (image: %s)..."
+
+# Create VM directory and copy custom rootfs (sparse copy — fast, skips zero blocks)
+sudo mkdir -p "$VM_DIR"
+sudo cp --sparse=always "$IMAGE_PATH" "$VM_DIR/rootfs.ext4"
+echo "  Rootfs ready (custom image: %s)"
+
+# Set up TAP device
+sudo ip link del "$TAP_DEV" 2>/dev/null || true
+sudo ip tuntap add dev "$TAP_DEV" mode tap
+sudo ip addr add "${TAP_IP}/30" dev "$TAP_DEV"
+sudo ip link set dev "$TAP_DEV" up
+echo "  Network: ${TAP_DEV}"
+
+# Create run directory and write config
+sudo mkdir -p "$RUN_DIR"
+sudo rm -f "$SOCKET_PATH"
+sudo rm -f "$RUN_DIR/${VM_NAME}.vsock" "$RUN_DIR/${VM_NAME}.vsock_5123"
+
+cat > "/tmp/mvm-${VM_NAME}.json" <<'FCCONFIG'
+%s
+FCCONFIG
+sudo mv "/tmp/mvm-${VM_NAME}.json" "$VM_DIR/config.json"
+
+# Start Firecracker with config file (no API socket needed for boot)
+sudo touch "$VM_DIR/firecracker.log"
+sudo chmod 666 "$VM_DIR/firecracker.log"
+sudo setsid firecracker \
+    --config-file "$VM_DIR/config.json" \
+    --api-sock "$SOCKET_PATH" \
+    \
+    </dev/null >"$VM_DIR/firecracker.log" 2>&1 &
+FC_PID=$!
+
+# Brief wait to confirm process started
+sleep 0.2
+if ! sudo kill -0 $FC_PID 2>/dev/null; then
+    echo "ERROR: Firecracker failed to start" >&2
+    sudo cat "$VM_DIR/firecracker.log" >&2
+    sudo ip link del "$TAP_DEV" 2>/dev/null || true
+    exit 1
+fi
+
+echo "  VM started (PID: $FC_PID)"
+echo "PID:$FC_PID"
+`, name, socketPath, vmDir, imagePath, RunDir,
+		alloc.TAPDev, alloc.TAPIP,
+		imageName, imageName,
+		configJSON)
+}
+
 // StartExistingScript boots a VM using its existing rootfs (no base.ext4 copy).
 // Used after mvm install modifies the rootfs via chroot.
 func StartExistingScript(name string, alloc state.NetAllocation, cpus, memMB int) string {

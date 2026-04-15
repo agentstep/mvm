@@ -58,6 +58,8 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newDiffCmd(limaClient, store),
 		newTemplateCmd(limaClient, store),
 		newSnapshotCmd(),
+		newBuildCmd(),
+		newImagesCmd(),
 		newIdleCmd(limaClient, store),
 		newInstallCmd(limaClient, store),
 		newServeCmd(limaClient, store),

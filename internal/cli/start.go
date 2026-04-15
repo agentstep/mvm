@@ -27,6 +27,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 		watch     string
 		cpus      int
 		memoryMB  int
+		image     string
 	)
 
 	cmd := &cobra.Command{
@@ -42,14 +43,15 @@ func newStartCmd(store *state.Store) *cobra.Command {
   mvm start my-app -v ./src:/app         # mount host dir into guest
   mvm start my-app --seccomp strict      # restrict syscalls
   mvm start my-app --watch ./src         # rebuild on file changes
-  mvm start my-app --cpus 4 --memory 2048  # custom resources`,
+  mvm start my-app --cpus 4 --memory 2048  # custom resources
+  mvm start my-app --image my-image       # use custom rootfs`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			portMaps, err := parsePorts(ports)
 			if err != nil {
 				return err
 			}
-			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB)
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image)
 		},
 	}
 
@@ -61,6 +63,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 	cmd.Flags().StringVar(&watch, "watch", "", "watch directory for changes and sync to guest")
 	cmd.Flags().IntVar(&cpus, "cpus", 0, "vCPU count (default: 2)")
 	cmd.Flags().IntVar(&memoryMB, "memory", 0, "RAM in MiB (default: 1024)")
+	cmd.Flags().StringVar(&image, "image", "", "custom rootfs image name (built with mvm build)")
 
 	return cmd
 }
@@ -90,7 +93,7 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 	return result, nil
 }
 
-func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int) error {
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string) error {
 	initialized, err := store.IsInitialized()
 	if err != nil {
 		return err
@@ -121,6 +124,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 		NetPolicy: netPolicy,
 		Volumes:   volumes,
 		Seccomp:   seccomp,
+		Image:     image,
 	})
 	if err != nil {
 		return err

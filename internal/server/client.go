@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
+	"github.com/agentstep/mvm/internal/firecracker"
 )
 
 // Client communicates with the mvm daemon via Unix socket.
@@ -315,6 +316,60 @@ func (c *Client) SnapshotDelete(ctx context.Context, snapName string) error {
 		var errResp struct{ Error string }
 		json.NewDecoder(resp.Body).Decode(&errResp)
 		return fmt.Errorf("snapshot delete failed: %s", errResp.Error)
+	}
+	return nil
+}
+
+// Build sends a build request to create a custom rootfs image.
+func (c *Client) Build(ctx context.Context, imageName string, steps []firecracker.BuildStep, sizeMB int) error {
+	body, _ := json.Marshal(BuildRequest{
+		ImageName: imageName,
+		Steps:     steps,
+		SizeMB:    sizeMB,
+	})
+	req, _ := http.NewRequestWithContext(ctx, "POST", "http://mvm/build", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var errResp struct{ Error string }
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		return fmt.Errorf("build failed: %s", errResp.Error)
+	}
+	return nil
+}
+
+// ImageList returns all available custom rootfs images.
+func (c *Client) ImageList(ctx context.Context) ([]ImageInfo, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://mvm/images", nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result []ImageInfo
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result, nil
+}
+
+// ImageDelete removes a custom rootfs image by name.
+func (c *Client) ImageDelete(ctx context.Context, name string) error {
+	req, _ := http.NewRequestWithContext(ctx, "DELETE",
+		fmt.Sprintf("http://mvm/images/%s", name), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var errResp struct{ Error string }
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		return fmt.Errorf("image delete failed: %s", errResp.Error)
 	}
 	return nil
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
@@ -28,6 +29,20 @@ type CreateVMRequest struct {
 	NetPolicy string          `json:"net_policy,omitempty"`
 	Volumes   []string        `json:"volumes,omitempty"`
 	Seccomp   string          `json:"seccomp,omitempty"`
+	Image     string          `json:"image,omitempty"`
+}
+
+// BuildRequest is the body for POST /build.
+type BuildRequest struct {
+	ImageName string               `json:"image_name"`
+	Steps     []firecracker.BuildStep `json:"steps"`
+	SizeMB    int                  `json:"size_mb,omitempty"`
+}
+
+// ImageInfo describes a custom rootfs image.
+type ImageInfo struct {
+	Name   string `json:"name"`
+	SizeMB int    `json:"size_mb"`
 }
 
 type ExecRequest struct {
@@ -132,10 +147,22 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	alloc := state.AllocateNet(netIndex)
 
+	// If a custom image is specified, verify it exists.
+	if req.Image != "" {
+		imagePath := firecracker.CacheDir + "/" + req.Image + ".ext4"
+		if _, err := os.Stat(imagePath); err != nil {
+			s.store.RemoveVM(req.Name)
+			httpError(w, fmt.Errorf("image %q not found (expected %s)", req.Image, imagePath), http.StatusBadRequest)
+			return
+		}
+	}
+
 	var pid int
 	var socketPath string
 
-	usePool := (req.Cpus <= 0 || req.Cpus == firecracker.GuestVcpuCount) &&
+	// Custom images can't use pooled VMs — the pool uses base.ext4.
+	usePool := req.Image == "" &&
+		(req.Cpus <= 0 || req.Cpus == firecracker.GuestVcpuCount) &&
 		(req.MemoryMB <= 0 || req.MemoryMB == firecracker.GuestMemSizeMiB)
 	if usePool {
 		claimedPid, claimedSocket, claimErr := firecracker.ClaimPoolSlot(s.executor, req.Name, alloc)
@@ -148,7 +175,11 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 	if pid == 0 {
 		socketPath = firecracker.SocketPath(req.Name)
-		pid, err = firecracker.Start(s.executor, req.Name, alloc, req.Cpus, req.MemoryMB)
+		if req.Image != "" {
+			pid, err = firecracker.StartWithImage(s.executor, req.Name, alloc, req.Cpus, req.MemoryMB, req.Image)
+		} else {
+			pid, err = firecracker.Start(s.executor, req.Name, alloc, req.Cpus, req.MemoryMB)
+		}
 		if err != nil {
 			s.store.RemoveVM(req.Name)
 			httpError(w, err, http.StatusInternalServerError)
@@ -656,6 +687,94 @@ func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := os.RemoveAll(snapDir); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
+	var req BuildRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, fmt.Errorf("invalid request: %w", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.ImageName == "" {
+		httpError(w, fmt.Errorf("image_name is required"), http.StatusBadRequest)
+		return
+	}
+	if len(req.Steps) == 0 {
+		httpError(w, fmt.Errorf("steps must not be empty"), http.StatusBadRequest)
+		return
+	}
+
+	sizeMB := req.SizeMB
+	if sizeMB <= 0 {
+		sizeMB = 512
+	}
+
+	if err := firecracker.BuildRootfs(s.executor, firecracker.CacheDir, req.ImageName, req.Steps, sizeMB); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"image":  req.ImageName,
+		"status": "built",
+	})
+}
+
+func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
+	entries, err := os.ReadDir(firecracker.CacheDir)
+	if err != nil {
+		// If the directory doesn't exist, return empty list.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]ImageInfo{})
+		return
+	}
+
+	var images []ImageInfo
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".ext4") {
+			continue
+		}
+		baseName := strings.TrimSuffix(name, ".ext4")
+		if baseName == "base" {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		sizeMB := int(info.Size() / (1024 * 1024))
+		images = append(images, ImageInfo{Name: baseName, SizeMB: sizeMB})
+	}
+
+	if images == nil {
+		images = []ImageInfo{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(images)
+}
+
+func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	imagePath := filepath.Join(firecracker.CacheDir, name+".ext4")
+	if _, err := os.Stat(imagePath); err != nil {
+		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
+		return
+	}
+
+	if err := os.Remove(imagePath); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}

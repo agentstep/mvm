@@ -116,6 +116,9 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("DELETE /snapshots/{name}", s.handleSnapshotDelete)
 	mux.HandleFunc("GET /pool", s.handlePoolStatus)
 	mux.HandleFunc("POST /pool/warm", s.handlePoolWarm)
+	mux.HandleFunc("POST /build", s.handleBuild)
+	mux.HandleFunc("GET /images", s.handleImageList)
+	mux.HandleFunc("DELETE /images/{name}", s.handleImageDelete)
 
 	s.httpServer = &http.Server{Handler: mux}
 

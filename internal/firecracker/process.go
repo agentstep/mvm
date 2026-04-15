@@ -19,6 +19,12 @@ func Start(ex Executor, name string, alloc state.NetAllocation, cpus, memMB int)
 	return runStartScript(ex, name, alloc, script)
 }
 
+// StartWithImage boots a VM using a custom rootfs image instead of base.ext4.
+func StartWithImage(ex Executor, name string, alloc state.NetAllocation, cpus, memMB int, imageName string) (int, error) {
+	script := StartScriptWithImage(name, alloc, cpus, memMB, imageName)
+	return runStartScript(ex, name, alloc, script)
+}
+
 // StartExisting boots a VM using its existing rootfs.
 func StartExisting(ex Executor, name string, alloc state.NetAllocation, cpus, memMB int) (int, error) {
 	script := StartExistingScript(name, alloc, cpus, memMB)
