@@ -106,7 +106,7 @@ func runSnapshotCreate(limaClient *lima.Client, store *state.Store, vmName, snap
 	snapDir := filepath.Join(snapshotBaseDir(), snapName)
 	fmt.Printf("Creating snapshot '%s' of VM '%s'...\n", snapName, vmName)
 
-	if err := firecracker.CreateDeltaSnapshot(limaClient, vm, snapDir); err != nil {
+	if err := firecracker.SnapshotVM(limaClient, vm, snapDir); err != nil {
 		return err
 	}
 
@@ -141,12 +141,24 @@ func runSnapshotRestore(limaClient *lima.Client, store *state.Store, vmName, sna
 		return fmt.Errorf("snapshot %q not found", snapName)
 	}
 
+	alloc := state.AllocateNet(vm.NetIndex)
+
 	fmt.Printf("Restoring VM '%s' from snapshot '%s'...\n", vmName, snapName)
-	if err := firecracker.RestoreDeltaSnapshot(limaClient, vm, snapDir); err != nil {
+	pid, socketPath, err := firecracker.RestoreVMSnapshot(limaClient, vmName, snapDir, alloc)
+	if err != nil {
 		return err
 	}
 
-	fmt.Printf("  ✓ VM '%s' restored from '%s'\n", vmName, snapName)
+	// Update VM state with new PID and socket
+	if err := store.UpdateVM(vmName, func(v *state.VM) {
+		v.PID = pid
+		v.SocketPath = socketPath
+		v.Status = "running"
+	}); err != nil {
+		return fmt.Errorf("save VM state: %w", err)
+	}
+
+	fmt.Printf("  ✓ VM '%s' restored from '%s' (PID: %d)\n", vmName, snapName, pid)
 	return nil
 }
 
