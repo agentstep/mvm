@@ -58,11 +58,13 @@ func runExec(store *state.Store, name string, remoteArgs []string, interactive b
 		// Put the terminal in raw mode so keystrokes are forwarded
 		// directly to the guest PTY without local echo or line buffering.
 		fd := int(os.Stdin.Fd())
-		oldState, err := term.MakeRaw(fd)
-		if err != nil {
-			return fmt.Errorf("failed to set raw terminal: %w", err)
+		if term.IsTerminal(fd) {
+			oldState, err := term.MakeRaw(fd)
+			if err != nil {
+				return fmt.Errorf("failed to set raw terminal: %w", err)
+			}
+			defer term.Restore(fd, oldState)
 		}
-		defer term.Restore(fd, oldState)
 
 		ctx := context.Background()
 		exitCode, err := sc.ExecInteractive(ctx, name, script, os.Stdin, os.Stdout)

@@ -280,12 +280,25 @@ func (s *Server) handleInteractiveExec(w http.ResponseWriter, r *http.Request, v
 	}
 	defer agentConn.Close()
 
-	// 2. Send exec_pty request to the agent.
-	agentReq := agentclient.ExecPtyRequest{
-		Type:    "exec_pty",
-		ID:      agentclient.NewID(),
-		Command: command,
+	// 2. Send exec_pty request to the agent — must match the agent's
+	// protocol.Request wire format: type + id at top level, pty nested.
+	agentReq := struct {
+		Type string `json:"type"`
+		ID   string `json:"id"`
+		Pty  struct {
+			Command string `json:"command"`
+			Rows    int    `json:"rows"`
+			Cols    int    `json:"cols"`
+			Term    string `json:"term,omitempty"`
+		} `json:"pty"`
+	}{
+		Type: "exec_pty",
+		ID:   agentclient.NewID(),
 	}
+	agentReq.Pty.Command = command
+	agentReq.Pty.Rows = 24
+	agentReq.Pty.Cols = 80
+	agentReq.Pty.Term = "xterm-256color"
 	if err := agentclient.WriteFrame(agentConn, agentReq); err != nil {
 		httpError(w, fmt.Errorf("send exec_pty: %w", err), http.StatusInternalServerError)
 		return

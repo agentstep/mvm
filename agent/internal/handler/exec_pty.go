@@ -94,10 +94,12 @@ func HandleExecPty(conn io.ReadWriter, req *protocol.ExecPtyRequest, id string) 
 	cmd.Stdin = slave
 	cmd.Stdout = slave
 	cmd.Stderr = slave
+	// Ctty must be the fd number in the child process. Since slave is
+	// assigned to stdin (fd 0), stdout (fd 1), and stderr (fd 2), use 0.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setsid:  true,
 		Setctty: true,
-		Ctty:    int(slave.Fd()),
+		Ctty:    0,
 	}
 
 	if err := cmd.Start(); err != nil {
