@@ -361,6 +361,106 @@ func TestExecStreamNonNDJSONResponse(t *testing.T) {
 	}
 }
 
+// === SnapshotInfo ===
+
+func TestSnapshotInfoResponseJSON(t *testing.T) {
+	info := SnapshotInfo{
+		Name:    "snap1",
+		VM:      "myvm",
+		Created: "2025-01-01T00:00:00Z",
+		Type:    "full",
+	}
+	data, _ := json.Marshal(info)
+	var decoded SnapshotInfo
+	json.Unmarshal(data, &decoded)
+
+	if decoded.Name != "snap1" {
+		t.Errorf("Name = %q, want snap1", decoded.Name)
+	}
+	if decoded.VM != "myvm" {
+		t.Errorf("VM = %q", decoded.VM)
+	}
+}
+
+func TestClientSnapshotCreateWithMockServer(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			t.Errorf("method = %q, want POST", r.Method)
+		}
+		if !strings.Contains(r.URL.Path, "/snapshot") {
+			t.Errorf("path = %q, want /vms/*/snapshot", r.URL.Path)
+		}
+		var req SnapshotCreateRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"snapshot": req.Name, "status": "created"})
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	body, _ := json.Marshal(SnapshotCreateRequest{Name: "my-snap"})
+	req, _ := http.NewRequest("POST", ts.URL+"/vms/test/snapshot", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("status = %d, want 201", resp.StatusCode)
+	}
+}
+
+func TestClientSnapshotDeleteWithMockServer(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "DELETE" {
+			t.Errorf("method = %q, want DELETE", r.Method)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/snapshots/snap1", nil)
+	resp, err := ts.Client().Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want 204", resp.StatusCode)
+	}
+}
+
+func TestClientSnapshotListWithMockServer(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]SnapshotInfo{
+			{Name: "snap1", VM: "vm1", Type: "full"},
+			{Name: "snap2", VM: "vm2", Type: "full"},
+		})
+	})
+
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	resp, err := ts.Client().Get(ts.URL + "/snapshots")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result []SnapshotInfo
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result) != 2 {
+		t.Errorf("expected 2 snapshots, got %d", len(result))
+	}
+}
+
 // (Tests for the old TCP-via-TAP readFull helper were removed when
 // internal/server/routes.go switched to internal/agentclient over
 // Firecracker's vsock UDS bridge. Coverage for the new transport

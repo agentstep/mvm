@@ -248,6 +248,77 @@ func (c *Client) ResumeVM(ctx context.Context, name string) error {
 	return nil
 }
 
+// SnapshotCreate creates a snapshot of a running or paused VM.
+func (c *Client) SnapshotCreate(ctx context.Context, vmName, snapName string) error {
+	body, _ := json.Marshal(SnapshotCreateRequest{Name: snapName})
+	req, _ := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("http://mvm/vms/%s/snapshot", vmName), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var errResp struct{ Error string }
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		return fmt.Errorf("snapshot create failed: %s", errResp.Error)
+	}
+	return nil
+}
+
+// SnapshotRestore restores a VM from a named snapshot.
+func (c *Client) SnapshotRestore(ctx context.Context, vmName, snapName string) error {
+	body, _ := json.Marshal(SnapshotRestoreRequest{Name: snapName})
+	req, _ := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("http://mvm/vms/%s/restore", vmName), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var errResp struct{ Error string }
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		return fmt.Errorf("snapshot restore failed: %s", errResp.Error)
+	}
+	return nil
+}
+
+// SnapshotList returns all available snapshots.
+func (c *Client) SnapshotList(ctx context.Context) ([]SnapshotInfo, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", "http://mvm/snapshots", nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result []SnapshotInfo
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result, nil
+}
+
+// SnapshotDelete removes a named snapshot.
+func (c *Client) SnapshotDelete(ctx context.Context, snapName string) error {
+	req, _ := http.NewRequestWithContext(ctx, "DELETE",
+		fmt.Sprintf("http://mvm/snapshots/%s", snapName), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var errResp struct{ Error string }
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		return fmt.Errorf("snapshot delete failed: %s", errResp.Error)
+	}
+	return nil
+}
+
 // PoolWarm triggers pool warming. Returns immediately; warming happens async.
 func (c *Client) PoolWarm(ctx context.Context) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST", "http://mvm/pool/warm", nil)

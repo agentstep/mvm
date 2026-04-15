@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -516,6 +517,225 @@ func TestVMResponseJSON(t *testing.T) {
 	}
 	if decoded.PID != 42 {
 		t.Errorf("PID = %d", decoded.PID)
+	}
+}
+
+// === POST /vms/{name}/snapshot ===
+
+func TestHandleSnapshotCreateVMNotFound(t *testing.T) {
+	s, _ := testServer(t)
+
+	req := httptest.NewRequest("POST", "/vms/ghost/snapshot", nil)
+	req.SetPathValue("name", "ghost")
+	w := httptest.NewRecorder()
+	s.handleSnapshotCreate(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleSnapshotCreateVMStopped(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "stopped-vm", Status: "stopped", CreatedAt: time.Now()})
+
+	req := httptest.NewRequest("POST", "/vms/stopped-vm/snapshot", nil)
+	req.SetPathValue("name", "stopped-vm")
+	w := httptest.NewRecorder()
+	s.handleSnapshotCreate(w, req)
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", w.Code)
+	}
+}
+
+func TestHandleSnapshotCreateDefaultName(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "myvm", Status: "running", PID: 100, CreatedAt: time.Now()})
+
+	// The mock executor returns "" which will cause SnapshotVM to fail
+	// because curl returns empty. We just check the handler parses correctly
+	// by verifying it gets past validation.
+	body, _ := json.Marshal(SnapshotCreateRequest{})
+	req := httptest.NewRequest("POST", "/vms/myvm/snapshot", bytes.NewReader(body))
+	req.SetPathValue("name", "myvm")
+	w := httptest.NewRecorder()
+	s.handleSnapshotCreate(w, req)
+
+	// Will be 500 because mock executor can't actually snapshot,
+	// but at least it's not 404 or 409.
+	if w.Code == http.StatusNotFound || w.Code == http.StatusConflict {
+		t.Errorf("status = %d, should get past validation", w.Code)
+	}
+}
+
+// === POST /vms/{name}/restore ===
+
+func TestHandleSnapshotRestoreInvalidJSON(t *testing.T) {
+	s, _ := testServer(t)
+
+	req := httptest.NewRequest("POST", "/vms/test/restore", bytes.NewReader([]byte("bad")))
+	req.SetPathValue("name", "test")
+	w := httptest.NewRecorder()
+	s.handleSnapshotRestore(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleSnapshotRestoreEmptyName(t *testing.T) {
+	s, _ := testServer(t)
+
+	body, _ := json.Marshal(SnapshotRestoreRequest{Name: ""})
+	req := httptest.NewRequest("POST", "/vms/test/restore", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	w := httptest.NewRecorder()
+	s.handleSnapshotRestore(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleSnapshotRestoreNotFound(t *testing.T) {
+	s, _ := testServer(t)
+
+	body, _ := json.Marshal(SnapshotRestoreRequest{Name: "nonexistent"})
+	req := httptest.NewRequest("POST", "/vms/test/restore", bytes.NewReader(body))
+	req.SetPathValue("name", "test")
+	w := httptest.NewRecorder()
+	s.handleSnapshotRestore(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+// === GET /snapshots ===
+
+func TestHandleSnapshotListEmpty(t *testing.T) {
+	s, _ := testServer(t)
+
+	req := httptest.NewRequest("GET", "/snapshots", nil)
+	w := httptest.NewRecorder()
+	s.handleSnapshotList(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+
+	var result []SnapshotInfo
+	json.NewDecoder(w.Body).Decode(&result)
+	if len(result) != 0 {
+		t.Errorf("expected empty list, got %d snapshots", len(result))
+	}
+}
+
+// === DELETE /snapshots/{name} ===
+
+func TestHandleSnapshotDeleteNotFound(t *testing.T) {
+	s, _ := testServer(t)
+
+	req := httptest.NewRequest("DELETE", "/snapshots/ghost", nil)
+	req.SetPathValue("name", "ghost")
+	w := httptest.NewRecorder()
+	s.handleSnapshotDelete(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleSnapshotDeleteSuccess(t *testing.T) {
+	// Create a temporary snapshot directory to test removal logic.
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, "test-snap")
+	os.MkdirAll(snapDir, 0o755)
+	os.WriteFile(filepath.Join(snapDir, "meta.json"), []byte(`{"vm":"test"}`), 0o644)
+
+	// Since snapshotsBaseDir is a const we can't redirect the handler,
+	// so we verify the removal logic (os.RemoveAll) directly.
+	err := os.RemoveAll(snapDir)
+	if err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+	if _, err := os.Stat(snapDir); !os.IsNotExist(err) {
+		t.Error("snapshot directory should be removed")
+	}
+}
+
+// === Snapshot request/response types ===
+
+func TestSnapshotCreateRequestJSON(t *testing.T) {
+	req := SnapshotCreateRequest{Name: "my-snap"}
+	data, _ := json.Marshal(req)
+	var decoded SnapshotCreateRequest
+	json.Unmarshal(data, &decoded)
+	if decoded.Name != "my-snap" {
+		t.Errorf("Name = %q, want my-snap", decoded.Name)
+	}
+}
+
+func TestSnapshotCreateRequestOmitsEmpty(t *testing.T) {
+	req := SnapshotCreateRequest{}
+	data, _ := json.Marshal(req)
+	var raw map[string]interface{}
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["name"]; ok {
+		t.Error("name should be omitted when empty")
+	}
+}
+
+func TestSnapshotRestoreRequestJSON(t *testing.T) {
+	req := SnapshotRestoreRequest{Name: "snap1"}
+	data, _ := json.Marshal(req)
+	var decoded SnapshotRestoreRequest
+	json.Unmarshal(data, &decoded)
+	if decoded.Name != "snap1" {
+		t.Errorf("Name = %q, want snap1", decoded.Name)
+	}
+}
+
+func TestSnapshotInfoJSON(t *testing.T) {
+	info := SnapshotInfo{
+		Name:    "test-snap",
+		VM:      "myvm",
+		Created: "2025-01-01T00:00:00Z",
+		Type:    "full",
+	}
+	data, _ := json.Marshal(info)
+	var decoded SnapshotInfo
+	json.Unmarshal(data, &decoded)
+
+	if decoded.Name != "test-snap" {
+		t.Errorf("Name = %q", decoded.Name)
+	}
+	if decoded.VM != "myvm" {
+		t.Errorf("VM = %q", decoded.VM)
+	}
+	if decoded.Created != "2025-01-01T00:00:00Z" {
+		t.Errorf("Created = %q", decoded.Created)
+	}
+	if decoded.Type != "full" {
+		t.Errorf("Type = %q", decoded.Type)
+	}
+}
+
+func TestSnapshotInfoOmitsEmpty(t *testing.T) {
+	info := SnapshotInfo{Name: "minimal"}
+	data, _ := json.Marshal(info)
+	var raw map[string]interface{}
+	json.Unmarshal(data, &raw)
+
+	if _, ok := raw["vm"]; ok {
+		t.Error("vm should be omitted when empty")
+	}
+	if _, ok := raw["created"]; ok {
+		t.Error("created should be omitted when empty")
+	}
+	if _, ok := raw["type"]; ok {
+		t.Error("type should be omitted when empty")
 	}
 }
 

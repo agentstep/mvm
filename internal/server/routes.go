@@ -7,12 +7,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
 )
+
+const snapshotsBaseDir = "/opt/mvm/snapshots"
 
 // --- Request/Response types ---
 
@@ -48,6 +52,24 @@ type VMResponse struct {
 	Ports     []state.PortMap `json:"ports,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
 	Error     string          `json:"error,omitempty"`
+}
+
+// SnapshotCreateRequest is the optional body for POST /vms/{name}/snapshot.
+type SnapshotCreateRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
+// SnapshotRestoreRequest is the body for POST /vms/{name}/restore.
+type SnapshotRestoreRequest struct {
+	Name string `json:"name"`
+}
+
+// SnapshotInfo describes a snapshot for listing.
+type SnapshotInfo struct {
+	Name    string `json:"name"`
+	VM      string `json:"vm,omitempty"`
+	Created string `json:"created,omitempty"`
+	Type    string `json:"type,omitempty"`
 }
 
 // --- Handlers ---
@@ -482,6 +504,163 @@ func (s *Server) handlePoolStatus(w http.ResponseWriter, r *http.Request) {
 	ready, total := firecracker.PoolStatus(s.executor)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"ready": ready, "total": total})
+}
+
+func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	vm, err := s.store.GetVM(name)
+	if err != nil {
+		httpError(w, err, http.StatusNotFound)
+		return
+	}
+	if vm.Status != "running" && vm.Status != "paused" {
+		httpError(w, fmt.Errorf("VM %q is %s, must be running or paused", name, vm.Status), http.StatusConflict)
+		return
+	}
+
+	var req SnapshotCreateRequest
+	// Body is optional — ignore decode errors.
+	json.NewDecoder(r.Body).Decode(&req)
+	snapName := req.Name
+	if snapName == "" {
+		snapName = name + "-snap"
+	}
+
+	snapDir := filepath.Join(snapshotsBaseDir, snapName)
+	if err := firecracker.SnapshotVM(s.executor, vm, snapDir); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{
+		"snapshot": snapName,
+		"status":   "created",
+	})
+}
+
+func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	var req SnapshotRestoreRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, fmt.Errorf("invalid request: %w", err), http.StatusBadRequest)
+		return
+	}
+	if req.Name == "" {
+		httpError(w, fmt.Errorf("snapshot name is required"), http.StatusBadRequest)
+		return
+	}
+
+	snapDir := filepath.Join(snapshotsBaseDir, req.Name)
+	if _, err := os.Stat(filepath.Join(snapDir, "meta.json")); err != nil {
+		httpError(w, fmt.Errorf("snapshot %q not found", req.Name), http.StatusNotFound)
+		return
+	}
+
+	// If VM exists and is running or paused, stop it first.
+	vm, err := s.store.GetVM(name)
+	if err == nil && (vm.Status == "running" || vm.Status == "paused") {
+		firecracker.RemovePortForwarding(s.executor, vm)
+		if vm.Status == "paused" {
+			firecracker.Resume(s.executor, vm)
+		}
+		hostKeyPath := firecracker.KeyDir + "/mvm.id_ed25519"
+		firecracker.StopViaAgent(s.executor, vm, hostKeyPath)
+		now := time.Now()
+		s.store.UpdateVM(name, func(v *state.VM) {
+			v.Status = "stopped"
+			v.StoppedAt = &now
+		})
+	}
+
+	// Remove existing VM entry if present so we can reserve a fresh one.
+	if err == nil {
+		s.store.RemoveVM(name)
+	}
+
+	// Reserve a new VM entry with a network allocation.
+	newVM := &state.VM{
+		Name:      name,
+		Status:    "restoring",
+		CreatedAt: time.Now(),
+	}
+	netIndex, err := s.store.ReserveVM(newVM)
+	if err != nil {
+		httpError(w, err, http.StatusConflict)
+		return
+	}
+	alloc := state.AllocateNet(netIndex)
+
+	pid, socketPath, err := firecracker.RestoreVMSnapshot(s.executor, name, snapDir, alloc)
+	if err != nil {
+		s.store.RemoveVM(name)
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	s.store.UpdateVM(name, func(v *state.VM) {
+		v.Status = "running"
+		v.GuestIP = alloc.GuestIP
+		v.TAPIP = alloc.TAPIP
+		v.TAPDevice = alloc.TAPDev
+		v.GuestMAC = alloc.GuestMAC
+		v.SocketPath = socketPath
+		v.PID = pid
+		v.RootfsPath = firecracker.VMDir(name) + "/rootfs.ext4"
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"snapshot": req.Name,
+		"status":   "restored",
+	})
+}
+
+func (s *Server) handleSnapshotList(w http.ResponseWriter, r *http.Request) {
+	names, err := firecracker.ListSnapshots(snapshotsBaseDir)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	result := make([]SnapshotInfo, 0, len(names))
+	for _, n := range names {
+		info := SnapshotInfo{Name: n}
+		metaPath := filepath.Join(snapshotsBaseDir, n, "meta.json")
+		data, err := os.ReadFile(metaPath)
+		if err == nil {
+			var meta map[string]string
+			if json.Unmarshal(data, &meta) == nil {
+				info.VM = meta["vm"]
+				info.Created = meta["created"]
+				info.Type = meta["type"]
+			}
+		}
+		result = append(result, info)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	snapDir := filepath.Join(snapshotsBaseDir, name)
+	if _, err := os.Stat(snapDir); err != nil {
+		httpError(w, fmt.Errorf("snapshot %q not found", name), http.StatusNotFound)
+		return
+	}
+
+	if err := os.RemoveAll(snapDir); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func httpError(w http.ResponseWriter, err error, code int) {
