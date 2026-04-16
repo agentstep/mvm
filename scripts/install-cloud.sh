@@ -36,6 +36,7 @@ apt-get install -y --no-install-recommends \
     curl wget openssl ca-certificates \
     debootstrap e2fsprogs \
     iptables iproute2 \
+    netcat-openbsd \
     >/dev/null
 
 # --- Download binaries ---

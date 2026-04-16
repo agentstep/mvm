@@ -94,6 +94,12 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 }
 
 func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string) error {
+	// Cloud/remote mode: the local state doesn't matter — the daemon is
+	// the source of truth. Skip the local init check entirely.
+	if os.Getenv("MVM_REMOTE") != "" {
+		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image)
+	}
+
 	initialized, err := store.IsInitialized()
 	if err != nil {
 		return err
@@ -110,6 +116,12 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 	}
 
 	// Firecracker path: route through daemon
+	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image)
+}
+
+// runStartViaDaemon creates a VM by calling the daemon's /vms endpoint.
+// Used for both local-mode (Unix socket) and cloud-mode (TCP+TLS).
+func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string) error {
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
