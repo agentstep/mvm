@@ -269,6 +269,73 @@ func TestPoolStatus_Success(t *testing.T) {
 	}
 }
 
+// === 401 Unauthorized handling ===
+//
+// These guard against a class of bugs where the client silently decoded an
+// error JSON body into a typed response, producing an empty slice or
+// zero-valued struct instead of surfacing the real error to the caller.
+
+func unauthorizedHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+	}
+}
+
+func assertUnauthorized(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected status 401, got %d", apiErr.StatusCode)
+	}
+	if apiErr.Message != "unauthorized" {
+		t.Errorf("expected message 'unauthorized', got %q", apiErr.Message)
+	}
+}
+
+func TestListVMs_Returns401AsError(t *testing.T) {
+	c, _ := testClient(t, unauthorizedHandler())
+	vms, err := c.ListVMs(context.Background())
+	if vms != nil {
+		t.Errorf("ListVMs should return nil slice on 401, got %v", vms)
+	}
+	assertUnauthorized(t, err)
+}
+
+func TestSnapshotList_Returns401AsError(t *testing.T) {
+	c, _ := testClient(t, unauthorizedHandler())
+	snaps, err := c.SnapshotList(context.Background())
+	if snaps != nil {
+		t.Errorf("SnapshotList should return nil slice on 401, got %v", snaps)
+	}
+	assertUnauthorized(t, err)
+}
+
+func TestImageList_Returns401AsError(t *testing.T) {
+	c, _ := testClient(t, unauthorizedHandler())
+	imgs, err := c.ImageList(context.Background())
+	if imgs != nil {
+		t.Errorf("ImageList should return nil slice on 401, got %v", imgs)
+	}
+	assertUnauthorized(t, err)
+}
+
+func TestPoolStatus_Returns401AsError(t *testing.T) {
+	c, _ := testClient(t, unauthorizedHandler())
+	ps, err := c.PoolStatus(context.Background())
+	if ps != nil {
+		t.Errorf("PoolStatus should return nil on 401, got %v", ps)
+	}
+	assertUnauthorized(t, err)
+}
+
 func TestSnapshotList_Success(t *testing.T) {
 	c, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/snapshots" {

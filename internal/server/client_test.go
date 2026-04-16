@@ -705,3 +705,294 @@ func TestClientSnapshotListWithMockServer(t *testing.T) {
 // internal/server/routes.go switched to internal/agentclient over
 // Firecracker's vsock UDS bridge. Coverage for the new transport
 // lives in internal/agentclient/client_test.go.)
+
+// === Status-code checking on non-2xx responses ===
+//
+// These guard against a class of bugs where the client silently decoded an
+// error JSON body (e.g. `{"error":"unauthorized"}`) into a typed response,
+// producing an empty slice or zero-valued struct instead of surfacing the
+// real error to the caller.
+
+// unauthorizedHandler returns 401 with a JSON error body, like the real server
+// does when the API key is missing or wrong.
+func unauthorizedHandler(t *testing.T) http.HandlerFunc {
+	t.Helper()
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+	}
+}
+
+func TestListVMs_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	vms, err := c.ListVMs(context.Background())
+	if err == nil {
+		t.Fatalf("ListVMs should return an error on 401, got nil (vms=%v)", vms)
+	}
+	if vms != nil {
+		t.Errorf("ListVMs should return nil slice on error, got %v", vms)
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestSnapshotList_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	snaps, err := c.SnapshotList(context.Background())
+	if err == nil {
+		t.Fatalf("SnapshotList should return an error on 401, got nil (snaps=%v)", snaps)
+	}
+	if snaps != nil {
+		t.Errorf("SnapshotList should return nil slice on error, got %v", snaps)
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestImageList_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	imgs, err := c.ImageList(context.Background())
+	if err == nil {
+		t.Fatalf("ImageList should return an error on 401, got nil (imgs=%v)", imgs)
+	}
+	if imgs != nil {
+		t.Errorf("ImageList should return nil slice on error, got %v", imgs)
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestPoolStatus_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	ps, err := c.PoolStatus(context.Background())
+	if err == nil {
+		t.Fatalf("PoolStatus should return an error on 401, got nil (ps=%v)", ps)
+	}
+	if ps != nil {
+		t.Errorf("PoolStatus should return nil on error, got %v", ps)
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestExec_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	_, _, err := c.Exec(context.Background(), "vm1", "echo hi")
+	if err == nil {
+		t.Fatal("Exec should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestExecStream_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	var stdout, stderr bytes.Buffer
+	_, err := c.ExecStream(context.Background(), "vm1", "echo hi", &stdout, &stderr)
+	if err == nil {
+		t.Fatal("ExecStream should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestCreateVM_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	_, err := c.CreateVM(context.Background(), CreateVMRequest{Name: "vm1"})
+	if err == nil {
+		t.Fatal("CreateVM should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestDeleteVM_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.DeleteVM(context.Background(), "vm1")
+	if err == nil {
+		t.Fatal("DeleteVM should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestStopVM_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.StopVM(context.Background(), "vm1", false)
+	if err == nil {
+		t.Fatal("StopVM should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestPauseVM_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.PauseVM(context.Background(), "vm1")
+	if err == nil {
+		t.Fatal("PauseVM should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestResumeVM_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.ResumeVM(context.Background(), "vm1")
+	if err == nil {
+		t.Fatal("ResumeVM should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestSnapshotCreate_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.SnapshotCreate(context.Background(), "vm1", "snap1")
+	if err == nil {
+		t.Fatal("SnapshotCreate should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestSnapshotRestore_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.SnapshotRestore(context.Background(), "vm1", "snap1")
+	if err == nil {
+		t.Fatal("SnapshotRestore should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestSnapshotDelete_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.SnapshotDelete(context.Background(), "snap1")
+	if err == nil {
+		t.Fatal("SnapshotDelete should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestImageDelete_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.ImageDelete(context.Background(), "img1")
+	if err == nil {
+		t.Fatal("ImageDelete should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+func TestPoolWarm_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.PoolWarm(context.Background())
+	if err == nil {
+		t.Fatal("PoolWarm should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+// TestCheckStatus_FallsBackToHTTPStatus verifies that when the server
+// returns a non-JSON body on an error, we fall back to the HTTP status
+// text so the caller still sees something actionable.
+func TestCheckStatus_FallsBackToHTTPStatus(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte("<html>502 bad gateway</html>"))
+	}))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	_, err := c.ListVMs(context.Background())
+	if err == nil {
+		t.Fatal("ListVMs should return an error on 502, got nil")
+	}
+	// Should contain the HTTP status text when no JSON error body is parseable.
+	if !strings.Contains(err.Error(), "502") {
+		t.Errorf("expected error containing '502', got %q", err.Error())
+	}
+}
+
+// TestBuild_Returns401AsError covers the Build method.
+func TestBuild_Returns401AsError(t *testing.T) {
+	ts := httptest.NewServer(unauthorizedHandler(t))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "wrong-key", "")
+	err := c.Build(context.Background(), "img1", nil, 0)
+	if err == nil {
+		t.Fatal("Build should return an error on 401, got nil")
+	}
+	if !strings.Contains(err.Error(), "unauthorized") {
+		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}

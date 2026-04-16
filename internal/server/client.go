@@ -136,6 +136,23 @@ func (c *Client) IsAvailable() bool {
 	return resp.StatusCode == 200
 }
 
+// checkStatus inspects an HTTP response and, if the status code is >= 400,
+// decodes a JSON error body and returns it as an error. The response body is
+// partially consumed on error. Callers must still close resp.Body.
+func checkStatus(resp *http.Response) error {
+	if resp.StatusCode < 400 {
+		return nil
+	}
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&errResp)
+	if errResp.Error == "" {
+		errResp.Error = resp.Status
+	}
+	return fmt.Errorf("%s", errResp.Error)
+}
+
 // Exec sends an exec request and returns the result.
 func (c *Client) Exec(ctx context.Context, vmName, command string) (string, int, error) {
 	body, _ := json.Marshal(ExecRequest{Command: command})
@@ -149,6 +166,10 @@ func (c *Client) Exec(ctx context.Context, vmName, command string) (string, int,
 		return "", -1, err
 	}
 	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return "", -1, err
+	}
 
 	var result ExecResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -174,9 +195,16 @@ func (c *Client) ExecStream(ctx context.Context, vmName, command string, stdout,
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return -1, err
+	}
+
 	if resp.Header.Get("Content-Type") != "application/x-ndjson" {
 		var result ExecResponse
 		json.NewDecoder(resp.Body).Decode(&result)
+		if result.Error != "" {
+			return -1, fmt.Errorf("%s", result.Error)
+		}
 		if result.Output != "" && stdout != nil {
 			stdout.Write([]byte(result.Output))
 		}
@@ -225,10 +253,13 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VMResponse
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return nil, fmt.Errorf("create failed: %s", err)
+	}
+
 	var result VMResponse
-	json.NewDecoder(resp.Body).Decode(&result)
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("create failed: %s", result.Error)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
 	}
 	return &result, nil
 }
@@ -240,9 +271,9 @@ func (c *Client) DeleteVM(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return fmt.Errorf("delete failed: status %d", resp.StatusCode)
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("delete failed: %s", err)
 	}
 	return nil
 }
@@ -256,8 +287,14 @@ func (c *Client) ListVMs(ctx context.Context) ([]VMResponse, error) {
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+
 	var result []VMResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -275,8 +312,13 @@ func (c *Client) PoolStatus(ctx context.Context) (*PoolStatusResponse, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
 	var result PoolStatusResponse
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
 	return &result, nil
 }
 
@@ -292,10 +334,8 @@ func (c *Client) StopVM(ctx context.Context, name string, force bool) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("stop failed: %s", errResp.Error)
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("stop failed: %s", err)
 	}
 	return nil
 }
@@ -309,10 +349,8 @@ func (c *Client) PauseVM(ctx context.Context, name string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("pause failed: %s", errResp.Error)
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("pause failed: %s", err)
 	}
 	return nil
 }
@@ -326,10 +364,8 @@ func (c *Client) ResumeVM(ctx context.Context, name string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("resume failed: %s", errResp.Error)
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("resume failed: %s", err)
 	}
 	return nil
 }
@@ -346,10 +382,8 @@ func (c *Client) SnapshotCreate(ctx context.Context, vmName, snapName string) er
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("snapshot create failed: %s", errResp.Error)
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("snapshot create failed: %s", err)
 	}
 	return nil
 }
@@ -366,10 +400,8 @@ func (c *Client) SnapshotRestore(ctx context.Context, vmName, snapName string) e
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("snapshot restore failed: %s", errResp.Error)
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("snapshot restore failed: %s", err)
 	}
 	return nil
 }
@@ -383,8 +415,14 @@ func (c *Client) SnapshotList(ctx context.Context) ([]SnapshotInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+
 	var result []SnapshotInfo
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -396,11 +434,9 @@ func (c *Client) SnapshotDelete(ctx context.Context, snapName string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("snapshot delete failed: %s", errResp.Error)
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("snapshot delete failed: %s", err)
 	}
 	return nil
 }
@@ -420,10 +456,8 @@ func (c *Client) Build(ctx context.Context, imageName string, steps []firecracke
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("build failed: %s", errResp.Error)
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("build failed: %s", err)
 	}
 	return nil
 }
@@ -437,8 +471,14 @@ func (c *Client) ImageList(ctx context.Context) ([]ImageInfo, error) {
 	}
 	defer resp.Body.Close()
 
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+
 	var result []ImageInfo
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
@@ -450,11 +490,9 @@ func (c *Client) ImageDelete(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp struct{ Error string }
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("image delete failed: %s", errResp.Error)
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("image delete failed: %s", err)
 	}
 	return nil
 }
@@ -466,7 +504,10 @@ func (c *Client) PoolWarm(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("pool warm failed: %s", err)
+	}
 	return nil
 }
 
