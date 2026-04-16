@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
 	"net"
@@ -9,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
@@ -22,12 +26,15 @@ const DaemonSocketPath = "/run/mvm/daemon.sock"
 const DaemonTCPPort = 19876
 
 type Server struct {
-	store      *state.Store
-	executor   firecracker.Executor
-	listener   net.Listener
-	httpServer *http.Server
-	sockPath   string
-	pidPath    string
+	store        *state.Store
+	executor     firecracker.Executor
+	unixListener net.Listener
+	tcpListener  net.Listener  // nil if no ListenAddr
+	unixServer   *http.Server
+	tcpServer    *http.Server  // nil if no ListenAddr
+	sockPath     string
+	pidPath      string
+	cfg          Config
 }
 
 type Config struct {
@@ -35,6 +42,10 @@ type Config struct {
 	PIDPath    string
 	Store      *state.Store
 	Executor   firecracker.Executor
+	ListenAddr string // TCP address, e.g. "0.0.0.0:19876"
+	TLSCert    string
+	TLSKey     string
+	APIKey     string
 }
 
 func DefaultSocketPath() string {
@@ -94,11 +105,12 @@ func New(cfg Config) (*Server, error) {
 	os.Chmod(cfg.SocketPath, 0o666) // allow CLI on macOS to connect via Lima socket forward
 
 	s := &Server{
-		store:    cfg.Store,
-		executor: cfg.Executor,
-		listener: ln,
-		sockPath: cfg.SocketPath,
-		pidPath:  cfg.PIDPath,
+		store:        cfg.Store,
+		executor:     cfg.Executor,
+		unixListener: ln,
+		sockPath:     cfg.SocketPath,
+		pidPath:      cfg.PIDPath,
+		cfg:          cfg,
 	}
 
 	mux := http.NewServeMux()
@@ -120,7 +132,29 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /images", s.handleImageList)
 	mux.HandleFunc("DELETE /images/{name}", s.handleImageDelete)
 
-	s.httpServer = &http.Server{Handler: mux}
+	s.unixServer = &http.Server{Handler: mux}
+
+	// Set up TCP listener if ListenAddr is configured.
+	if cfg.ListenAddr != "" {
+		tcpLn, err := net.Listen("tcp", cfg.ListenAddr)
+		if err != nil {
+			ln.Close()
+			return nil, fmt.Errorf("listen on %s: %w", cfg.ListenAddr, err)
+		}
+		s.tcpListener = tcpLn
+
+		var tcpHandler http.Handler = mux
+		if cfg.APIKey != "" {
+			tcpHandler = authMiddleware(cfg.APIKey, mux)
+		}
+
+		s.tcpServer = &http.Server{
+			Handler:      tcpHandler,
+			ReadTimeout:  30 * time.Second,
+			WriteTimeout: 5 * time.Minute,
+			IdleTimeout:  120 * time.Second,
+		}
+	}
 
 	return s, nil
 }
@@ -132,21 +166,66 @@ func (s *Server) Start(ctx context.Context) error {
 
 	log.Printf("mvm daemon listening on %s (PID %d)", s.sockPath, os.Getpid())
 
-	go func() {
-		<-ctx.Done()
-		s.Shutdown(context.Background())
-	}()
+	g, ctx := errgroup.WithContext(ctx)
 
-	err := s.httpServer.Serve(s.listener)
-	if err == http.ErrServerClosed {
-		return nil
+	// Context cancellation triggers graceful shutdown.
+	g.Go(func() error {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		return s.Shutdown(shutdownCtx)
+	})
+
+	// Unix socket server.
+	g.Go(func() error {
+		err := s.unixServer.Serve(s.unixListener)
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	})
+
+	// TCP server (if configured).
+	if s.tcpServer != nil && s.tcpListener != nil {
+		hasTLS := s.cfg.TLSCert != "" && s.cfg.TLSKey != ""
+		insecure := os.Getenv("MVM_INSECURE") == "true"
+
+		g.Go(func() error {
+			var err error
+			if hasTLS && !insecure {
+				log.Printf("mvm daemon TCP+TLS listening on %s", s.cfg.ListenAddr)
+				cert, loadErr := tls.LoadX509KeyPair(s.cfg.TLSCert, s.cfg.TLSKey)
+				if loadErr != nil {
+					return fmt.Errorf("load TLS cert/key: %w", loadErr)
+				}
+				tlsLn := tls.NewListener(s.tcpListener, &tls.Config{
+					Certificates: []tls.Certificate{cert},
+				})
+				err = s.tcpServer.Serve(tlsLn)
+			} else {
+				if insecure {
+					log.Printf("mvm daemon TCP (insecure) listening on %s", s.cfg.ListenAddr)
+				} else {
+					log.Printf("mvm daemon TCP listening on %s (no TLS configured)", s.cfg.ListenAddr)
+				}
+				err = s.tcpServer.Serve(s.tcpListener)
+			}
+			if err == http.ErrServerClosed {
+				return nil
+			}
+			return err
+		})
 	}
-	return err
+
+	return g.Wait()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	log.Println("mvm daemon shutting down...")
-	s.httpServer.Shutdown(ctx)
+	s.unixServer.Shutdown(ctx)
+	if s.tcpServer != nil {
+		s.tcpServer.Shutdown(ctx)
+	}
 	os.Remove(s.sockPath)
 	RemovePID(s.pidPath)
 	return nil
