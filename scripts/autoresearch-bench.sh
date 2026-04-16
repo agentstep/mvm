@@ -46,7 +46,14 @@ sleep 1
 # infrastructure — recreating it costs ~60s and isn't something a single
 # benchmark iteration should amortize).
 rm -rf /var/mvm/vms/* 2>/dev/null || true
-rm -rf /var/mvm/pool/slot* 2>/dev/null || true
+# Preserve each slot's pristine/ subdir — it holds the per-slot golden
+# snapshot (snapshot_file, mem_file, rootfs.ext4) that takes ~90s to
+# rebuild. Delete only the live runtime files so each run gets a clean
+# VM state but keeps the infrastructure.
+for slot_dir in /var/mvm/pool/slot*; do
+    [ -d "$slot_dir" ] || continue
+    find "$slot_dir" -maxdepth 1 -type f -delete 2>/dev/null || true
+done
 rm -f /run/mvm/*.socket /run/mvm/*.vsock* /run/mvm/*-uffd.sock 2>/dev/null || true
 # Reset any leftover TAP devices from previous runs
 for t in $(ip link show 2>/dev/null | grep -oE 'tap[0-9]+' | sort -u); do
@@ -71,9 +78,10 @@ fi
 echo "[bench] warming pool..." >&2
 mvm pool warm >/dev/null 2>&1 || true
 POOL_WARM_START=$(date +%s)
-# 180s timeout: first iteration builds the golden snapshot (~60s). Subsequent
-# iterations restore from it (~10-15s per slot, 3 slots in parallel).
-for _ in $(seq 1 180); do
+# 300s timeout: first-ever warm does 3 sequential cold boots + snapshot
+# captures (~90s each under shared IO pressure). Subsequent warms restore
+# from the preserved per-slot pristine snapshots in ~10-20s per slot.
+for _ in $(seq 1 420); do
     if mvm pool status 2>/dev/null | grep -q "3/3"; then break; fi
     sleep 1
     # Nudge pool refill periodically (some code paths need re-triggering)
