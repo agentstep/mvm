@@ -1,0 +1,15 @@
+[Unit]
+Description=mvm sandbox daemon
+Documentation=https://github.com/paulmeller/mvm
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mvm serve start --listen 0.0.0.0:19876 --tls-cert /etc/mvm/cert.pem --tls-key /etc/mvm/key.pem --api-key-file /etc/mvm/api-key
+Environment=MVM_DATA_DIR=/var/mvm
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
