@@ -1,0 +1,16 @@
+{
+  "name": "@agentstep/mvm-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for mvm sandbox",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^5.0",
+    "vitest": "^2.0"
+  }
+}
