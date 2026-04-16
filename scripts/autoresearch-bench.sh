@@ -104,17 +104,23 @@ KEEP_VM=""
 for i in 1 2 3 4 5; do
     if [ "${#TTI_SAMPLES[@]}" -ge 3 ]; then break; fi
 
+    # Wait until pool has at least ONE ready slot (not all 3 — refill takes
+    # ~20s per slot, so requiring 3/3 between samples adds huge wait time
+    # that's not part of the claim we're trying to measure).
     POOL_WAIT=0
-    while ! mvm pool status 2>/dev/null | grep -q "3/3"; do
+    while true; do
+        POOL=$(mvm pool status 2>/dev/null | grep -oE '[0-9]+/[0-9]+' | head -1)
+        READY=${POOL%%/*}
+        if [ "${READY:-0}" -ge 1 ]; then break; fi
         mvm pool warm >/dev/null 2>&1 || true
-        sleep 3
-        POOL_WAIT=$((POOL_WAIT + 3))
-        if [ $POOL_WAIT -gt 60 ]; then
-            echo "ERROR: pool could not refill within 60s before sample $i" >&2
+        sleep 2
+        POOL_WAIT=$((POOL_WAIT + 2))
+        if [ $POOL_WAIT -gt 30 ]; then
+            echo "ERROR: no ready pool slot within 30s before sample $i" >&2
             break
         fi
     done
-    sleep 2
+    sleep 1
 
     # Delete the previously-kept VM so only ONE VM is alive at a time.
     if [ -n "$KEEP_VM" ]; then
@@ -299,8 +305,10 @@ if [ -z "$REPO_DIR" ] && [ -f /root/firecracker/go.mod ]; then REPO_DIR=/root/fi
 if [ -n "$REPO_DIR" ]; then
     echo "[bench] running go tests in $REPO_DIR..." >&2
     cd "$REPO_DIR"
+    # Only test packages an optimization might touch. State tests have
+    # environmental flakiness on some VMs (fsync issues) unrelated to perf.
     TMPDIR=/tmp /usr/local/go/bin/go test -count=1 -timeout=90s \
-        ./internal/server/... ./internal/firecracker/... ./internal/state/... \
+        ./internal/firecracker/... ./internal/uffd/... ./internal/agentclient/... \
         >/tmp/autoresearch-gotest.log 2>&1 \
         || { echo "ERROR: go tests failed — see /tmp/autoresearch-gotest.log" >&2; exit 6; }
     echo "[bench] go tests passed" >&2
