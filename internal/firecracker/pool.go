@@ -271,8 +271,15 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 	// Setup TAP + copy rootfs and mem from this slot's pristine dir.
 	// FC will write dirty memory pages into mem_file during runtime, so
 	// each refill needs a fresh (clean) copy of the pristine mem_file.
+	//
+	// Run the 2-3GB of disk copies under `nice -n 19 ionice -c3` so pool
+	// refill doesn't starve exec latency on live VMs. During refill we
+	// otherwise see exec spike from ~100ms to 2-5s as the `cp --sparse`
+	// saturates IO bandwidth and page cache on a small-host shared disk.
+	// The refill itself is slightly slower but happens in the background
+	// and doesn't block any user-facing request.
 	setupCmd := fmt.Sprintf(
-		`sudo mkdir -p %s && sudo cp --sparse=always %s %s/rootfs.ext4 && sudo cp --sparse=always %s %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
+		`sudo mkdir -p %s && sudo nice -n 19 ionice -c3 cp --sparse=always %s %s/rootfs.ext4 && sudo nice -n 19 ionice -c3 cp --sparse=always %s %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
 		poolSlotDir(i),
 		poolSlotPristineRoot(i), poolSlotDir(i),
 		poolSlotPristineMem(i), poolSlotDir(i),
