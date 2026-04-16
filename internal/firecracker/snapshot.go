@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -96,18 +98,22 @@ func SnapshotVM(exec Executor, vm *state.VM, snapDir string) error {
 // RestoreVMSnapshot restores a VM from a Full snapshot.
 // It copies snapshot files into the VM directory, starts a new Firecracker
 // process, and loads the snapshot via the API.
-// Returns (pid, socketPath, error).
-func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAllocation) (int, string, error) {
+//
+// Returns (pid, socketPath, uffdPid, error). uffdPid is the PID of the
+// mvm-uffd sidecar that services guest page faults on demand; it is 0 when
+// the File-backend fallback path is used (e.g. MVM_NO_UFFD=1 or handler
+// startup failed).
+func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAllocation) (int, string, int, error) {
 	// Decrypt if encrypted
 	for _, f := range []string{"snapshot.bin", "mem.bin", "rootfs.ext4"} {
 		encPath := filepath.Join(snapDir, f+".enc")
 		if _, err := os.Stat(encPath); err == nil {
 			key := os.Getenv(SnapshotKeyEnvVar)
 			if key == "" {
-				return 0, "", fmt.Errorf("snapshot is encrypted — set %s", SnapshotKeyEnvVar)
+				return 0, "", 0, fmt.Errorf("snapshot is encrypted — set %s", SnapshotKeyEnvVar)
 			}
 			if err := decryptFile(encPath, filepath.Join(snapDir, f), key); err != nil {
-				return 0, "", fmt.Errorf("decrypt %s: %w", f, err)
+				return 0, "", 0, fmt.Errorf("decrypt %s: %w", f, err)
 			}
 		}
 	}
@@ -124,24 +130,33 @@ func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAll
 	)
 	out, err := exec.RunWithTimeout(setupCmd, LongTimeout)
 	if err != nil || !strings.Contains(out, "COPY_OK") {
-		return 0, "", fmt.Errorf("copy snapshot files: %w (output: %s)", err, out)
+		return 0, "", 0, fmt.Errorf("copy snapshot files: %w (output: %s)", err, out)
 	}
 
 	// Start Firecracker and load the snapshot
-	pid, socketPath, err := loadSnapshot(exec, vmName, alloc)
+	pid, socketPath, uffdPid, err := loadSnapshot(exec, vmName, alloc)
 	if err != nil {
-		return 0, "", err
+		return 0, "", 0, err
 	}
 
-	return pid, socketPath, nil
+	return pid, socketPath, uffdPid, nil
 }
 
 // loadSnapshot starts a new Firecracker process with API socket,
 // sets up TAP networking, and loads a snapshot from the VM directory.
 // Modeled on pool.go's restoreSlotFromSnapshot.
-func loadSnapshot(exec Executor, vmName string, alloc state.NetAllocation) (int, string, error) {
+//
+// When the MVM_NO_UFFD env var is unset, loadSnapshot also spawns the
+// mvm-uffd page-fault handler as a subprocess and tells Firecracker to use
+// the Uffd memory backend. If the handler cannot be started (binary missing,
+// socket never appears, etc.) we fall back to the File backend so the
+// daemon stays functional — this is the documented rollback escape hatch.
+//
+// The returned uffdPid is the handler PID when UFFD is active, or 0 for
+// the File-backend path.
+func loadSnapshot(ex Executor, vmName string, alloc state.NetAllocation) (pid int, socketPath string, uffdPid int, err error) {
 	vmDir := VMDir(vmName)
-	socketPath := SocketPath(vmName)
+	socketPath = SocketPath(vmName)
 
 	// Set up TAP device and log file
 	setupCmd := fmt.Sprintf(
@@ -149,9 +164,9 @@ func loadSnapshot(exec Executor, vmName string, alloc state.NetAllocation) (int,
 		alloc.TAPDev, alloc.TAPDev, alloc.TAPIP, alloc.TAPDev, alloc.TAPDev,
 		vmDir, vmDir,
 	)
-	out, err := exec.Run(setupCmd)
+	out, err := ex.Run(setupCmd)
 	if err != nil || !strings.Contains(out, "SETUP_OK") {
-		return 0, "", fmt.Errorf("TAP setup failed: %w (output: %s)", err, out)
+		return 0, "", 0, fmt.Errorf("TAP setup failed: %w (output: %s)", err, out)
 	}
 
 	// Start Firecracker with API socket (no --config-file, snapshot restore mode)
@@ -162,36 +177,170 @@ func loadSnapshot(exec Executor, vmName string, alloc state.NetAllocation) (int,
 		socketPath,
 		vmDir, vmDir,
 	)
-	out, err = exec.Run(startCmd)
+	out, err = ex.Run(startCmd)
 	if err != nil {
-		return 0, "", fmt.Errorf("firecracker start failed: %w", err)
+		return 0, "", 0, fmt.Errorf("firecracker start failed: %w", err)
 	}
-	pid, _ := strconv.Atoi(strings.TrimSpace(out))
+	pid, _ = strconv.Atoi(strings.TrimSpace(out))
 
 	// Wait for API socket
 	waitCmd := fmt.Sprintf(
 		`for j in $(seq 1 30); do sudo test -S %s && break; sleep 0.1; done; sudo test -S %s && echo SOCK_OK`,
 		socketPath, socketPath,
 	)
-	out, err = exec.Run(waitCmd)
+	out, err = ex.Run(waitCmd)
 	if err != nil || !strings.Contains(out, "SOCK_OK") {
-		return 0, "", fmt.Errorf("API socket not ready")
+		return 0, "", 0, fmt.Errorf("API socket not ready")
+	}
+
+	// Decide memory backend: UFFD (default) or File (rollback / test path).
+	memFile := vmDir + "/mem.bin"
+	backendType := "File"
+	backendPath := memFile
+	if os.Getenv("MVM_NO_UFFD") == "" {
+		uffdSock := fmt.Sprintf("%s/%s-uffd.sock", RunDir(), vmName)
+		if hpid, herr := startUFFDHandler(uffdSock, memFile); herr == nil {
+			uffdPid = hpid
+			backendType = "Uffd"
+			backendPath = uffdSock
+		} else {
+			log.Printf("mvm-uffd unavailable, falling back to File backend: %v", herr)
+		}
 	}
 
 	// Load snapshot with network_overrides to remap TAP device
 	restoreCmd := fmt.Sprintf(
 		`sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/load" `+
 			`-H "Content-Type: application/json" `+
-			`-d '{"snapshot_path":"%s/snapshot.bin","mem_backend":{"backend_path":"%s/mem.bin","backend_type":"File"},"enable_diff_snapshots":false,"resume_vm":true,"network_overrides":[{"iface_id":"net1","host_dev_name":"%s"}]}' && echo RESTORE_OK`,
-		socketPath, vmDir, vmDir, alloc.TAPDev,
+			`-d '{"snapshot_path":"%s/snapshot.bin","mem_backend":{"backend_path":"%s","backend_type":"%s"},"enable_diff_snapshots":false,"resume_vm":true,"network_overrides":[{"iface_id":"net1","host_dev_name":"%s"}]}' && echo RESTORE_OK`,
+		socketPath, vmDir, backendPath, backendType, alloc.TAPDev,
 	)
-	out, err = exec.RunWithTimeout(restoreCmd, 30*time.Second)
+	out, err = ex.RunWithTimeout(restoreCmd, 30*time.Second)
 	if err != nil || !strings.Contains(out, "RESTORE_OK") {
-		return 0, "", fmt.Errorf("snapshot restore failed: %v (output: %s)", err, out)
+		// If we started a UFFD handler, kill it so we don't leak a process.
+		if uffdPid > 0 {
+			_ = killUFFDHandler(uffdPid)
+		}
+		return 0, "", 0, fmt.Errorf("snapshot restore failed: %v (output: %s)", err, out)
 	}
 
-	return pid, socketPath, nil
+	return pid, socketPath, uffdPid, nil
 }
+
+// uffdBinaryCandidates lists the install paths we search for mvm-uffd when
+// it is not found on $PATH. Cloud Linux installs to /usr/local/bin; the
+// Lima (macOS dev) image drops it at /opt/mvm/mvm-uffd.
+var uffdBinaryCandidates = []string{
+	"/usr/local/bin/mvm-uffd",
+	"/opt/mvm/mvm-uffd",
+}
+
+// findUFFDBinary returns an absolute path to the mvm-uffd binary, or an
+// error if none of the known locations contain it.
+func findUFFDBinary() (string, error) {
+	if p, err := exec.LookPath("mvm-uffd"); err == nil {
+		return p, nil
+	}
+	for _, p := range uffdBinaryCandidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("mvm-uffd binary not found (looked on $PATH and in %v)", uffdBinaryCandidates)
+}
+
+// startUFFDHandler launches mvm-uffd as a background subprocess bound to
+// sockPath and backed by memFile. It returns the handler PID once the
+// socket file appears (polled every 50ms for up to 2s) or an error if the
+// process exits early or never binds.
+//
+// The handler is started directly via os/exec rather than through the
+// Executor shell abstraction because we need a long-lived child process,
+// its PID, and to be able to SIGKILL it on cleanup — none of which the
+// Executor interface exposes.
+func startUFFDHandler(sockPath, memFile string) (int, error) {
+	bin, err := findUFFDBinary()
+	if err != nil {
+		return 0, err
+	}
+
+	// Remove any stale socket — previous run may have crashed before cleanup.
+	_ = os.Remove(sockPath)
+
+	// Make sure the run dir exists; harmless if already present.
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		return 0, fmt.Errorf("mkdir %s: %w", filepath.Dir(sockPath), err)
+	}
+
+	cmd := exec.Command(bin,
+		"--socket="+sockPath,
+		"--mem="+memFile,
+	)
+	// Detach from the daemon's controlling terminal / stdin. Pipe the
+	// handler's logs into the Firecracker log directory so operators can
+	// diagnose page-fault failures.
+	cmd.Stdin = nil
+	if logF, ferr := os.OpenFile(
+		filepath.Join(filepath.Dir(memFile), "mvm-uffd.log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644,
+	); ferr == nil {
+		cmd.Stdout = logF
+		cmd.Stderr = logF
+	}
+	if err := cmd.Start(); err != nil {
+		return 0, fmt.Errorf("start mvm-uffd: %w", err)
+	}
+
+	// Release the child so it doesn't become a zombie when the daemon
+	// doesn't Wait() on it. A background goroutine drains its exit.
+	go func() { _ = cmd.Wait() }()
+
+	// Poll for the socket to appear (the handler binds it on startup).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sockPath); err == nil {
+			return cmd.Process.Pid, nil
+		}
+		// Did the child die early? Fail fast rather than waiting out the
+		// full 2s budget.
+		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+			return 0, fmt.Errorf("mvm-uffd exited before binding socket (code=%d)",
+				cmd.ProcessState.ExitCode())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Socket never appeared — kill the handler and report.
+	_ = cmd.Process.Kill()
+	return 0, fmt.Errorf("mvm-uffd socket %s did not appear within 2s", sockPath)
+}
+
+// killUFFDHandler sends SIGKILL to the mvm-uffd process identified by pid.
+// It is a no-op on pid<=0 and on "no such process" errors (the handler may
+// have exited cleanly when Firecracker closed its UFFD fd). Returns any
+// other kill error for logging.
+func killUFFDHandler(pid int) error {
+	if pid <= 0 {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Kill(); err != nil {
+		// Treat "process already gone" as success — common and expected.
+		if strings.Contains(err.Error(), "process already finished") ||
+			strings.Contains(err.Error(), "no such process") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// KillUFFDHandler is the exported wrapper used by callers (e.g. the stop
+// path in the daemon) to reap a tracked UFFD sidecar.
+func KillUFFDHandler(pid int) error { return killUFFDHandler(pid) }
 
 // ListSnapshots returns snapshot directories under the given base path.
 func ListSnapshots(baseDir string) ([]string, error) {

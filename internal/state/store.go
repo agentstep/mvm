@@ -20,6 +20,7 @@ type VM struct {
 	NetIndex    int        `json:"net_index"`
 	SocketPath  string     `json:"socket_path"`
 	PID         int        `json:"pid"`
+	UFFDPid     int        `json:"uffd_pid,omitempty"` // mvm-uffd sidecar PID (0 = File backend)
 	RootfsPath  string     `json:"rootfs_path"`
 	Ports       []PortMap  `json:"ports,omitempty"`
 	NetPolicy   string     `json:"net_policy,omitempty"` // "open", "deny", "allow:<domains>"

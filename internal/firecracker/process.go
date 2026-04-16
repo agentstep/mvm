@@ -122,6 +122,14 @@ echo "TIMEOUT"`, vm.PID)
 	}
 
 	ex.Run(fmt.Sprintf("sudo rm -f %s; sudo ip link del %s 2>/dev/null || true", vm.SocketPath, vm.TAPDevice))
+
+	// Reap the UFFD sidecar if one was started. The handler usually exits
+	// cleanly on its own when Firecracker closes the UFFD fd (EOF), so
+	// this is best-effort cleanup for stuck handlers.
+	if vm.UFFDPid > 0 {
+		_ = KillUFFDHandler(vm.UFFDPid)
+		ex.Run(fmt.Sprintf("sudo rm -f %s/%s-uffd.sock", RunDir(), vm.Name))
+	}
 	return nil
 }
 
@@ -139,11 +147,17 @@ func IsRunning(ex Executor, pid int) bool {
 
 // Cleanup removes all resources for a VM.
 func Cleanup(ex Executor, vm *state.VM) error {
+	// Kill the UFFD sidecar first if one is tracked. Best effort — a
+	// clean Firecracker exit usually reaps it already.
+	if vm.UFFDPid > 0 {
+		_ = KillUFFDHandler(vm.UFFDPid)
+	}
 	script := fmt.Sprintf(`sudo kill -9 %d 2>/dev/null || true
 sudo rm -f %s
+sudo rm -f %s/%s-uffd.sock 2>/dev/null || true
 sudo ip link del %s 2>/dev/null || true
 sudo rm -rf %s
-echo "Cleaned up"`, vm.PID, vm.SocketPath, vm.TAPDevice, VMDir(vm.Name))
+echo "Cleaned up"`, vm.PID, vm.SocketPath, RunDir(), vm.Name, vm.TAPDevice, VMDir(vm.Name))
 	_, err := ex.Run(script)
 	return err
 }

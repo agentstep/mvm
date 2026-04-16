@@ -625,7 +625,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	alloc := state.AllocateNet(netIndex)
 
-	pid, socketPath, err := firecracker.RestoreVMSnapshot(s.executor, name, snapDir, alloc)
+	pid, socketPath, uffdPid, err := firecracker.RestoreVMSnapshot(s.executor, name, snapDir, alloc)
 	if err != nil {
 		s.store.RemoveVM(name)
 		httpError(w, err, http.StatusInternalServerError)
@@ -640,6 +640,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 		v.GuestMAC = alloc.GuestMAC
 		v.SocketPath = socketPath
 		v.PID = pid
+		v.UFFDPid = uffdPid
 		v.RootfsPath = firecracker.VMDir(name) + "/rootfs.ext4"
 	})
 

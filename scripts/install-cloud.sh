@@ -52,7 +52,10 @@ curl -fsSL -o /usr/local/bin/firecracker \
 curl -fsSL -o /usr/local/bin/mvm-agent \
   "https://github.com/paulmeller/mvm/releases/latest/download/mvm-agent-linux-${ARCH}"
 
-chmod +x /usr/local/bin/mvm /usr/local/bin/firecracker /usr/local/bin/mvm-agent
+curl -fsSL -o /usr/local/bin/mvm-uffd \
+  "https://github.com/paulmeller/mvm/releases/latest/download/mvm-uffd-linux-${ARCH}"
+
+chmod +x /usr/local/bin/mvm /usr/local/bin/firecracker /usr/local/bin/mvm-agent /usr/local/bin/mvm-uffd
 
 # --- Create directories ---
 
