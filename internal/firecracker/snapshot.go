@@ -120,21 +120,36 @@ func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAll
 
 	vmDir := VMDir(vmName)
 
-	// Copy snapshot files from snapDir to VM directory
-	setupCmd := fmt.Sprintf(
-		`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/snapshot.bin %s/snapshot.bin && sudo cp --sparse=always %s/mem.bin %s/mem.bin && echo COPY_OK`,
-		vmDir,
-		snapDir, vmDir,
-		snapDir, vmDir,
-		snapDir, vmDir,
-	)
+	// Copy rootfs (guest writes to it — COW with reflinks would be ideal
+	// but we use sparse copy for portability). Snapshot.bin is tiny. With
+	// UFFD, mem.bin stays in snapDir and is mmap'd by the handler directly
+	// — saves a multi-GB copy. Without UFFD, we have to copy mem.bin into
+	// vmDir because the File backend wants the file at that path.
+	useUFFD := os.Getenv("MVM_NO_UFFD") == ""
+	var setupCmd string
+	if useUFFD {
+		setupCmd = fmt.Sprintf(
+			`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/snapshot.bin %s/snapshot.bin && echo COPY_OK`,
+			vmDir, snapDir, vmDir, snapDir, vmDir,
+		)
+	} else {
+		setupCmd = fmt.Sprintf(
+			`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/snapshot.bin %s/snapshot.bin && sudo cp --sparse=always %s/mem.bin %s/mem.bin && echo COPY_OK`,
+			vmDir,
+			snapDir, vmDir,
+			snapDir, vmDir,
+			snapDir, vmDir,
+		)
+	}
 	out, err := exec.RunWithTimeout(setupCmd, LongTimeout)
 	if err != nil || !strings.Contains(out, "COPY_OK") {
 		return 0, "", 0, fmt.Errorf("copy snapshot files: %w (output: %s)", err, out)
 	}
 
-	// Start Firecracker and load the snapshot
-	pid, socketPath, uffdPid, err := loadSnapshot(exec, vmName, alloc)
+	// Start Firecracker and load the snapshot. When UFFD is enabled, the
+	// handler mmaps snapDir/mem.bin directly (no copy needed). Pass the
+	// snapDir so loadSnapshot can find it.
+	pid, socketPath, uffdPid, err := loadSnapshotWithMem(exec, vmName, alloc, snapDir)
 	if err != nil {
 		return 0, "", 0, err
 	}
@@ -154,7 +169,18 @@ func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAll
 //
 // The returned uffdPid is the handler PID when UFFD is active, or 0 for
 // the File-backend path.
+// loadSnapshotWithMem is like loadSnapshot but takes an explicit memFileDir —
+// used when UFFD is enabled so the handler can mmap mem.bin directly from the
+// snapshot directory (no copy). Pass "" to fall back to vmDir/mem.bin.
+func loadSnapshotWithMem(ex Executor, vmName string, alloc state.NetAllocation, memFileDir string) (pid int, socketPath string, uffdPid int, err error) {
+	return loadSnapshotImpl(ex, vmName, alloc, memFileDir)
+}
+
 func loadSnapshot(ex Executor, vmName string, alloc state.NetAllocation) (pid int, socketPath string, uffdPid int, err error) {
+	return loadSnapshotImpl(ex, vmName, alloc, "")
+}
+
+func loadSnapshotImpl(ex Executor, vmName string, alloc state.NetAllocation, memFileDir string) (pid int, socketPath string, uffdPid int, err error) {
 	vmDir := VMDir(vmName)
 	socketPath = SocketPath(vmName)
 
@@ -194,12 +220,18 @@ func loadSnapshot(ex Executor, vmName string, alloc state.NetAllocation) (pid in
 	}
 
 	// Decide memory backend: UFFD (default) or File (rollback / test path).
-	memFile := vmDir + "/mem.bin"
+	// For UFFD, the handler can mmap the memory file from any accessible
+	// location (defaults to vmDir/mem.bin; memFileDir overrides to point
+	// at the snapshot dir to skip a multi-GB copy).
+	memFileForUFFD := vmDir + "/mem.bin"
+	if memFileDir != "" {
+		memFileForUFFD = memFileDir + "/mem.bin"
+	}
 	backendType := "File"
-	backendPath := memFile
+	backendPath := vmDir + "/mem.bin"
 	if os.Getenv("MVM_NO_UFFD") == "" {
 		uffdSock := fmt.Sprintf("%s/%s-uffd.sock", RunDir(), vmName)
-		if hpid, herr := startUFFDHandler(uffdSock, memFile); herr == nil {
+		if hpid, herr := startUFFDHandler(uffdSock, memFileForUFFD); herr == nil {
 			uffdPid = hpid
 			backendType = "Uffd"
 			backendPath = uffdSock

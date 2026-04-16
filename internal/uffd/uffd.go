@@ -163,14 +163,40 @@ func Unregister(fd int, start, length uintptr) error {
 	return ioctl(fd, UFFDIO_UNREGISTER, unsafe.Pointer(&r))
 }
 
-// ReadMsg reads a single uffdMsg from the UFFD fd. The read is blocking; a
-// short read is treated as an error. EOF is returned as io.EOF via the
-// underlying syscall.
+// ReadMsg reads a single uffdMsg from the UFFD fd. Firecracker sets the
+// UFFD fd non-blocking, so we poll() for POLLIN first, then read.
+// The poll has no timeout — it blocks until a page-fault event arrives or
+// the peer closes the fd (EOF / EIO).
 func ReadMsg(fd int) (*uffdMsg, error) {
+	// Poll indefinitely for POLLIN or POLLHUP (peer closed).
+	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	for {
+		n, err := unix.Poll(pfd, -1)
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return nil, err
+		}
+		if n == 0 {
+			continue
+		}
+		if pfd[0].Revents&(unix.POLLHUP|unix.POLLERR|unix.POLLNVAL) != 0 {
+			return nil, unix.EIO
+		}
+		if pfd[0].Revents&unix.POLLIN != 0 {
+			break
+		}
+	}
+
 	var msg uffdMsg
 	buf := (*[unsafe.Sizeof(msg)]byte)(unsafe.Pointer(&msg))[:]
 	n, err := unix.Read(fd, buf)
 	if err != nil {
+		if err == unix.EAGAIN {
+			// Spurious wakeup — retry.
+			return ReadMsg(fd)
+		}
 		return nil, err
 	}
 	if n == 0 {
