@@ -54,8 +54,8 @@ func TestPoolSocketPathBackwardCompat(t *testing.T) {
 func TestPoolSlotDirContainsPoolDir(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		got := poolSlotDir(i)
-		if got[:len(PoolDir)] != PoolDir {
-			t.Errorf("poolSlotDir(%d) = %q, should start with %q", i, got, PoolDir)
+		if got[:len(PoolDir())] != PoolDir() {
+			t.Errorf("poolSlotDir(%d) = %q, should start with %q", i, got, PoolDir())
 		}
 	}
 }
@@ -97,8 +97,8 @@ func TestPoolSizeIsMultiSlot(t *testing.T) {
 	}
 }
 
-func TestPoolDirConstant(t *testing.T) {
-	if PoolDir != "/opt/mvm/pool" {
-		t.Errorf("PoolDir = %q, want /opt/mvm/pool", PoolDir)
+func TestPoolDirDefault(t *testing.T) {
+	if PoolDir() != "/opt/mvm/pool" {
+		t.Errorf("PoolDir() = %q, want /opt/mvm/pool", PoolDir())
 	}
 }

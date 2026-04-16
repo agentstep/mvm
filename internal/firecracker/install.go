@@ -266,7 +266,7 @@ ls -lh "$SNAPSHOT_DIR/"
 
 // HasSnapshot checks if a usable snapshot exists.
 func HasSnapshot(limaClient *lima.Client) bool {
-	out, _ := limaClient.Shell(fmt.Sprintf("sudo test -f %s/snapshot_file && echo YES || echo NO", SnapshotDir))
+	out, _ := limaClient.Shell(fmt.Sprintf("sudo test -f %s/snapshot_file && echo YES || echo NO", SnapshotDir()))
 	return strings.TrimSpace(out) == "YES"
 }
 

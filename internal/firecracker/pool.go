@@ -3,6 +3,7 @@ package firecracker
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -11,17 +12,16 @@ import (
 )
 
 const (
-	PoolDir  = "/opt/mvm/pool"
 	PoolSize = 3 // pre-boot up to 3 VMs for concurrent sessions
-	// Golden snapshot: captured after cold boot + Claude pre-warm.
-	// Subsequent pool fills restore from this instead of cold booting.
-	poolSnapshotDir = "/opt/mvm/pool/snapshot"
 )
 
-func poolSlotDir(i int) string    { return fmt.Sprintf("%s/slot%d", PoolDir, i) }
+func PoolDir() string         { return filepath.Join(DataDir(), "pool") }
+func poolSnapshotDir() string { return filepath.Join(PoolDir(), "snapshot") }
+
+func poolSlotDir(i int) string    { return fmt.Sprintf("%s/slot%d", PoolDir(), i) }
 func poolPidFile(i int) string    { return poolSlotDir(i) + "/pid" }
 func poolReadyFile(i int) string  { return poolSlotDir(i) + "/ready" }
-func poolSocketPath(i int) string { return fmt.Sprintf("%s/pool%d.socket", RunDir, i) }
+func poolSocketPath(i int) string { return fmt.Sprintf("%s/pool%d.socket", RunDir(), i) }
 
 func PoolSocketPathForSlot(i int) string { return poolSocketPath(i) }
 func PoolSocketPath() string             { return poolSocketPath(0) }
@@ -65,7 +65,7 @@ func fillSlot(ex Executor, i int) error {
 }
 
 func hasGoldenSnapshot(ex Executor) bool {
-	out, err := ex.Run(fmt.Sprintf("sudo test -f %s/snapshot_file && echo YES || echo NO", poolSnapshotDir))
+	out, err := ex.Run(fmt.Sprintf("sudo test -f %s/snapshot_file && echo YES || echo NO", poolSnapshotDir()))
 	if err != nil {
 		return false
 	}
@@ -82,7 +82,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	// Build and write config
 	cfg := fcConfig{
 		BootSource: fcBootSource{
-			KernelImagePath: CacheDir + "/vmlinux",
+			KernelImagePath: CacheDir() + "/vmlinux",
 			BootArgs:        BootArgs(alloc.GuestIP, alloc.TAPIP),
 		},
 		Drives: []fcDrive{{
@@ -102,7 +102,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 		},
 		Vsock: &fcVsock{
 			GuestCID: 3,
-			UDSPath:  fmt.Sprintf("%s/pool%d.vsock", RunDir, i),
+			UDSPath:  fmt.Sprintf("%s/pool%d.vsock", RunDir(), i),
 		},
 	}
 	cfgJSON, _ := json.Marshal(cfg)
@@ -120,7 +120,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	// Setup rootfs and TAP
 	setup := fmt.Sprintf(
 		`sudo cp --sparse=always %s/base.ext4 %s/rootfs.ext4 && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
-		CacheDir, poolSlotDir(i),
+		CacheDir(), poolSlotDir(i),
 		alloc.TAPDev, alloc.TAPDev, alloc.TAPIP, alloc.TAPDev, alloc.TAPDev,
 		poolSlotDir(i), poolSlotDir(i),
 	)
@@ -133,7 +133,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	socket := poolSocketPath(i)
 	startCmd := fmt.Sprintf(
 		`sudo rm -f %s %s/pool%d.vsock %s/pool%d.vsock_5123; sudo setsid firecracker --config-file %s/config.json --api-sock %s</dev/null >%s/firecracker.log 2>&1 & echo $! | sudo tee %s/pid`,
-		socket, RunDir, i, RunDir, i, poolSlotDir(i), socket, poolSlotDir(i), poolSlotDir(i),
+		socket, RunDir(), i, RunDir(), i, poolSlotDir(i), socket, poolSlotDir(i), poolSlotDir(i),
 	)
 	out, err = ex.Run(startCmd)
 	if err != nil {
@@ -157,9 +157,9 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	fmt.Println("  Creating golden snapshot...")
 	snapCmd := fmt.Sprintf(
 		`sudo mkdir -p %s && sudo curl -s --unix-socket %s -X PATCH "http://localhost/vm" -H "Content-Type: application/json" -d '{"state": "Paused"}' && sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/create" -H "Content-Type: application/json" -d '{"snapshot_type":"Full","snapshot_path":"%s/snapshot_file","mem_file_path":"%s/mem_file"}' && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo curl -s --unix-socket %s -X PATCH "http://localhost/vm" -H "Content-Type: application/json" -d '{"state": "Resumed"}' && echo SNAP_OK`,
-		poolSnapshotDir, socket, socket,
-		poolSnapshotDir, poolSnapshotDir,
-		poolSlotDir(i), poolSnapshotDir,
+		poolSnapshotDir(), socket, socket,
+		poolSnapshotDir(), poolSnapshotDir(),
+		poolSlotDir(i), poolSnapshotDir(),
 		socket,
 	)
 	out, err = ex.RunWithTimeout(snapCmd, 60*time.Second)
@@ -186,8 +186,8 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 	setupCmd := fmt.Sprintf(
 		`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/mem_file %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
 		poolSlotDir(i),
-		poolSnapshotDir, poolSlotDir(i),
-		poolSnapshotDir, poolSlotDir(i),
+		poolSnapshotDir(), poolSlotDir(i),
+		poolSnapshotDir(), poolSlotDir(i),
 		alloc.TAPDev, alloc.TAPDev, alloc.TAPIP, alloc.TAPDev, alloc.TAPDev,
 		poolSlotDir(i), poolSlotDir(i),
 	)
@@ -200,7 +200,7 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 	socket := poolSocketPath(i)
 	startCmd := fmt.Sprintf(
 		`sudo rm -f %s %s/pool%d.vsock %s/pool%d.vsock_5123; sudo mkdir -p %s; sudo setsid firecracker --api-sock %s</dev/null >%s/firecracker.log 2>&1 & echo $! | sudo tee %s/pid`,
-		socket, RunDir, i, RunDir, i, RunDir, socket, poolSlotDir(i), poolSlotDir(i),
+		socket, RunDir(), i, RunDir(), i, RunDir(), socket, poolSlotDir(i), poolSlotDir(i),
 	)
 	out, err = ex.Run(startCmd)
 	if err != nil {
@@ -218,7 +218,7 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 	// Restore from snapshot with network_overrides
 	restoreCmd := fmt.Sprintf(
 		`sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/load" -H "Content-Type: application/json" -d '{"snapshot_path":"%s/snapshot_file","mem_backend":{"backend_path":"%s/mem_file","backend_type":"File"},"enable_diff_snapshots":false,"resume_vm":true,"network_overrides":[{"iface_id":"net1","host_dev_name":"%s"}]}' && echo RESTORE_OK`,
-		socket, poolSnapshotDir, poolSlotDir(i), alloc.TAPDev,
+		socket, poolSnapshotDir(), poolSlotDir(i), alloc.TAPDev,
 	)
 	out, err = ex.RunWithTimeout(restoreCmd, 30*time.Second)
 	if err != nil || !strings.Contains(out, "RESTORE_OK") {

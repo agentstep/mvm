@@ -160,18 +160,18 @@ func runInitFirecracker(limaClient *lima.Client, store *state.Store, cpus int, m
 	} else {
 		fmt.Println("Downloading kernel and rootfs (with AI agents)...")
 	}
-	if err := firecracker.DownloadImages(limaClient, firecracker.CacheDir, minimal); err != nil {
+	if err := firecracker.DownloadImages(limaClient, firecracker.CacheDir(), minimal); err != nil {
 		return err
 	}
 	fmt.Println("  ✓ Images cached")
 
 	fmt.Println("Setting up SSH keys...")
-	if err := firecracker.GenerateSSHKeys(limaClient, firecracker.KeyDir, firecracker.CacheDir); err != nil {
+	if err := firecracker.GenerateSSHKeys(limaClient, firecracker.KeyDir(), firecracker.CacheDir()); err != nil {
 		return err
 	}
 	hostKeyDir := filepath.Join(mvmDir, "keys")
 	os.MkdirAll(hostKeyDir, 0o755)
-	if err := firecracker.CopySSHKeyToHost(limaClient, firecracker.KeyDir, hostKeyDir); err != nil {
+	if err := firecracker.CopySSHKeyToHost(limaClient, firecracker.KeyDir(), hostKeyDir); err != nil {
 		return err
 	}
 	fmt.Println("  ✓ SSH keys ready")
@@ -185,7 +185,7 @@ func runInitFirecracker(limaClient *lima.Client, store *state.Store, cpus int, m
 	}
 	fmt.Println("  ✓ NAT configured")
 
-	if _, err := limaClient.Shell(fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", firecracker.RunDir, firecracker.RunDir)); err != nil {
+	if _, err := limaClient.Shell(fmt.Sprintf("sudo mkdir -p %s && sudo chmod 755 %s", firecracker.RunDir(), firecracker.RunDir())); err != nil {
 		return fmt.Errorf("create run dir: %w", err)
 	}
 

@@ -89,7 +89,7 @@ func runInstall(limaClient *lima.Client, store *state.Store, name, command strin
 
 		// Full stop
 		fmt.Println("  Stopping VM...")
-		keyPath := filepath.Join(firecracker.KeyDir, "mvm.id_ed25519")
+		keyPath := filepath.Join(firecracker.KeyDir(), "mvm.id_ed25519")
 		if err := firecracker.StopViaAgent(limaClient, vm, keyPath); err != nil {
 			return fmt.Errorf("stop failed (cannot safely mount rootfs): %w", err)
 		}

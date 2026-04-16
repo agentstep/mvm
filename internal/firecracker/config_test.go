@@ -152,21 +152,21 @@ func TestStartFromSnapshotScript(t *testing.T) {
 	}
 }
 
-func TestConstants(t *testing.T) {
-	if CacheDir == "" {
-		t.Error("CacheDir should not be empty")
+func TestPathFunctions(t *testing.T) {
+	if CacheDir() == "" {
+		t.Error("CacheDir() should not be empty")
 	}
-	if VMsDir == "" {
-		t.Error("VMsDir should not be empty")
+	if VMsDir() == "" {
+		t.Error("VMsDir() should not be empty")
 	}
-	if KeyDir == "" {
-		t.Error("KeyDir should not be empty")
+	if KeyDir() == "" {
+		t.Error("KeyDir() should not be empty")
 	}
-	if RunDir == "" {
-		t.Error("RunDir should not be empty")
+	if RunDir() == "" {
+		t.Error("RunDir() should not be empty")
 	}
-	if SnapshotDir == "" {
-		t.Error("SnapshotDir should not be empty")
+	if SnapshotDir() == "" {
+		t.Error("SnapshotDir() should not be empty")
 	}
 }
 

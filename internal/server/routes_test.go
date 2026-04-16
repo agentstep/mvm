@@ -654,8 +654,7 @@ func TestHandleSnapshotDeleteSuccess(t *testing.T) {
 	os.MkdirAll(snapDir, 0o755)
 	os.WriteFile(filepath.Join(snapDir, "meta.json"), []byte(`{"vm":"test"}`), 0o644)
 
-	// Since snapshotsBaseDir is a const we can't redirect the handler,
-	// so we verify the removal logic (os.RemoveAll) directly.
+	// We verify the removal logic (os.RemoveAll) directly here.
 	err := os.RemoveAll(snapDir)
 	if err != nil {
 		t.Fatalf("RemoveAll: %v", err)

@@ -17,7 +17,7 @@ import (
 	"github.com/agentstep/mvm/internal/state"
 )
 
-const snapshotsBaseDir = "/opt/mvm/snapshots"
+func snapshotsBaseDir() string { return filepath.Join(firecracker.DataDir(), "snapshots") }
 
 // --- Request/Response types ---
 
@@ -149,7 +149,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 
 	// If a custom image is specified, verify it exists.
 	if req.Image != "" {
-		imagePath := firecracker.CacheDir + "/" + req.Image + ".ext4"
+		imagePath := firecracker.CacheDir() + "/" + req.Image + ".ext4"
 		if _, err := os.Stat(imagePath); err != nil {
 			s.store.RemoveVM(req.Name)
 			httpError(w, fmt.Errorf("image %q not found (expected %s)", req.Image, imagePath), http.StatusBadRequest)
@@ -464,7 +464,7 @@ func (s *Server) handleStopVM(w http.ResponseWriter, r *http.Request) {
 		if vm.Status == "paused" {
 			firecracker.Resume(s.executor, vm)
 		}
-		hostKeyPath := firecracker.KeyDir + "/mvm.id_ed25519"
+		hostKeyPath := firecracker.KeyDir() + "/mvm.id_ed25519"
 		firecracker.StopViaAgent(s.executor, vm, hostKeyPath)
 	}
 
@@ -558,7 +558,7 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 		snapName = name + "-snap"
 	}
 
-	snapDir := filepath.Join(snapshotsBaseDir, snapName)
+	snapDir := filepath.Join(snapshotsBaseDir(), snapName)
 	if err := firecracker.SnapshotVM(s.executor, vm, snapDir); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
@@ -585,7 +585,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	snapDir := filepath.Join(snapshotsBaseDir, req.Name)
+	snapDir := filepath.Join(snapshotsBaseDir(), req.Name)
 	if _, err := os.Stat(filepath.Join(snapDir, "meta.json")); err != nil {
 		httpError(w, fmt.Errorf("snapshot %q not found", req.Name), http.StatusNotFound)
 		return
@@ -598,7 +598,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 		if vm.Status == "paused" {
 			firecracker.Resume(s.executor, vm)
 		}
-		hostKeyPath := firecracker.KeyDir + "/mvm.id_ed25519"
+		hostKeyPath := firecracker.KeyDir() + "/mvm.id_ed25519"
 		firecracker.StopViaAgent(s.executor, vm, hostKeyPath)
 		now := time.Now()
 		s.store.UpdateVM(name, func(v *state.VM) {
@@ -651,7 +651,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSnapshotList(w http.ResponseWriter, r *http.Request) {
-	names, err := firecracker.ListSnapshots(snapshotsBaseDir)
+	names, err := firecracker.ListSnapshots(snapshotsBaseDir())
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
@@ -660,7 +660,7 @@ func (s *Server) handleSnapshotList(w http.ResponseWriter, r *http.Request) {
 	result := make([]SnapshotInfo, 0, len(names))
 	for _, n := range names {
 		info := SnapshotInfo{Name: n}
-		metaPath := filepath.Join(snapshotsBaseDir, n, "meta.json")
+		metaPath := filepath.Join(snapshotsBaseDir(), n, "meta.json")
 		data, err := os.ReadFile(metaPath)
 		if err == nil {
 			var meta map[string]string
@@ -680,7 +680,7 @@ func (s *Server) handleSnapshotList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSnapshotDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	snapDir := filepath.Join(snapshotsBaseDir, name)
+	snapDir := filepath.Join(snapshotsBaseDir(), name)
 	if _, err := os.Stat(snapDir); err != nil {
 		httpError(w, fmt.Errorf("snapshot %q not found", name), http.StatusNotFound)
 		return
@@ -715,7 +715,7 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		sizeMB = 512
 	}
 
-	if err := firecracker.BuildRootfs(s.executor, firecracker.CacheDir, req.ImageName, req.Steps, sizeMB); err != nil {
+	if err := firecracker.BuildRootfs(s.executor, firecracker.CacheDir(), req.ImageName, req.Steps, sizeMB); err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
@@ -728,7 +728,7 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
-	entries, err := os.ReadDir(firecracker.CacheDir)
+	entries, err := os.ReadDir(firecracker.CacheDir())
 	if err != nil {
 		// If the directory doesn't exist, return empty list.
 		w.Header().Set("Content-Type", "application/json")
@@ -768,7 +768,7 @@ func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	imagePath := filepath.Join(firecracker.CacheDir, name+".ext4")
+	imagePath := filepath.Join(firecracker.CacheDir(), name+".ext4")
 	if _, err := os.Stat(imagePath); err != nil {
 		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
 		return

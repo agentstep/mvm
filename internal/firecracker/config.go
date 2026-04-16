@@ -3,21 +3,36 @@ package firecracker
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/agentstep/mvm/internal/state"
 )
 
-const (
-	CacheDir    = "/opt/mvm/cache"
-	VMsDir      = "/opt/mvm/vms"
-	KeyDir      = "/opt/mvm/keys"
-	RunDir      = "/run/mvm"
-	SnapshotDir = "/opt/mvm/snapshot"
-)
+// DataDir returns the base data directory, configurable via MVM_DATA_DIR.
+func DataDir() string {
+	if d := os.Getenv("MVM_DATA_DIR"); d != "" {
+		return d
+	}
+	return "/opt/mvm"
+}
+
+func CacheDir() string    { return filepath.Join(DataDir(), "cache") }
+func VMsDir() string      { return filepath.Join(DataDir(), "vms") }
+func KeyDir() string      { return filepath.Join(DataDir(), "keys") }
+func SnapshotDir() string { return filepath.Join(DataDir(), "snapshot") }
+
+// RunDir returns the runtime directory, configurable via MVM_RUN_DIR.
+func RunDir() string {
+	if d := os.Getenv("MVM_RUN_DIR"); d != "" {
+		return d
+	}
+	return "/run/mvm"
+}
 
 // SocketPath returns the Firecracker API socket path for a VM.
 func SocketPath(name string) string {
-	return fmt.Sprintf("%s/%s.socket", RunDir, name)
+	return fmt.Sprintf("%s/%s.socket", RunDir(), name)
 }
 
 // VsockUDSPath returns the path to the Firecracker vsock-to-Unix-socket
@@ -26,12 +41,12 @@ func SocketPath(name string) string {
 //
 // This must match the uds_path field set in fcConfig.Vsock (see GenerateConfig).
 func VsockUDSPath(name string) string {
-	return fmt.Sprintf("%s/%s.vsock", RunDir, name)
+	return fmt.Sprintf("%s/%s.vsock", RunDir(), name)
 }
 
 // VMDir returns the per-VM directory inside Lima.
 func VMDir(name string) string {
-	return fmt.Sprintf("%s/%s", VMsDir, name)
+	return fmt.Sprintf("%s/%s", VMsDir(), name)
 }
 
 // BootArgs returns optimized kernel boot arguments with network configuration.
@@ -96,7 +111,7 @@ func GenerateConfig(name string, alloc state.NetAllocation, cpus, memMB int) (st
 	}
 	cfg := fcConfig{
 		BootSource: fcBootSource{
-			KernelImagePath: CacheDir + "/vmlinux",
+			KernelImagePath: CacheDir() + "/vmlinux",
 			BootArgs:        BootArgs(alloc.GuestIP, alloc.TAPIP),
 		},
 		Drives: []fcDrive{
@@ -120,7 +135,7 @@ func GenerateConfig(name string, alloc state.NetAllocation, cpus, memMB int) (st
 		},
 		Vsock: &fcVsock{
 			GuestCID: 3, // CID 0-2 reserved by vsock spec
-			UDSPath:  fmt.Sprintf("%s/%s.vsock", RunDir, name),
+			UDSPath:  fmt.Sprintf("%s/%s.vsock", RunDir(), name),
 		},
 	}
 
@@ -198,7 +213,7 @@ fi
 
 echo "  VM started (PID: $FC_PID)"
 echo "PID:$FC_PID"
-`, name, socketPath, vmDir, CacheDir, RunDir,
+`, name, socketPath, vmDir, CacheDir(), RunDir(),
 		alloc.TAPDev, alloc.TAPIP,
 		configJSON)
 }
@@ -211,7 +226,7 @@ func StartScriptWithImage(name string, alloc state.NetAllocation, cpus, memMB in
 
 	configJSON, _ := GenerateConfig(name, alloc, cpus, memMB)
 
-	imagePath := CacheDir + "/" + imageName + ".ext4"
+	imagePath := CacheDir() + "/" + imageName + ".ext4"
 
 	return fmt.Sprintf(`#!/bin/bash
 set -e
@@ -269,7 +284,7 @@ fi
 
 echo "  VM started (PID: $FC_PID)"
 echo "PID:$FC_PID"
-`, name, socketPath, vmDir, imagePath, RunDir,
+`, name, socketPath, vmDir, imagePath, RunDir(),
 		alloc.TAPDev, alloc.TAPIP,
 		imageName, imageName,
 		configJSON)
@@ -335,7 +350,7 @@ fi
 
 echo "  VM restarted (PID: $FC_PID)"
 echo "PID:$FC_PID"
-`, name, socketPath, vmDir, RunDir,
+`, name, socketPath, vmDir, RunDir(),
 		alloc.TAPDev, alloc.TAPIP,
 		configJSON)
 }
@@ -423,6 +438,6 @@ sudo curl -s --unix-socket "$SOCKET_PATH" -X PUT "http://localhost/snapshot/load
 
 echo "  VM restored (PID: $FC_PID)"
 echo "PID:$FC_PID"
-`, name, socketPath, vmDir, SnapshotDir, RunDir,
+`, name, socketPath, vmDir, SnapshotDir(), RunDir(),
 		alloc.TAPDev, alloc.TAPIP)
 }

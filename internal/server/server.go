@@ -38,7 +38,7 @@ type Config struct {
 }
 
 func DefaultSocketPath() string {
-	if IsInsideLima() {
+	if IsLinux() {
 		return DaemonSocketPath
 	}
 	// On macOS: use Lima's forwarded socket
@@ -52,7 +52,7 @@ func DefaultSocketPath() string {
 }
 
 func DefaultPIDPath() string {
-	if IsInsideLima() {
+	if IsLinux() {
 		return "/run/mvm/daemon.pid"
 	}
 	home, _ := os.UserHomeDir()
@@ -66,9 +66,9 @@ func DefaultStatePath() string {
 	return filepath.Join(home, ".mvm", "state.json")
 }
 
-// IsInsideLima detects if we're running inside the Lima VM.
-// The daemon binary is cross-compiled for Linux. If we're on Linux, we're inside Lima.
-func IsInsideLima() bool {
+// IsLinux detects if we're running on Linux (inside Lima VM or on a cloud server).
+// The daemon binary is cross-compiled for Linux.
+func IsLinux() bool {
 	return runtime.GOOS == "linux"
 }
 

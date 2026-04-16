@@ -483,11 +483,11 @@ func TestDirectoryConstants(t *testing.T) {
 		name  string
 		value string
 	}{
-		{"CacheDir", CacheDir},
-		{"VMsDir", VMsDir},
-		{"KeyDir", KeyDir},
-		{"RunDir", RunDir},
-		{"SnapshotDir", SnapshotDir},
+		{"CacheDir", CacheDir()},
+		{"VMsDir", VMsDir()},
+		{"KeyDir", KeyDir()},
+		{"RunDir", RunDir()},
+		{"SnapshotDir", SnapshotDir()},
 	}
 
 	for _, tt := range tests {

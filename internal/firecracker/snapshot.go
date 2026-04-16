@@ -157,8 +157,8 @@ func loadSnapshot(exec Executor, vmName string, alloc state.NetAllocation) (int,
 	// Start Firecracker with API socket (no --config-file, snapshot restore mode)
 	startCmd := fmt.Sprintf(
 		`sudo rm -f %s %s/%s.vsock %s/%s.vsock_5123; sudo mkdir -p %s; sudo setsid firecracker --api-sock %s </dev/null >%s/firecracker.log 2>&1 & echo $! | sudo tee %s/pid`,
-		socketPath, RunDir, vmName, RunDir, vmName,
-		RunDir,
+		socketPath, RunDir(), vmName, RunDir(), vmName,
+		RunDir(),
 		socketPath,
 		vmDir, vmDir,
 	)

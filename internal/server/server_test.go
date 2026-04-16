@@ -82,12 +82,12 @@ func TestDefaultStatePathContainsStateJSON(t *testing.T) {
 	}
 }
 
-// === IsInsideLima ===
+// === IsLinux ===
 
-func TestIsInsideLima(t *testing.T) {
+func TestIsLinux(t *testing.T) {
 	expected := runtime.GOOS == "linux"
-	if IsInsideLima() != expected {
-		t.Errorf("IsInsideLima() = %v, want %v (GOOS=%s)", IsInsideLima(), expected, runtime.GOOS)
+	if IsLinux() != expected {
+		t.Errorf("IsLinux() = %v, want %v (GOOS=%s)", IsLinux(), expected, runtime.GOOS)
 	}
 }
 

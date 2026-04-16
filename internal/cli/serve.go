@@ -58,7 +58,7 @@ and exposes an HTTP API on a Unix socket for fast exec.
 func runServeStart(limaClient *lima.Client, store *state.Store, socketPath string) error {
 	// Detect environment: inside Lima = LocalExecutor, macOS = lima.Client
 	var executor firecracker.Executor
-	if server.IsInsideLima() {
+	if server.IsLinux() {
 		executor = &firecracker.LocalExecutor{}
 	} else {
 		executor = limaClient
