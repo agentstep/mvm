@@ -36,7 +36,14 @@ func newServeCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 }
 
 func newServeStartCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
-	var socketPath string
+	var (
+		socketPath string
+		listenAddr string
+		tlsCert    string
+		tlsKey     string
+		apiKeyFlag string
+		apiKeyFile string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -45,17 +52,23 @@ func newServeStartCmd(limaClient *lima.Client, store *state.Store) *cobra.Comman
 and exposes an HTTP API on a Unix socket for fast exec.
 
   mvm serve start                          # start in foreground
+  mvm serve start --listen 0.0.0.0:19876   # also listen on TCP
   curl --unix-socket ~/.mvm/server.sock http://mvm/health`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServeStart(limaClient, store, socketPath)
+			return runServeStart(limaClient, store, socketPath, listenAddr, tlsCert, tlsKey, apiKeyFlag, apiKeyFile)
 		},
 	}
 
 	cmd.Flags().StringVar(&socketPath, "socket", "", "Unix socket path (default: ~/.mvm/server.sock)")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "TCP listen address (e.g. 0.0.0.0:19876)")
+	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file")
+	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS private key file")
+	cmd.Flags().StringVar(&apiKeyFlag, "api-key", "", "API key for TCP auth")
+	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "File containing API key")
 	return cmd
 }
 
-func runServeStart(limaClient *lima.Client, store *state.Store, socketPath string) error {
+func runServeStart(limaClient *lima.Client, store *state.Store, socketPath, listenAddr, tlsCert, tlsKey, apiKeyFlag, apiKeyFile string) error {
 	// Detect environment: inside Lima = LocalExecutor, macOS = lima.Client
 	var executor firecracker.Executor
 	if server.IsLinux() {
@@ -69,6 +82,10 @@ func runServeStart(limaClient *lima.Client, store *state.Store, socketPath strin
 		SocketPath: socketPath,
 		Store:      store,
 		Executor:   executor,
+		ListenAddr: listenAddr,
+		TLSCert:    tlsCert,
+		TLSKey:     tlsKey,
+		APIKey:     server.LoadAPIKey(apiKeyFlag, apiKeyFile),
 	}
 
 	srv, err := server.New(cfg)
