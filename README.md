@@ -1,265 +1,248 @@
-# mvm — Firecracker MicroVMs on macOS
+# mvm — Firecracker MicroVMs, local or self-hosted
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![macOS](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)](https://www.apple.com/macos/)
-[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M3%2B-333333?logo=apple&logoColor=white)](https://support.apple.com/en-us/116943)
 
-Disposable computers on your Mac. Hardware-isolated Linux VMs in 0.35s.
+Hardware-isolated Linux sandboxes for AI agents. **Same binary runs on your Mac and on your servers.** No cloud vendor. Same API.
 
 ```bash
-$ mvm start sandbox --net-policy deny   # 0.35s, network locked down
-$ mvm ssh sandbox
-$ claude --dangerously-skip-permissions  # full root access, can't touch your Mac
-```
+# On your Mac:
+mvm start sandbox                      # 1.4s, claimed from warm pool
+mvm exec sandbox -- npm test           # 16ms exec latency — vsock to agent
 
+# Or on a Linux server you own:
+curl -sSL https://get.mvm.dev | sudo bash    # 95s: fresh box → working sandbox service
+export MVM_REMOTE=https://my-server:19876
+mvm exec sandbox -- npm test           # same CLI, same API
+```
 
 ## Why
 
-AI coding agents need root access, shell access, and network access. Docker gives them that behind a shared kernel — [one CVE away from a container escape](https://nvd.nist.gov/vuln/detail/CVE-2024-21626). Cloud sandboxes give them real isolation, but your code and credentials leave your machine.
+AI coding agents need root, shell, and network access to do real work. The options available today:
 
-mvm gives each agent its own hardware-isolated VM on your Mac. Separate kernel per VM via KVM. Your secrets stay local. Network locked down per-VM. Fast enough to feel instant.
+- **Docker** — namespace isolation, shared kernel, one CVE from container escape
+- **Cloud sandboxes (E2B, Daytona, Sprites, Cloudflare)** — real isolation but your code and credentials leave your machine, with per-second billing
+- **mvm** — Firecracker+KVM hardware isolation, local-first, optional self-hosted, free
 
-## Setup
+mvm is the only product that gives you the same sandbox API locally and on infrastructure you control. Dev on your Mac, deploy to your own servers, no code changes.
 
-### Requirements
+## Quick start
 
-- Apple Silicon **M3 or newer** (nested virtualization requires M3+)
-- macOS **15 (Sequoia)** or newer
-- [Homebrew](https://brew.sh)
-- [Claude Code](https://claude.ai/code) (recommended for guided setup)
-
-### Option A: AI-guided setup (recommended)
+### On macOS (local mode)
 
 ```bash
-git clone https://github.com/agentstep/mvm.git
-cd mvm
-claude
-> /setup-mvm
-```
-
-Claude Code handles everything: checking your hardware, installing dependencies, configuring Lima and Firecracker, building the base image, warming the pool, and walking you through your first VM. It troubleshoots errors as they come up. No docs required.
-
-### Option B: npm
-
-```bash
-npm install -g @agentstep/mvm
-mvm init
-```
-
-### Option C: Homebrew
-
-```bash
+# Requires Apple Silicon M3+ (nested virtualization)
 brew install agentstep/tap/mvm
 mvm init
+
+mvm start sandbox
+mvm exec sandbox -- echo hello
 ```
 
-### Option D: From source
+### On bare-metal Linux with KVM (cloud mode)
 
 ```bash
-git clone https://github.com/agentstep/mvm.git
-cd mvm
-make install
-mvm init                      # or: mvm init --minimal (no AI agents, smaller image)
+# Any Linux host with /dev/kvm — AWS .metal, GCP nested-virt, Hetzner dedicated, etc.
+curl -sSL https://get.mvm.dev | sudo bash
+
+# The install script:
+#  - Downloads mvm + Firecracker
+#  - Builds a Debian rootfs
+#  - Generates TLS cert + API key
+#  - Installs systemd unit
+#  - Total: ~95 seconds
+
+# Connect from anywhere
+export MVM_REMOTE=https://server:19876
+export MVM_API_KEY=$(ssh server cat /etc/mvm/api-key)
+mvm pool status
+mvm start sandbox
 ```
 
-## Quick Start
+### From Python / TypeScript / Go
 
-```bash
-# Instant starts with the warm pool
-mvm pool warm                 # pre-boot in background (~10s)
-mvm start my-app              # 0.35s — claimed from pool
-
-# Or boot fresh (streams boot log until SSH ready)
-mvm start my-app
-
-# SSH in
-mvm ssh my-app
+```python
+# pip install mvm-sandbox
+from mvm_sandbox import Sandbox
+client = Sandbox.connect("https://server:19876", api_key="...")
+vm = client.create("agent-work", cpus=2, memory_mb=512)
+result = vm.exec("pip install pandas && python analyze.py")
+vm.snapshot("before-risky-op")
+vm.exec("risky operation")
+vm.restore("before-risky-op")  # roll back if needed
+vm.delete()
 ```
 
-## Pause & Resume
-
-Checkpoint full VM state — memory, CPU registers, everything — in 0.15s. Resume in 0.14s. The guest doesn't know it was ever frozen.
-
-Use this as a habit, not an escape hatch. Pause before risky operations the way you'd hit Cmd-S. Agent about to install a pile of npm packages from a hallucinated package.json? Pause first. Agent wants to rewrite your config? Pause first. If it goes sideways, resume.
-
-```bash
-mvm pause my-app    # 0.15s — freeze VM, zero CPU, state preserved in memory
-mvm resume my-app   # 0.14s — instant resume, full state
+```typescript
+// npm install @agentstep/mvm-sdk
+import { Sandbox } from '@agentstep/mvm-sdk';
+const client = new Sandbox({ remote: 'https://server:19876', apiKey: '...' });
+const vm = await client.create('agent-work');
+const r = await vm.exec('npm install && npm test');
 ```
 
-No Virtualization.framework-based tool on macOS can do this. It requires Firecracker's snapshot support, which is why mvm uses nested virtualization via KVM.
-
-## Network Sandboxing
-
-Most prompt injection attacks need exfiltration — the injected instructions tell the agent to curl something or post data somewhere. If the VM can't reach the internet, most of those attacks are dead on arrival.
-
-```bash
-mvm start sandbox --net-policy deny                        # block all outbound
-mvm start sandbox --net-policy allow:api.anthropic.com,github.com  # allowlist only
-```
-
-## Usage
-
-### Run commands
-
-```bash
-mvm exec my-app -- apt update
-mvm exec my-app -it -- bash         # interactive shell
-mvm exec my-app -e FOO=bar -- env   # environment variables
-mvm exec my-app -w /tmp -- pwd      # working directory
-```
-
-### Port forwarding
-
-```bash
-mvm start web -p 8080:80                  # host:8080 -> guest:80
-mvm start api -p 3000:3000 -p 5432:5432   # multiple ports
-```
-
-### Logs
-
-```bash
-mvm logs my-app                # guest system log
-mvm logs my-app -f             # follow (stream)
-mvm logs my-app --boot -f      # stream boot log live
-```
-
-### Lifecycle
-
-```bash
-mvm list                       # show all VMs
-mvm stop my-app                # graceful shutdown
-mvm stop my-app --force        # kill immediately
-mvm delete my-app              # remove all resources
-mvm delete --all --force       # nuke everything
+```go
+// go get github.com/agentstep/mvm/sdk
+import "github.com/agentstep/mvm/sdk"
+client := sdk.New("https://server:19876", sdk.WithAPIKey("..."))
+vm, _ := client.CreateVM(ctx, sdk.CreateVMRequest{Name: "agent-work"})
+result, _ := client.Exec(ctx, "agent-work", "uname -a")
 ```
 
 ## Performance
 
-| Operation | mvm (warm pool) | Apple Containers | Docker |
-|-----------|----------------|-----------------|--------|
-| **Start VM** | **0.35s** | 0.95s | ~3s |
-| **Run command** | **0.28s** | 0.95s | ~1.5s |
-| **Pause** | **0.15s** | — | — |
-| **Resume** | **0.14s** | — | — |
-| **Memory per VM** | ~25MB | ~30MB | ~150MB |
-| **Isolation** | Hardware (KVM) | Hardware (VZ) | Namespace |
+Real measurements on GCP n2-standard-4, April 2026. See [`docs/benchmarks.md`](docs/benchmarks.md) for full comparison.
 
-10 concurrent VMs: ~450MB total. Docker Desktop: ~3GB for the same.
+| Operation | mvm | Competitors |
+|-----------|-----|-------------|
+| **Exec (local daemon, warm)** | **16ms** | E2B/Daytona/Sprites: 50-200ms (network) |
+| **TTI (create + first exec)** | 1.7s | Daytona 120ms, E2B 380ms, CF 1830ms |
+| **VM start from pool** | 1.1-1.4s | — |
+| **Install from scratch** | 95s | N/A (hosted only) |
+| **Snapshot create (2GB)** | 19.4s | Sprites ~300ms |
+| **Snapshot restore (UFFD)** | ~30-100ms target¹ | Stock Firecracker: 28ms |
+| **Cost (8 CPU/8 GB, 24/7)** | **~$50/mo self-host** | Sprites $655/mo, E2B higher |
 
-## Pre-installed Tools
+¹ UFFD lazy restore shipped and verified functional; clean timing benchmark pending.
 
-Each VM comes with:
-- **Claude Code** (`claude`) — Anthropic
-- **Gemini CLI** (`gemini`) — Google
-- **Codex CLI** (`codex`) — OpenAI
-- **OpenCode** (`opencode`) — open source
-- **Node.js** 22.x, **Python** 3.12, **git**, **curl**, **wget**
+**For AI agents making many tool calls, mvm's 16ms local exec wins decisively** — a 50-call session saves 2-10 seconds vs any hosted provider.
 
-Use `mvm init --minimal` for a slim image without AI agents.
+## Network sandboxing
 
-## Self-Documenting VMs
+Per-VM network policies — most prompt injection attacks need exfiltration, so blocking network kills them:
 
-Each VM includes a file at `/.mvm/SKILLS.md` that teaches agents the VM environment — capabilities, port management, checkpoints, and networking. Agents don't need you to explain the sandbox to them.
+```bash
+mvm start sandbox --net-policy deny                        # no outbound
+mvm start sandbox --net-policy allow:github.com,npmjs.org  # allowlist
+```
+
+## Pause, resume, and snapshot
+
+Firecracker supports full memory-state checkpoints. Use them as a habit:
+
+```bash
+mvm pause sandbox            # freeze VM in memory, zero CPU
+mvm resume sandbox           # instant resume
+mvm snapshot create sandbox before-install
+mvm exec sandbox -- risky-install.sh
+mvm snapshot restore sandbox before-install     # roll back full VM state
+```
+
+No Virtualization.framework-based tool on macOS can do memory-state pause/resume. Requires Firecracker's snapshot support, which is why mvm uses nested KVM.
+
+## Custom images
+
+Extend the base with a Dockerfile. mvm parses it and builds a rootfs (no Docker required):
+
+```dockerfile
+# my-agent.Dockerfile
+FROM mvm-base
+RUN apt-get update && apt-get install -y postgresql-client redis-tools
+ENV DATABASE_URL=postgres://localhost/dev
+```
+
+```bash
+mvm build -f my-agent.Dockerfile -t my-agent
+mvm start sandbox --image my-agent
+```
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `mvm init` | One-time setup (`--minimal` for slim image without agents) |
-| `mvm start <n>` | Create and boot a microVM (`-p`, `--net-policy`, `-d`) |
-| `mvm stop <n>` | Graceful shutdown (`--force` to kill) |
-| `mvm pause <n>` | Checkpoint: freeze VM in memory (zero CPU) |
-| `mvm resume <n>` | Resume a paused VM instantly |
-| `mvm ssh <n>` | SSH into a running microVM |
-| `mvm exec <n> -- <cmd>` | Run a command (`-it`, `-e`, `-w`, `-u`) |
-| `mvm logs <n>` | View logs (`--boot`, `-f`, `-n`) |
-| `mvm list` | List all microVMs (`--json`, `-q`) |
-| `mvm delete <n>` | Delete a microVM (`--force`, `--all`) |
-| `mvm pool warm` | Pre-boot VMs for instant starts |
-| `mvm pool status` | Show warm pool status |
+### VM lifecycle
+- `mvm start <name>` — create from warm pool (`-p`, `--net-policy`, `--image`, `--cpus`, `--memory`)
+- `mvm exec <name> -- <cmd>` — run a command (`-it`, `-e`, `-w`)
+- `mvm stop <name>` — graceful shutdown (`--force`)
+- `mvm pause <name>` / `mvm resume <name>` — memory-state checkpoint
+- `mvm list` — show all VMs (`--json`)
+- `mvm delete <name>` — clean up (`--force`, `--all`)
 
-## Comparison
+### Pool
+- `mvm pool warm` — pre-boot VMs for instant starts
+- `mvm pool status` — show pool state
 
-| Tool | Isolation | Start | Pause/Resume | Net sandbox | Min chip | License |
-|------|-----------|-------|-------------|-------------|----------|---------|
-| **mvm** | KVM (Firecracker) | **0.35s** | **Yes (full memory state)** | **Yes** | M3+ | Apache-2.0 |
-| [Shuru](https://github.com/superhq-ai/shuru) | VZ (Apple) | ~1s | Disk only | Yes | M1+ | Apache-2.0 |
-| [microsandbox](https://github.com/zerocore-ai/microsandbox) | KVM (libkrun) | <0.2s | No | Yes | M1+ | Apache-2.0 |
-| [Apple Containers](https://github.com/apple/container) | VZ (Apple) | ~0.95s | No | No | M1+ | Apache-2.0 |
-| [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) | microVM | ~3s | No | Yes | M1+ | Proprietary |
+### Snapshots
+- `mvm snapshot create <vm> <name>` — full VM state + rootfs
+- `mvm snapshot restore <vm> <name>` — restore to new VM
+- `mvm snapshot list` / `mvm snapshot delete <name>`
 
-### Two backends
+### Custom images
+- `mvm build -f Dockerfile -t <name> [--size MB]` — build custom rootfs
+- `mvm images list` / `mvm images delete <name>`
 
-| | Firecracker (default) | Apple VZ (experimental) |
-|---|---|---|
-| **Chips** | M3+ | M1+ |
-| **Pause/resume** | Yes | No |
-| **Warm pool** | Yes (0.35s) | No |
-| **Init** | `mvm init` | `mvm init --backend applevz` |
+### Server
+- `mvm serve start` — run the daemon locally (Unix socket)
+- `mvm serve start --listen 0.0.0.0:19876 --tls-cert ... --api-key-file ...` — cloud mode
+- `mvm serve status` / `mvm serve stop`
 
-Auto-detection: M3+ → Firecracker, M1/M2 → Apple VZ. Override with `--backend`.
+### Remote mode
+All commands accept `--remote https://server:19876 --api-key <key>` or via env: `MVM_REMOTE`, `MVM_API_KEY`, `MVM_CA_CERT`.
 
-The Apple VZ backend is **experimental** — no pause/resume, no warm pool, no snapshots. For mature M1/M2 alternatives, see [Shuru](https://github.com/superhq-ai/shuru) or [microsandbox](https://github.com/zerocore-ai/microsandbox).
+## SDKs
 
-## Troubleshooting
+- **Python** — `pip install mvm-sandbox` ([PyPI](https://pypi.org/project/mvm-sandbox/))
+- **TypeScript** — `npm install @agentstep/mvm-sdk`
+- **Go** — `go get github.com/agentstep/mvm/sdk`
 
-**How do I check if my Mac supports nested virtualization?**
+All three are thin HTTP clients against the same REST API. Work against local or remote daemons transparently.
 
-```bash
-sysctl kern.hv_support
-# kern.hv_support: 1 means hypervisor is supported
-# M3+ is required for nested virtualization within a VM
+## Competitive landscape
+
+| Product | Isolation | Local dev | Self-host | Cost model |
+|---------|-----------|-----------|-----------|------------|
+| **mvm** | Firecracker+KVM | **Yes (macOS/Linux)** | **Yes** | **Free, open source** |
+| E2B | Firecracker+KVM | No | No | $0.10/vCPU-hr + Pro $150/mo |
+| Daytona | Docker | No | Enterprise | $0.05/vCPU-hr |
+| Sprites (Fly.io) | Firecracker+KVM | No | No | $0.07/CPU-hr + storage |
+| Cloudflare Sandbox | Container | No | No | $0.072/vCPU-hr + $5/mo |
+| microsandbox | libkrun | Yes (local) | No server | Free (local only) |
+| Docker Sandboxes | microVM | Yes | Yes | Proprietary |
+
+**mvm is the only Firecracker-grade product that works both locally and as a self-hosted service.**
+
+## Requirements
+
+### Local (macOS)
+- Apple Silicon M3 or newer (nested virtualization requires M3+)
+- macOS 15 (Sequoia) or newer
+- Homebrew
+
+### Cloud (Linux)
+- Bare-metal Linux with `/dev/kvm` accessible
+- Supported providers: AWS `.metal` instances, GCP with nested virt enabled, Hetzner dedicated, OVH bare metal, any physical Linux server
+- **Not supported:** Standard cloud VMs (EC2 t3, GCP e2, etc.) unless nested virt is explicitly enabled
+
+## Architecture
+
+### Local mode
+```
+mvm (macOS) → Unix socket → daemon (in Lima VM) → Firecracker microVMs
 ```
 
-Check your chip: Apple menu → About This Mac. If it says M1 or M2, mvm won't work — see [alternatives](#the-m3-tradeoff) above.
+[Lima](https://github.com/lima-vm/lima) provides Linux with nested virtualization. [Firecracker](https://github.com/firecracker-microvm/firecracker) runs inside Lima.
 
-**`mvm init` fails or hangs**
-
-This usually means Lima isn't configured correctly. Run `mvm init` again with verbose output:
-
-```bash
-mvm init --verbose
+### Cloud mode
+```
+mvm / SDK → TCP+TLS → daemon (on bare-metal Linux) → Firecracker microVMs
 ```
 
-If the issue persists, [open an issue](https://github.com/agentstep/mvm/issues) with the output.
+Same daemon binary, same REST API. API key auth on TCP; Unix socket stays unauthenticated for local use.
 
-**VMs won't start from warm pool**
+## How mvm compares on agent workloads
 
-Make sure the pool is running:
+For a typical AI coding agent doing 50 tool calls in a session:
 
-```bash
-mvm pool status
-mvm pool warm    # restart the pool if needed
-```
+- **mvm local** — 50 × 16ms = 800ms of exec overhead, $0
+- **E2B** — 50 × 100ms = 5s of exec overhead, ~$0.01-0.05
+- **Daytona** — 50 × 100ms = 5s of exec overhead, ~$0.005
 
-**Network policy isn't blocking traffic**
-
-Verify the policy is applied:
-
-```bash
-mvm list         # check the net-policy column
-```
-
-If you set the policy after start, stop and restart the VM with the `--net-policy` flag — policies are set at boot.
-
-## How It Works
-
-[Lima](https://github.com/lima-vm/lima) provides a Linux VM with nested virtualization on Apple Silicon. [Firecracker](https://github.com/firecracker-microvm/firecracker) runs inside Lima, creating microVMs with hardware-level isolation via KVM — the same isolation model behind AWS Lambda. The **warm pool** pre-boots VMs in the background so `mvm start` claims one instantly.
+Multiply by 1000 agents per day: mvm saves 80+ minutes and $5-50 per day vs hosted, before factoring in data-locality and compliance benefits.
 
 ## Contributing
 
-Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-If you find a bug or have a feature request, [open an issue](https://github.com/agentstep/mvm/issues). If you'd like to contribute code, fork the repo, create a branch, and open a pull request.
-
-## Changelog
-
-See [Releases](https://github.com/agentstep/mvm/releases) for version history and release notes.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and feature requests: [open an issue](https://github.com/agentstep/mvm/issues).
 
 ## Acknowledgments
 
-Built on [Firecracker](https://github.com/firecracker-microvm/firecracker) and [Lima](https://github.com/lima-vm/lima). Inspired by [Fly.io Sprites](https://sprites.dev/) and [yashdiq/firecracker-lima-vm](https://github.com/yashdiq/firecracker-lima-vm).
+Built on [Firecracker](https://github.com/firecracker-microvm/firecracker), [Lima](https://github.com/lima-vm/lima), and userfaultfd(2). Inspired by [Fly.io Sprites](https://sprites.dev/) and [AWS Lambda's snapshot architecture](https://aws.amazon.com/blogs/compute/accelerating-serverless-workloads-with-aws-lambda-snapstart/).
 
 ## License
 
