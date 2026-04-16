@@ -1,14 +1,17 @@
 package firecracker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/agentstep/mvm/internal/agentclient"
 	"github.com/agentstep/mvm/internal/state"
 )
 
@@ -16,21 +19,47 @@ const (
 	PoolSize = 3 // pre-boot up to 3 VMs for concurrent sessions
 )
 
-func PoolDir() string         { return filepath.Join(DataDir(), "pool") }
-func poolSnapshotDir() string { return filepath.Join(PoolDir(), "snapshot") }
+func PoolDir() string { return filepath.Join(DataDir(), "pool") }
 
 func poolSlotDir(i int) string    { return fmt.Sprintf("%s/slot%d", PoolDir(), i) }
 func poolPidFile(i int) string    { return poolSlotDir(i) + "/pid" }
 func poolReadyFile(i int) string  { return poolSlotDir(i) + "/ready" }
 func poolSocketPath(i int) string { return fmt.Sprintf("%s/pool%d.socket", RunDir(), i) }
 
+// Per-slot pristine snapshot files. These are created by the first cold
+// boot for that slot and never modified after. Each slot's snapshot has
+// its own vsock UDS path embedded (pool{N}.vsock), so snapshots cannot be
+// shared across slots — if they were, restoring slotN would try to bind
+// slot0's UDS path and fail with "Address in use".
+func poolSlotPristineDir(i int) string  { return poolSlotDir(i) + "/pristine" }
+func poolSlotPristineSnap(i int) string { return poolSlotPristineDir(i) + "/snapshot_file" }
+func poolSlotPristineMem(i int) string  { return poolSlotPristineDir(i) + "/mem_file" }
+func poolSlotPristineRoot(i int) string { return poolSlotPristineDir(i) + "/rootfs.ext4" }
+
 func PoolSocketPathForSlot(i int) string { return poolSocketPath(i) }
 func PoolSocketPath() string             { return poolSocketPath(0) }
 
-// WarmPool fills the pool with pre-warmed VMs.
+// warmPoolMu serializes WarmPool invocations. Rapid claim bursts (e.g., a
+// benchmark doing 3 starts in a row) would otherwise spawn multiple
+// ReplenishPool goroutines, each calling WarmPool, each racing to fill
+// the same slots. The per-slot isSlotReady check is optimistic — by the
+// time fillSlot runs, another invocation may have started filling the
+// same slot. Serialize at the top level; parallelism inside WarmPool
+// still gives us the full per-slot parallelism benefit.
+var warmPoolMu sync.Mutex
+
+// WarmPool fills the pool with pre-warmed VMs, sequentially.
 // First call: cold boots + creates a golden snapshot with Claude warmed.
-// Subsequent calls: restores from snapshot (instant).
+// Subsequent calls: restores from snapshot (instant per-slot).
+//
+// Sequential on purpose: parallel per-slot restore saturates CPU on small
+// hosts (4-core n2-standard-4 loses exec latency to pool IO). Callers
+// that need speed should claim from the pool (one slot is enough) rather
+// than wait for 3/3.
 func WarmPool(ex Executor) error {
+	warmPoolMu.Lock()
+	defer warmPoolMu.Unlock()
+
 	booted := 0
 	for i := 0; i < PoolSize; i++ {
 		if isSlotReady(ex, i) {
@@ -49,24 +78,50 @@ func WarmPool(ex Executor) error {
 	return nil
 }
 
+// isSlotReady returns true only if the POOL_READY marker exists AND the
+// slot's FC process is alive. A stale ready file with a dead FC (e.g.,
+// after a crash or failed restore) would otherwise cause the pool to
+// falsely report the slot as available, and the next mvm start would
+// error out with "pool VM not running" or silently hit a zombie UDS.
 func isSlotReady(ex Executor, i int) bool {
 	out, err := ex.Run(fmt.Sprintf("cat %s 2>/dev/null", poolReadyFile(i)))
+	if err != nil || strings.TrimSpace(out) != "POOL_READY" {
+		return false
+	}
+	pidOut, err := ex.Run(fmt.Sprintf("cat %s 2>/dev/null", poolPidFile(i)))
 	if err != nil {
 		return false
 	}
-	return strings.TrimSpace(out) == "POOL_READY"
+	pid, err := strconv.Atoi(strings.TrimSpace(pidOut))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return IsRunning(ex, pid)
 }
 
-// fillSlot either restores from golden snapshot or cold boots + creates one.
+// fillSlot either restores from the slot's own golden snapshot or cold
+// boots + creates one. Each slot has its own snapshot because the vsock
+// UDS path is embedded in the snapshot — a shared snapshot would make
+// restore fail on any slot other than the one that created it.
 func fillSlot(ex Executor, i int) error {
-	if hasGoldenSnapshot(ex) {
+	if hasSlotSnapshot(ex, i) {
 		return restoreSlotFromSnapshot(ex, i)
 	}
 	return coldBootAndSnapshot(ex, i)
 }
 
-func hasGoldenSnapshot(ex Executor) bool {
-	out, err := ex.Run(fmt.Sprintf("sudo test -f %s/snapshot_file && echo YES || echo NO", poolSnapshotDir()))
+// hasSlotSnapshot returns true only if the slot has a COMPLETE pristine
+// snapshot (all three files non-empty). A previous cold-boot that failed
+// partway (e.g., snapshot_file + mem_file written but rootfs.ext4 cp
+// timed out) would leave an incomplete pristine dir; returning true
+// there would cause every future refill to fail with "No such file or
+// directory" instead of retrying the cold boot.
+func hasSlotSnapshot(ex Executor, i int) bool {
+	cmd := fmt.Sprintf(
+		"sudo test -s %s && sudo test -s %s && sudo test -s %s && echo YES || echo NO",
+		poolSlotPristineSnap(i), poolSlotPristineMem(i), poolSlotPristineRoot(i),
+	)
+	out, err := ex.Run(cmd)
 	if err != nil {
 		return false
 	}
@@ -154,41 +209,80 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	// Pre-warm Claude CLI via agent (direct TCP exec)
 	agentExec(ex, alloc.GuestIP, "command -v claude >/dev/null 2>&1 && NODE_COMPILE_CACHE=/tmp/v8-cache claude --version >/dev/null 2>&1 || true")
 
-	// Create golden snapshot: captures memory (with warm Node.js) + disk state
-	fmt.Println("  Creating golden snapshot...")
-	snapCmd := fmt.Sprintf(
-		`sudo mkdir -p %s && sudo curl -s --unix-socket %s -X PATCH "http://localhost/vm" -H "Content-Type: application/json" -d '{"state": "Paused"}' && sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/create" -H "Content-Type: application/json" -d '{"snapshot_type":"Full","snapshot_path":"%s/snapshot_file","mem_file_path":"%s/mem_file"}' && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo curl -s --unix-socket %s -X PATCH "http://localhost/vm" -H "Content-Type: application/json" -d '{"state": "Resumed"}' && echo SNAP_OK`,
-		poolSnapshotDir(), socket, socket,
-		poolSnapshotDir(), poolSnapshotDir(),
-		poolSlotDir(i), poolSnapshotDir(),
-		socket,
-	)
-	out, err = ex.RunWithTimeout(snapCmd, 60*time.Second)
-	if err != nil || !strings.Contains(out, "SNAP_OK") {
-		fmt.Printf("  Warning: snapshot creation failed (pool will cold-boot next time): %v\n", err)
-	} else {
-		fmt.Println("  Golden snapshot created")
+	// Create per-slot pristine snapshot: captures memory (with warm Node.js) +
+	// disk state. Pristine files never get mutated after creation — each
+	// future refill copies them into the slot's working dir and boots FC
+	// against the copy.
+	//
+	// We split this into discrete steps with per-step error checking
+	// because a silent partial failure (e.g., snapshot_file + mem_file
+	// created but rootfs copy timed out) would leave the pristine dir
+	// incomplete, and the slot would be marked POOL_READY but every
+	// future refill would fail with "No such file or directory" on the
+	// missing pristine file. A longer timeout (3 min) tolerates IO
+	// pressure from other slots warming in parallel.
+	fmt.Printf("  Creating pristine snapshot for slot %d...\n", i)
+	if _, err := ex.Run(fmt.Sprintf("sudo mkdir -p %s", poolSlotPristineDir(i))); err != nil {
+		return fmt.Errorf("slot %d: mkdir pristine: %w", i, err)
 	}
+	pauseCmd := fmt.Sprintf(`sudo curl -s --unix-socket %s -X PATCH "http://localhost/vm" -H "Content-Type: application/json" -d '{"state": "Paused"}'`, socket)
+	if _, err := ex.Run(pauseCmd); err != nil {
+		return fmt.Errorf("slot %d: pause: %w", i, err)
+	}
+	createCmd := fmt.Sprintf(
+		`sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/create" -H "Content-Type: application/json" -d '{"snapshot_type":"Full","snapshot_path":"%s","mem_file_path":"%s"}'`,
+		socket, poolSlotPristineSnap(i), poolSlotPristineMem(i),
+	)
+	// 5 min timeout: the later slots can take >2 min when earlier pool
+	// FCs are active and pageing 2GB each through the same disk. After
+	// snapshot creation the FC will be paused and other slots can make
+	// progress.
+	if _, err := ex.RunWithTimeout(createCmd, 300*time.Second); err != nil {
+		return fmt.Errorf("slot %d: snapshot/create: %w", i, err)
+	}
+	cpRootCmd := fmt.Sprintf("sudo cp --sparse=always %s/rootfs.ext4 %s", poolSlotDir(i), poolSlotPristineRoot(i))
+	if _, err := ex.RunWithTimeout(cpRootCmd, 300*time.Second); err != nil {
+		return fmt.Errorf("slot %d: cp rootfs: %w", i, err)
+	}
+	resumeCmd := fmt.Sprintf(`sudo curl -s --unix-socket %s -X PATCH "http://localhost/vm" -H "Content-Type: application/json" -d '{"state": "Resumed"}'`, socket)
+	ex.Run(resumeCmd) // best effort — VM is about to be snapshot-restored from anyway
+	// Verify all three pristine files exist before marking ready.
+	verifyCmd := fmt.Sprintf(`sudo test -s %s && sudo test -s %s && sudo test -s %s && echo PRISTINE_OK`,
+		poolSlotPristineSnap(i), poolSlotPristineMem(i), poolSlotPristineRoot(i))
+	if out, _ := ex.Run(verifyCmd); !strings.Contains(out, "PRISTINE_OK") {
+		return fmt.Errorf("slot %d: pristine files incomplete after cold boot", i)
+	}
+	fmt.Printf("  Pristine snapshot created for slot %d\n", i)
 
-	// Mark ready
+	// Mark ready — only after ALL pristine files verified.
 	ex.Run(fmt.Sprintf(`echo POOL_READY | sudo tee %s >/dev/null`, poolReadyFile(i)))
 
 	return nil
 }
 
-// restoreSlotFromSnapshot: fast path — restore from golden snapshot.
-// This gives a VM with Claude already warmed in memory.
+// restoreSlotFromSnapshot: fast path — restore from slot's pristine snapshot.
+// Each slot has its own pristine snapshot (with its own vsock UDS path
+// embedded) so slots refill independently without UDS-bind conflicts.
 func restoreSlotFromSnapshot(ex Executor, i int) error {
-	fmt.Println("  Restoring from golden snapshot (instant Claude-ready VM)...")
+	fmt.Printf("  Restoring slot %d from pristine snapshot...\n", i)
 
 	alloc := state.AllocateNet(i)
 
-	// Setup TAP + copy rootfs and mem from snapshot
+	// Setup TAP + copy rootfs and mem from this slot's pristine dir.
+	// FC will write dirty memory pages into mem_file during runtime, so
+	// each refill needs a fresh (clean) copy of the pristine mem_file.
+	//
+	// Run the 2-3GB of disk copies under `nice -n 19 ionice -c3` so pool
+	// refill doesn't starve exec latency on live VMs. During refill we
+	// otherwise see exec spike from ~100ms to 2-5s as the `cp --sparse`
+	// saturates IO bandwidth and page cache on a small-host shared disk.
+	// The refill itself is slightly slower but happens in the background
+	// and doesn't block any user-facing request.
 	setupCmd := fmt.Sprintf(
-		`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/mem_file %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
+		`sudo mkdir -p %s && sudo nice -n 19 ionice -c3 cp --sparse=always %s %s/rootfs.ext4 && sudo nice -n 19 ionice -c3 cp --sparse=always %s %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
 		poolSlotDir(i),
-		poolSnapshotDir(), poolSlotDir(i),
-		poolSnapshotDir(), poolSlotDir(i),
+		poolSlotPristineRoot(i), poolSlotDir(i),
+		poolSlotPristineMem(i), poolSlotDir(i),
 		alloc.TAPDev, alloc.TAPDev, alloc.TAPIP, alloc.TAPDev, alloc.TAPDev,
 		poolSlotDir(i), poolSlotDir(i),
 	)
@@ -216,10 +310,13 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 		return fmt.Errorf("API socket not ready")
 	}
 
-	// Restore from snapshot with network_overrides
+	// Restore from pristine snapshot with network_overrides. The snapshot
+	// file is immutable (FC only reads it), so we load it directly from
+	// the pristine dir. The mem backend points at the copied mem_file
+	// which FC will dirty during runtime.
 	restoreCmd := fmt.Sprintf(
-		`sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/load" -H "Content-Type: application/json" -d '{"snapshot_path":"%s/snapshot_file","mem_backend":{"backend_path":"%s/mem_file","backend_type":"File"},"enable_diff_snapshots":false,"resume_vm":true,"network_overrides":[{"iface_id":"net1","host_dev_name":"%s"}]}' && echo RESTORE_OK`,
-		socket, poolSnapshotDir(), poolSlotDir(i), alloc.TAPDev,
+		`sudo curl -s --unix-socket %s -X PUT "http://localhost/snapshot/load" -H "Content-Type: application/json" -d '{"snapshot_path":"%s","mem_backend":{"backend_path":"%s/mem_file","backend_type":"File"},"enable_diff_snapshots":false,"resume_vm":true,"network_overrides":[{"iface_id":"net1","host_dev_name":"%s"}]}' && echo RESTORE_OK`,
+		socket, poolSlotPristineSnap(i), poolSlotDir(i), alloc.TAPDev,
 	)
 	out, err = ex.RunWithTimeout(restoreCmd, 30*time.Second)
 	if err != nil || !strings.Contains(out, "RESTORE_OK") {
@@ -228,10 +325,42 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 
 	fmt.Printf("  Pool slot %d restored (PID: %d)\n", i, pid)
 
-	// Mark ready — no need to wait for SSH, the snapshot was taken post-SSH
+	// Wait for the guest agent to be reachable on vsock before marking
+	// the slot ready. The snapshot/load call returns as soon as vCPUs
+	// resume, but the guest agent needs a moment to re-establish its
+	// vsock listener (the UDS path was remapped). Without this wait,
+	// the first exec on a pool-claimed VM often fails with "connection
+	// refused" for 100-500ms after restore.
+	if err := waitForAgent(i, 3*time.Second); err != nil {
+		fmt.Printf("  Warning: slot %d agent not responsive after restore: %v\n", i, err)
+		// Still mark ready — caller can retry exec if needed. The earlier
+		// behavior was "always mark ready", so we're strictly better.
+	}
+
+	// Mark ready
 	ex.Run(fmt.Sprintf(`echo POOL_READY | sudo tee %s >/dev/null`, poolReadyFile(i)))
 
 	return nil
+}
+
+// waitForAgent polls the in-guest mvm-agent via vsock until it responds
+// or the deadline passes. Used after snapshot restore to ensure pool
+// slots don't report "ready" while their agent is still reconnecting.
+func waitForAgent(slotIdx int, timeout time.Duration) error {
+	udsPath := fmt.Sprintf("%s/pool%d.vsock", RunDir(), slotIdx)
+	client := agentclient.New(&agentclient.FirecrackerVsockDialer{UDSPath: udsPath})
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		err := client.Ping(ctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("agent not responsive within %v", timeout)
 }
 
 // IsPoolReady checks if any warm VM is available.
@@ -293,28 +422,49 @@ func ClaimPoolSlot(ex Executor, name string, alloc state.NetAllocation) (int, st
 		}
 	}
 
+	// Move the working files to the VM's dir, but preserve the pristine
+	// snapshot so refill can restore from it without re-creating. We
+	// explicitly remove only the working/runtime files (ready, pid,
+	// mem_file, config.json); the pristine/ subdir stays intact.
 	vmDir := VMDir(name)
 	moveCmd := fmt.Sprintf(
-		`sudo mkdir -p %s && sudo mv %s/rootfs.ext4 %s/rootfs.ext4 && sudo mv %s/firecracker.log %s/firecracker.log && sudo rm -rf %s && echo CLAIMED`,
-		vmDir, poolSlotDir(slotIdx), vmDir, poolSlotDir(slotIdx), vmDir, poolSlotDir(slotIdx),
+		`sudo mkdir -p %s && sudo mv %s/rootfs.ext4 %s/rootfs.ext4 && sudo mv %s/firecracker.log %s/firecracker.log && sudo rm -f %s/ready %s/pid %s/mem_file %s/config.json && echo CLAIMED`,
+		vmDir, poolSlotDir(slotIdx), vmDir, poolSlotDir(slotIdx), vmDir,
+		poolSlotDir(slotIdx), poolSlotDir(slotIdx), poolSlotDir(slotIdx), poolSlotDir(slotIdx),
 	)
 	out, err = ex.Run(moveCmd)
 	if err != nil || !strings.Contains(out, "CLAIMED") {
 		return 0, "", fmt.Errorf("failed to claim pool slot")
 	}
 
-	// Symlink the VM's expected UDS paths to the pool slot's actual UDS
-	// paths. Firecracker was started with pool{N}.socket / pool{N}.vsock
-	// and we can't change those without restarting — but exec expects
-	// {name}.vsock. Symlinks bridge the gap transparently.
-	linkCmd := fmt.Sprintf(
-		`sudo ln -sf pool%d.vsock %s/%s.vsock && sudo ln -sf pool%d.vsock_5123 %s/%s.vsock_5123 && sudo ln -sf pool%d.socket %s/%s.socket`,
-		slotIdx, RunDir(), name,
-		slotIdx, RunDir(), name,
-		slotIdx, RunDir(), name,
+	// Rename the pool slot's UDS paths to the VM's expected names.
+	// rename(2) atomically moves the pathname → inode mapping in the
+	// kernel; the FC process keeps its listener socket, but the path
+	// that clients connect to is now {name}.vsock.
+	//
+	// CRITICAL: we MUST rename (not symlink). If we leave pool{N}.vsock
+	// in place, ReplenishPool will start a new FC on that path — and
+	// `rm -f pool{N}.vsock` in the refill startCmd will unlink our
+	// claimed FC's pathname, causing clients to connect to the refilled
+	// slot's FC instead (silently running commands on the wrong VM).
+	renameCmd := fmt.Sprintf(
+		`sudo mv %s/pool%d.vsock %s/%s.vsock && sudo mv %s/pool%d.vsock_5123 %s/%s.vsock_5123 && sudo mv %s/pool%d.socket %s/%s.socket`,
+		RunDir(), slotIdx, RunDir(), name,
+		RunDir(), slotIdx, RunDir(), name,
+		RunDir(), slotIdx, RunDir(), name,
 	)
-	if _, err := ex.Run(linkCmd); err != nil {
-		log.Printf("warning: failed to symlink UDS paths for pool slot %d -> %s: %v", slotIdx, name, err)
+	if _, err := ex.Run(renameCmd); err != nil {
+		log.Printf("warning: failed to rename UDS paths for pool slot %d -> %s: %v", slotIdx, name, err)
+	}
+
+	// The slot was marked ready during fillSlot which already waited for
+	// the agent. But changing the TAP device triggers a new network config
+	// via agent.Exec in the post-boot goroutine, which briefly interrupts
+	// the agent. Wait one more ping to make sure the caller can exec
+	// immediately after start returns.
+	if err := waitForAgent(slotIdx, 2*time.Second); err != nil {
+		log.Printf("warning: agent not responsive after claim: %v", err)
+		// Don't fail the claim — the VM is usable, exec retries are cheap.
 	}
 
 	return pid, SocketPath(name), nil
