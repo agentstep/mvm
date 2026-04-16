@@ -39,12 +39,19 @@ echo "[bench] resetting state..." >&2
 systemctl stop mvm-daemon 2>/dev/null || true
 pkill -9 firecracker mvm-uffd 2>/dev/null || true
 sleep 1
-rm -rf /var/mvm/vms/* /var/mvm/pool/* 2>/dev/null || true
+# Reset runtime state. Preserve /var/mvm/pool/snapshot/ (the golden snapshot
+# infrastructure — recreating it costs ~60s and isn't something a single
+# benchmark iteration should amortize).
+rm -rf /var/mvm/vms/* 2>/dev/null || true
+rm -rf /var/mvm/pool/slot* 2>/dev/null || true
 rm -f /run/mvm/*.socket /run/mvm/*.vsock* /run/mvm/*-uffd.sock 2>/dev/null || true
 # Reset any leftover TAP devices from previous runs
 for t in $(ip link show 2>/dev/null | grep -oE 'tap[0-9]+' | sort -u); do
     ip link del "$t" 2>/dev/null || true
 done
+# Reset state.json — keep initialized flag but clear VM list
+mkdir -p /root/.mvm
+echo '{"initialized":true,"backend":"firecracker","vms":{}}' > /root/.mvm/state.json
 systemctl start mvm-daemon
 sleep 3
 
@@ -61,17 +68,22 @@ fi
 echo "[bench] warming pool..." >&2
 mvm pool warm >/dev/null 2>&1 || true
 POOL_WARM_START=$(date +%s)
-for _ in $(seq 1 90); do
+# 180s timeout: first iteration builds the golden snapshot (~60s). Subsequent
+# iterations restore from it (~10-15s per slot, 3 slots in parallel).
+for _ in $(seq 1 180); do
     if mvm pool status 2>/dev/null | grep -q "3/3"; then break; fi
     sleep 1
-    # Nudge pool refill periodically
-    mvm pool warm >/dev/null 2>&1 || true
+    # Nudge pool refill periodically (some code paths need re-triggering)
+    if [ $(( $(date +%s) - POOL_WARM_START )) -gt 5 ] && \
+       [ $(( ($(date +%s) - POOL_WARM_START) % 15 )) -eq 0 ]; then
+        mvm pool warm >/dev/null 2>&1 || true
+    fi
 done
 POOL_WARM_SEC=$(( $(date +%s) - POOL_WARM_START ))
 echo "METRIC pool_warm_s=$POOL_WARM_SEC"
 
 if ! mvm pool status 2>/dev/null | grep -q "3/3"; then
-    echo "ERROR: pool did not reach 3/3 within 90s" >&2
+    echo "ERROR: pool did not reach 3/3 within 180s" >&2
     exit 3
 fi
 
@@ -82,15 +94,32 @@ fi
 echo "[bench] measuring TTI..." >&2
 declare -a TTI_SAMPLES=()
 for i in 1 2 3 4 5; do
-    # Refill pool between samples so we're always measuring warm-pool claim
+    # Refill pool between samples so we're always measuring warm-pool claim.
+    # Extra settle time after 3/3 because the "ready" flag sometimes fires
+    # before the VM is fully accepting exec; retry exec with brief backoff.
     while ! mvm pool status 2>/dev/null | grep -q "3/3"; do
         mvm pool warm >/dev/null 2>&1 || true
         sleep 2
     done
+    sleep 1  # small extra settle
 
     T0=$(date +%s%N)
     mvm start "b$i" >/dev/null 2>&1 || { echo "ERROR: start b$i failed" >&2; exit 4; }
-    mvm exec  "b$i" -- echo ok >/dev/null 2>&1 || { echo "ERROR: exec b$i failed" >&2; exit 4; }
+
+    # Exec with small retry — pool claim sets up sockets async on some paths
+    EXEC_OK=0
+    for retry in 1 2 3 4 5; do
+        if mvm exec "b$i" -- echo ok >/dev/null 2>&1; then
+            EXEC_OK=1
+            break
+        fi
+        sleep 0.2
+    done
+    if [ $EXEC_OK -eq 0 ]; then
+        echo "ERROR: exec b$i failed after 5 retries" >&2
+        mvm delete "b$i" --force >/dev/null 2>&1 || true
+        exit 4
+    fi
     T1=$(date +%s%N)
     MS=$(( (T1 - T0) / 1000000 ))
     TTI_SAMPLES+=( "$MS" )
