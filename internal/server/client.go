@@ -4,11 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -17,10 +20,13 @@ import (
 	"github.com/agentstep/mvm/internal/firecracker"
 )
 
-// Client communicates with the mvm daemon via Unix socket.
+// Client communicates with the mvm daemon via Unix socket or remote TCP+TLS.
 type Client struct {
 	httpClient *http.Client
 	socketPath string
+	remoteURL  string // e.g. "https://server:19876"
+	apiKey     string
+	caCertPath string
 }
 
 func NewClient(socketPath string) *Client {
@@ -36,14 +42,93 @@ func NewClient(socketPath string) *Client {
 	}
 }
 
-// DefaultClient returns a client for the default socket path.
+// authRoundTripper wraps an http.RoundTripper to inject an Authorization header.
+type authRoundTripper struct {
+	base   http.RoundTripper
+	apiKey string
+}
+
+func (a *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	return a.base.RoundTrip(req)
+}
+
+// NewRemoteClient creates a client that connects to a remote daemon over TCP (optionally TLS).
+func NewRemoteClient(remoteURL, apiKey, caCertPath string) *Client {
+	c := &Client{
+		remoteURL:  strings.TrimRight(remoteURL, "/"),
+		apiKey:     apiKey,
+		caCertPath: caCertPath,
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: c.tlsConfig(),
+	}
+
+	var rt http.RoundTripper = transport
+	if apiKey != "" {
+		rt = &authRoundTripper{base: transport, apiKey: apiKey}
+	}
+
+	c.httpClient = &http.Client{Transport: rt}
+	return c
+}
+
+// url returns the full URL for a given API path, using the remote URL if set.
+func (c *Client) url(path string) string {
+	if c.remoteURL != "" {
+		return c.remoteURL + path
+	}
+	return "http://mvm" + path
+}
+
+// tlsConfig returns a TLS configuration, optionally loading a custom CA cert.
+func (c *Client) tlsConfig() *tls.Config {
+	tlsConf := &tls.Config{}
+	if c.caCertPath != "" {
+		caCert, err := os.ReadFile(c.caCertPath)
+		if err == nil {
+			pool := x509.NewCertPool()
+			pool.AppendCertsFromPEM(caCert)
+			tlsConf.RootCAs = pool
+		}
+	}
+	return tlsConf
+}
+
+// dial opens a raw connection to the daemon (Unix socket or TCP+TLS).
+func (c *Client) dial() (net.Conn, error) {
+	if c.remoteURL != "" {
+		host := strings.TrimPrefix(strings.TrimPrefix(c.remoteURL, "https://"), "http://")
+		if strings.HasPrefix(c.remoteURL, "https://") {
+			return tls.DialWithDialer(
+				&net.Dialer{Timeout: 5 * time.Second},
+				"tcp", host,
+				c.tlsConfig(),
+			)
+		}
+		return net.DialTimeout("tcp", host, 5*time.Second)
+	}
+	return net.DialTimeout("unix", c.socketPath, 5*time.Second)
+}
+
+// DefaultClient returns a client for the default socket path,
+// or a remote client if MVM_REMOTE is set.
 func DefaultClient() *Client {
+	if remote := os.Getenv("MVM_REMOTE"); remote != "" {
+		return NewRemoteClient(
+			remote,
+			os.Getenv("MVM_API_KEY"),
+			os.Getenv("MVM_CA_CERT"),
+		)
+	}
 	return NewClient(DefaultSocketPath())
 }
 
 // IsAvailable checks if the daemon is running and responding.
 func (c *Client) IsAvailable() bool {
-	resp, err := c.httpClient.Get("http://mvm/health")
+	resp, err := c.httpClient.Get(c.url("/health"))
 	if err != nil {
 		return false
 	}
@@ -55,7 +140,7 @@ func (c *Client) IsAvailable() bool {
 func (c *Client) Exec(ctx context.Context, vmName, command string) (string, int, error) {
 	body, _ := json.Marshal(ExecRequest{Command: command})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/exec", vmName),
+		c.url(fmt.Sprintf("/vms/%s/exec", vmName)),
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -79,7 +164,7 @@ func (c *Client) Exec(ctx context.Context, vmName, command string) (string, int,
 func (c *Client) ExecStream(ctx context.Context, vmName, command string, stdout, stderr io.Writer) (int, error) {
 	body, _ := json.Marshal(ExecRequest{Command: command, Stream: true})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/exec", vmName),
+		c.url(fmt.Sprintf("/vms/%s/exec", vmName)),
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -131,7 +216,7 @@ func (c *Client) ExecStream(ctx context.Context, vmName, command string, stdout,
 // CreateVM sends a create request.
 func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VMResponse, error) {
 	body, _ := json.Marshal(req)
-	httpReq, _ := http.NewRequestWithContext(ctx, "POST", "http://mvm/vms", bytes.NewReader(body))
+	httpReq, _ := http.NewRequestWithContext(ctx, "POST", c.url("/vms"), bytes.NewReader(body))
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -150,7 +235,7 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VMResponse
 
 // DeleteVM sends a delete request.
 func (c *Client) DeleteVM(ctx context.Context, name string) error {
-	req, _ := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("http://mvm/vms/%s", name), nil)
+	req, _ := http.NewRequestWithContext(ctx, "DELETE", c.url(fmt.Sprintf("/vms/%s", name)), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -164,7 +249,7 @@ func (c *Client) DeleteVM(ctx context.Context, name string) error {
 
 // ListVMs lists all VMs.
 func (c *Client) ListVMs(ctx context.Context) ([]VMResponse, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://mvm/vms", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/vms"), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -184,7 +269,7 @@ type PoolStatusResponse struct {
 
 // PoolStatus returns the warm pool status.
 func (c *Client) PoolStatus(ctx context.Context) (*PoolStatusResponse, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://mvm/pool", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/pool"), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -199,7 +284,7 @@ func (c *Client) PoolStatus(ctx context.Context) (*PoolStatusResponse, error) {
 func (c *Client) StopVM(ctx context.Context, name string, force bool) error {
 	body, _ := json.Marshal(StopVMRequest{Force: force})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/stop", name), bytes.NewReader(body))
+		c.url(fmt.Sprintf("/vms/%s/stop", name)), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -218,7 +303,7 @@ func (c *Client) StopVM(ctx context.Context, name string, force bool) error {
 // PauseVM pauses a running VM.
 func (c *Client) PauseVM(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/pause", name), nil)
+		c.url(fmt.Sprintf("/vms/%s/pause", name)), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -235,7 +320,7 @@ func (c *Client) PauseVM(ctx context.Context, name string) error {
 // ResumeVM resumes a paused VM.
 func (c *Client) ResumeVM(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/resume", name), nil)
+		c.url(fmt.Sprintf("/vms/%s/resume", name)), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -253,7 +338,7 @@ func (c *Client) ResumeVM(ctx context.Context, name string) error {
 func (c *Client) SnapshotCreate(ctx context.Context, vmName, snapName string) error {
 	body, _ := json.Marshal(SnapshotCreateRequest{Name: snapName})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/snapshot", vmName), bytes.NewReader(body))
+		c.url(fmt.Sprintf("/vms/%s/snapshot", vmName)), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -273,7 +358,7 @@ func (c *Client) SnapshotCreate(ctx context.Context, vmName, snapName string) er
 func (c *Client) SnapshotRestore(ctx context.Context, vmName, snapName string) error {
 	body, _ := json.Marshal(SnapshotRestoreRequest{Name: snapName})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("http://mvm/vms/%s/restore", vmName), bytes.NewReader(body))
+		c.url(fmt.Sprintf("/vms/%s/restore", vmName)), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -291,7 +376,7 @@ func (c *Client) SnapshotRestore(ctx context.Context, vmName, snapName string) e
 
 // SnapshotList returns all available snapshots.
 func (c *Client) SnapshotList(ctx context.Context) ([]SnapshotInfo, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://mvm/snapshots", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/snapshots"), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -306,7 +391,7 @@ func (c *Client) SnapshotList(ctx context.Context) ([]SnapshotInfo, error) {
 // SnapshotDelete removes a named snapshot.
 func (c *Client) SnapshotDelete(ctx context.Context, snapName string) error {
 	req, _ := http.NewRequestWithContext(ctx, "DELETE",
-		fmt.Sprintf("http://mvm/snapshots/%s", snapName), nil)
+		c.url(fmt.Sprintf("/snapshots/%s", snapName)), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -327,7 +412,7 @@ func (c *Client) Build(ctx context.Context, imageName string, steps []firecracke
 		Steps:     steps,
 		SizeMB:    sizeMB,
 	})
-	req, _ := http.NewRequestWithContext(ctx, "POST", "http://mvm/build", bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.url("/build"), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -345,7 +430,7 @@ func (c *Client) Build(ctx context.Context, imageName string, steps []firecracke
 
 // ImageList returns all available custom rootfs images.
 func (c *Client) ImageList(ctx context.Context) ([]ImageInfo, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", "http://mvm/images", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/images"), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -360,7 +445,7 @@ func (c *Client) ImageList(ctx context.Context) ([]ImageInfo, error) {
 // ImageDelete removes a custom rootfs image by name.
 func (c *Client) ImageDelete(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "DELETE",
-		fmt.Sprintf("http://mvm/images/%s", name), nil)
+		c.url(fmt.Sprintf("/images/%s", name)), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -376,7 +461,7 @@ func (c *Client) ImageDelete(ctx context.Context, name string) error {
 
 // PoolWarm triggers pool warming. Returns immediately; warming happens async.
 func (c *Client) PoolWarm(ctx context.Context) error {
-	req, _ := http.NewRequestWithContext(ctx, "POST", "http://mvm/pool/warm", nil)
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.url("/pool/warm"), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -392,9 +477,9 @@ func (c *Client) PoolWarm(ctx context.Context) error {
 // The caller is responsible for putting the terminal in raw mode before calling
 // this method and restoring it afterward.
 func (c *Client) ExecInteractive(ctx context.Context, vmName, command string, stdin io.Reader, stdout io.Writer) (int, error) {
-	// 1. Dial the daemon's Unix socket directly — Go's http.Client cannot
+	// 1. Dial the daemon directly — Go's http.Client cannot
 	//    expose the underlying conn after an HTTP upgrade.
-	conn, err := net.DialTimeout("unix", c.socketPath, 5*time.Second)
+	conn, err := c.dial()
 	if err != nil {
 		return -1, fmt.Errorf("dial daemon: %w", err)
 	}
@@ -402,12 +487,21 @@ func (c *Client) ExecInteractive(ctx context.Context, vmName, command string, st
 
 	// 2. Write a raw HTTP POST with Connection: Upgrade.
 	body, _ := json.Marshal(ExecRequest{Command: command, Interactive: true})
+
+	host := "mvm"
+	if c.remoteURL != "" {
+		host = strings.TrimPrefix(strings.TrimPrefix(c.remoteURL, "https://"), "http://")
+	}
+
 	var httpReq strings.Builder
 	fmt.Fprintf(&httpReq, "POST /vms/%s/exec HTTP/1.1\r\n", vmName)
-	httpReq.WriteString("Host: mvm\r\n")
+	fmt.Fprintf(&httpReq, "Host: %s\r\n", host)
 	httpReq.WriteString("Content-Type: application/json\r\n")
 	httpReq.WriteString("Connection: Upgrade\r\n")
 	httpReq.WriteString("Upgrade: tty\r\n")
+	if c.apiKey != "" {
+		fmt.Fprintf(&httpReq, "Authorization: Bearer %s\r\n", c.apiKey)
+	}
 	fmt.Fprintf(&httpReq, "Content-Length: %d\r\n", len(body))
 	httpReq.WriteString("\r\n")
 	httpReq.Write(body)

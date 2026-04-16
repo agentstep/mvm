@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ func TestNewClientHTTPClient(t *testing.T) {
 // === DefaultClient ===
 
 func TestDefaultClientNotNil(t *testing.T) {
+	t.Setenv("MVM_REMOTE", "")
 	c := DefaultClient()
 	if c == nil {
 		t.Fatal("DefaultClient should not return nil")
@@ -42,10 +44,248 @@ func TestDefaultClientNotNil(t *testing.T) {
 }
 
 func TestDefaultClientUsesDefaultSocket(t *testing.T) {
+	t.Setenv("MVM_REMOTE", "")
 	c := DefaultClient()
 	expected := DefaultSocketPath()
 	if c.socketPath != expected {
 		t.Errorf("socketPath = %q, want %q", c.socketPath, expected)
+	}
+}
+
+func TestDefaultClientRemoteFromEnv(t *testing.T) {
+	t.Setenv("MVM_REMOTE", "https://myhost:19876")
+	t.Setenv("MVM_API_KEY", "secret123")
+	t.Setenv("MVM_CA_CERT", "")
+	c := DefaultClient()
+	if c.remoteURL != "https://myhost:19876" {
+		t.Errorf("remoteURL = %q, want https://myhost:19876", c.remoteURL)
+	}
+	if c.apiKey != "secret123" {
+		t.Errorf("apiKey = %q, want secret123", c.apiKey)
+	}
+	if c.socketPath != "" {
+		t.Errorf("socketPath should be empty for remote client, got %q", c.socketPath)
+	}
+}
+
+// === NewRemoteClient ===
+
+func TestNewRemoteClient(t *testing.T) {
+	c := NewRemoteClient("https://server:19876", "mykey", "")
+	if c == nil {
+		t.Fatal("NewRemoteClient should not return nil")
+	}
+	if c.remoteURL != "https://server:19876" {
+		t.Errorf("remoteURL = %q", c.remoteURL)
+	}
+	if c.apiKey != "mykey" {
+		t.Errorf("apiKey = %q", c.apiKey)
+	}
+	if c.httpClient == nil {
+		t.Error("httpClient should not be nil")
+	}
+}
+
+func TestNewRemoteClientTrailingSlash(t *testing.T) {
+	c := NewRemoteClient("https://server:19876/", "key", "")
+	if c.remoteURL != "https://server:19876" {
+		t.Errorf("remoteURL = %q, trailing slash should be stripped", c.remoteURL)
+	}
+}
+
+func TestNewRemoteClientNoAPIKey(t *testing.T) {
+	c := NewRemoteClient("http://server:19876", "", "")
+	if c.httpClient == nil {
+		t.Error("httpClient should not be nil even without API key")
+	}
+}
+
+// === url() helper ===
+
+func TestURLLocal(t *testing.T) {
+	c := NewClient("/tmp/test.sock")
+	got := c.url("/vms")
+	if got != "http://mvm/vms" {
+		t.Errorf("url = %q, want http://mvm/vms", got)
+	}
+}
+
+func TestURLRemote(t *testing.T) {
+	c := NewRemoteClient("https://server:19876", "", "")
+	got := c.url("/vms")
+	if got != "https://server:19876/vms" {
+		t.Errorf("url = %q, want https://server:19876/vms", got)
+	}
+}
+
+// === authRoundTripper ===
+
+func TestAuthRoundTripperAddsHeader(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "test-key-123", "")
+	c.httpClient.Get(c.url("/health"))
+
+	if gotAuth != "Bearer test-key-123" {
+		t.Errorf("Authorization = %q, want 'Bearer test-key-123'", gotAuth)
+	}
+}
+
+func TestAuthRoundTripperNoKeyNoHeader(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	c.httpClient.Get(c.url("/health"))
+
+	if gotAuth != "" {
+		t.Errorf("Authorization should be empty without API key, got %q", gotAuth)
+	}
+}
+
+// === tlsConfig ===
+
+func TestTLSConfigNoCACert(t *testing.T) {
+	c := &Client{}
+	conf := c.tlsConfig()
+	if conf.RootCAs != nil {
+		t.Error("RootCAs should be nil when no CA cert path is set")
+	}
+}
+
+func TestTLSConfigWithCACert(t *testing.T) {
+	// Write a dummy PEM cert (self-signed, just for pool test)
+	certPEM := `-----BEGIN CERTIFICATE-----
+MIIBhTCCASugAwIBAgIQIRi6zePL6mKjOipn+dNuaTAKBggqhkjOPQQDAjASMRAw
+DgYDVQQKEwdBY21lIENvMB4XDTE3MTAyMDE5NDMwNloXDTE4MTAyMDE5NDMwNlow
+EjEQMA4GA1UEChMHQWNtZSBDbzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABLU3
+jSO0r7B4hOBfOwHVPe+TgrFKMDwBRjHm42ADiZhoIelfdnMJfkImaeL4SEA7VMCJ
+TBPEiQHj/9aqaa3MYBOjYzBhMA4GA1UdDwEB/wQEAwICpDATBgNVHSUEDDAKBggr
+BgEFBQcDATAPBgNVHRMBAf8EBTADAQH/MCkGA1UdEQQiMCCCDmxvY2FsaG9zdDo1
+NDUzgg4xMjcuMC4wLjE6NTQ1MzAKBggqhkjOPQQDAgNIADBFAiEA2wpSek3WBpMl
+fHbDfhXBrd4rvEY02JDeI8eDGZdRQlkCIBYsSSNTYBSBdHJtnhJDMm14mGl8JGVX
+N7NwKlMYdDkS
+-----END CERTIFICATE-----`
+	tmpFile, err := os.CreateTemp(t.TempDir(), "ca-*.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.WriteString(certPEM)
+	tmpFile.Close()
+
+	c := &Client{caCertPath: tmpFile.Name()}
+	conf := c.tlsConfig()
+	if conf.RootCAs == nil {
+		t.Error("RootCAs should not be nil when CA cert is provided")
+	}
+}
+
+func TestTLSConfigBadCACertPath(t *testing.T) {
+	c := &Client{caCertPath: "/nonexistent/ca.pem"}
+	conf := c.tlsConfig()
+	// Should not crash, just return nil RootCAs
+	if conf.RootCAs != nil {
+		t.Error("RootCAs should be nil when CA cert file doesn't exist")
+	}
+}
+
+// === dial() ===
+
+func TestDialLocal(t *testing.T) {
+	// Start a Unix listener
+	dir := t.TempDir()
+	sockPath := dir + "/test.sock"
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	c := NewClient(sockPath)
+	conn, err := c.dial()
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.Close()
+}
+
+func TestDialRemoteTCP(t *testing.T) {
+	// Start a TCP listener
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	c := NewRemoteClient("http://"+ln.Addr().String(), "", "")
+	conn, err := c.dial()
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	conn.Close()
+}
+
+// === Remote client with httptest (end-to-end) ===
+
+func TestRemoteClientListVMs(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/vms" {
+			t.Errorf("path = %q, want /vms", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]VMResponse{
+			{Name: "vm1", Status: "running"},
+		})
+	}))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	vms, err := c.ListVMs(context.Background())
+	if err != nil {
+		t.Fatalf("ListVMs: %v", err)
+	}
+	if len(vms) != 1 || vms[0].Name != "vm1" {
+		t.Errorf("vms = %v", vms)
+	}
+}
+
+func TestRemoteClientWithAuth(t *testing.T) {
+	var gotAuth string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]VMResponse{})
+	}))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "secret", "")
+	c.ListVMs(context.Background())
+	if gotAuth != "Bearer secret" {
+		t.Errorf("Authorization = %q, want 'Bearer secret'", gotAuth)
+	}
+}
+
+func TestRemoteClientIsAvailable(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %q, want /health", r.URL.Path)
+		}
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	if !c.IsAvailable() {
+		t.Error("remote client should be available")
 	}
 }
 

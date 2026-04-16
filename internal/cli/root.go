@@ -11,6 +11,11 @@ import (
 )
 
 var (
+	remoteFlag string
+	apiKeyFlag string
+)
+
+var (
 	verbose bool
 	mvmDir  string
 )
@@ -30,6 +35,18 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 	}
 
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
+	rootCmd.PersistentFlags().StringVar(&remoteFlag, "remote", "", "remote daemon URL (e.g. https://server:19876)")
+	rootCmd.PersistentFlags().StringVar(&apiKeyFlag, "api-key", "", "API key for remote daemon")
+
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if remoteFlag != "" {
+			os.Setenv("MVM_REMOTE", remoteFlag)
+		}
+		if apiKeyFlag != "" {
+			os.Setenv("MVM_API_KEY", apiKeyFlag)
+		}
+		return nil
+	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
