@@ -39,67 +39,30 @@ func PoolSocketPath() string             { return poolSocketPath(0) }
 // still gives us the full per-slot parallelism benefit.
 var warmPoolMu sync.Mutex
 
-// WarmPool fills the pool with pre-warmed VMs.
+// WarmPool fills the pool with pre-warmed VMs, sequentially.
 // First call: cold boots + creates a golden snapshot with Claude warmed.
-// Subsequent calls: restores from snapshot (instant).
+// Subsequent calls: restores from snapshot (instant per-slot).
 //
-// Empty slots are filled in parallel — each slot takes ~10-20s to restore
-// from snapshot, so filling 3 slots sequentially would block the pool
-// behind slower refills. Parallel fill uses 3x more CPU briefly but gets
-// the pool back to 3/3 in the same time as filling one slot.
-//
-// The first-ever cold boot + golden snapshot creation must be serial
-// (only one VM can write the golden snapshot), so slot 0 runs alone
-// when there's no snapshot yet.
+// Sequential on purpose: parallel per-slot restore saturates CPU on small
+// hosts (4-core n2-standard-4 loses exec latency to pool IO). Callers
+// that need speed should claim from the pool (one slot is enough) rather
+// than wait for 3/3.
 func WarmPool(ex Executor) error {
 	warmPoolMu.Lock()
 	defer warmPoolMu.Unlock()
 
-	// First-ever pool warm: cold boot slot 0 alone (creates golden snapshot),
-	// then parallel-fill the rest.
-	if !hasGoldenSnapshot(ex) {
-		if isSlotReady(ex, 0) {
-			// Shouldn't happen, but handle gracefully.
-		} else {
-			if err := fillSlot(ex, 0); err != nil {
-				return fmt.Errorf("cold boot slot 0: %w", err)
-			}
-		}
-	}
-
-	// Parallel fill remaining empty slots.
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	booted := 0
-	var errs []string
-
 	for i := 0; i < PoolSize; i++ {
 		if isSlotReady(ex, i) {
-			mu.Lock()
 			booted++
-			mu.Unlock()
 			continue
 		}
-		wg.Add(1)
-		go func(slot int) {
-			defer wg.Done()
-			if err := fillSlot(ex, slot); err != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Sprintf("slot %d: %v", slot, err))
-				mu.Unlock()
-				return
-			}
-			mu.Lock()
-			booted++
-			mu.Unlock()
-		}(i)
+		if err := fillSlot(ex, i); err != nil {
+			fmt.Printf("  Warning: pool slot %d failed: %v\n", i, err)
+			continue
+		}
+		booted++
 	}
-	wg.Wait()
-
-	for _, e := range errs {
-		fmt.Printf("  Warning: pool %s\n", e)
-	}
-
 	if booted == 0 {
 		return fmt.Errorf("no pool VMs booted")
 	}
