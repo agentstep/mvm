@@ -3,6 +3,7 @@ package firecracker
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -302,7 +303,21 @@ func ClaimPoolSlot(ex Executor, name string, alloc state.NetAllocation) (int, st
 		return 0, "", fmt.Errorf("failed to claim pool slot")
 	}
 
-	return pid, poolSocketPath(slotIdx), nil
+	// Symlink the VM's expected UDS paths to the pool slot's actual UDS
+	// paths. Firecracker was started with pool{N}.socket / pool{N}.vsock
+	// and we can't change those without restarting — but exec expects
+	// {name}.vsock. Symlinks bridge the gap transparently.
+	linkCmd := fmt.Sprintf(
+		`sudo ln -sf pool%d.vsock %s/%s.vsock && sudo ln -sf pool%d.vsock_5123 %s/%s.vsock_5123 && sudo ln -sf pool%d.socket %s/%s.socket`,
+		slotIdx, RunDir(), name,
+		slotIdx, RunDir(), name,
+		slotIdx, RunDir(), name,
+	)
+	if _, err := ex.Run(linkCmd); err != nil {
+		log.Printf("warning: failed to symlink UDS paths for pool slot %d -> %s: %v", slotIdx, name, err)
+	}
+
+	return pid, SocketPath(name), nil
 }
 
 // ReplenishPool boots new warm VMs in the background to fill the pool.
