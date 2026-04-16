@@ -10,14 +10,17 @@ Weights are chosen to prevent single-axis wins at the expense of others:
 - Heavy weight on exec_warm_ms because it's the most-called operation
 - TTI and snapshot ops are rarer but still matter
 
-Baseline (GCP n2-standard-4, as of 2026-04-16):
-- tti_ms ≈ 1700
-- exec_warm_ms ≈ 16
-- snap_create_ms ≈ 19400
-- snap_restore_ms ≈ 10000
-- **baseline score ≈ 5080**
+Baseline (GCP n2-standard-4, as of 2026-04-16, BENCH_FAST=1):
+- pool_warm_s ≈ 40 (restore 3 slots from pristine)
+- tti_ms ≈ 2500
+- exec_warm_ms ≈ 50
+- **baseline score ≈ 3333** (BENCH_FAST skips snapshot metrics)
 
-Target for this round: **score ≤ 3000** (roughly 40% improvement).
+Prior measurements that claimed exec_warm ≈ 16ms were silently hitting
+the WRONG FC due to a pool-claim bug (see 2deefde) — they are not valid
+reference points.
+
+Target for this round: **score ≤ 2500** (roughly 25% improvement).
 
 ## How the loop works
 
