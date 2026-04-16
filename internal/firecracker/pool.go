@@ -1,14 +1,17 @@
 package firecracker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/agentstep/mvm/internal/agentclient"
 	"github.com/agentstep/mvm/internal/state"
 )
 
@@ -27,22 +30,76 @@ func poolSocketPath(i int) string { return fmt.Sprintf("%s/pool%d.socket", RunDi
 func PoolSocketPathForSlot(i int) string { return poolSocketPath(i) }
 func PoolSocketPath() string             { return poolSocketPath(0) }
 
+// warmPoolMu serializes WarmPool invocations. Rapid claim bursts (e.g., a
+// benchmark doing 3 starts in a row) would otherwise spawn multiple
+// ReplenishPool goroutines, each calling WarmPool, each racing to fill
+// the same slots. The per-slot isSlotReady check is optimistic — by the
+// time fillSlot runs, another invocation may have started filling the
+// same slot. Serialize at the top level; parallelism inside WarmPool
+// still gives us the full per-slot parallelism benefit.
+var warmPoolMu sync.Mutex
+
 // WarmPool fills the pool with pre-warmed VMs.
 // First call: cold boots + creates a golden snapshot with Claude warmed.
 // Subsequent calls: restores from snapshot (instant).
+//
+// Empty slots are filled in parallel — each slot takes ~10-20s to restore
+// from snapshot, so filling 3 slots sequentially would block the pool
+// behind slower refills. Parallel fill uses 3x more CPU briefly but gets
+// the pool back to 3/3 in the same time as filling one slot.
+//
+// The first-ever cold boot + golden snapshot creation must be serial
+// (only one VM can write the golden snapshot), so slot 0 runs alone
+// when there's no snapshot yet.
 func WarmPool(ex Executor) error {
+	warmPoolMu.Lock()
+	defer warmPoolMu.Unlock()
+
+	// First-ever pool warm: cold boot slot 0 alone (creates golden snapshot),
+	// then parallel-fill the rest.
+	if !hasGoldenSnapshot(ex) {
+		if isSlotReady(ex, 0) {
+			// Shouldn't happen, but handle gracefully.
+		} else {
+			if err := fillSlot(ex, 0); err != nil {
+				return fmt.Errorf("cold boot slot 0: %w", err)
+			}
+		}
+	}
+
+	// Parallel fill remaining empty slots.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	booted := 0
+	var errs []string
+
 	for i := 0; i < PoolSize; i++ {
 		if isSlotReady(ex, i) {
+			mu.Lock()
 			booted++
+			mu.Unlock()
 			continue
 		}
-		if err := fillSlot(ex, i); err != nil {
-			fmt.Printf("  Warning: pool slot %d failed: %v\n", i, err)
-			continue
-		}
-		booted++
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			if err := fillSlot(ex, slot); err != nil {
+				mu.Lock()
+				errs = append(errs, fmt.Sprintf("slot %d: %v", slot, err))
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			booted++
+			mu.Unlock()
+		}(i)
 	}
+	wg.Wait()
+
+	for _, e := range errs {
+		fmt.Printf("  Warning: pool %s\n", e)
+	}
+
 	if booted == 0 {
 		return fmt.Errorf("no pool VMs booted")
 	}
@@ -228,10 +285,42 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 
 	fmt.Printf("  Pool slot %d restored (PID: %d)\n", i, pid)
 
-	// Mark ready — no need to wait for SSH, the snapshot was taken post-SSH
+	// Wait for the guest agent to be reachable on vsock before marking
+	// the slot ready. The snapshot/load call returns as soon as vCPUs
+	// resume, but the guest agent needs a moment to re-establish its
+	// vsock listener (the UDS path was remapped). Without this wait,
+	// the first exec on a pool-claimed VM often fails with "connection
+	// refused" for 100-500ms after restore.
+	if err := waitForAgent(i, 3*time.Second); err != nil {
+		fmt.Printf("  Warning: slot %d agent not responsive after restore: %v\n", i, err)
+		// Still mark ready — caller can retry exec if needed. The earlier
+		// behavior was "always mark ready", so we're strictly better.
+	}
+
+	// Mark ready
 	ex.Run(fmt.Sprintf(`echo POOL_READY | sudo tee %s >/dev/null`, poolReadyFile(i)))
 
 	return nil
+}
+
+// waitForAgent polls the in-guest mvm-agent via vsock until it responds
+// or the deadline passes. Used after snapshot restore to ensure pool
+// slots don't report "ready" while their agent is still reconnecting.
+func waitForAgent(slotIdx int, timeout time.Duration) error {
+	udsPath := fmt.Sprintf("%s/pool%d.vsock", RunDir(), slotIdx)
+	client := agentclient.New(&agentclient.FirecrackerVsockDialer{UDSPath: udsPath})
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		err := client.Ping(ctx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("agent not responsive within %v", timeout)
 }
 
 // IsPoolReady checks if any warm VM is available.
@@ -315,6 +404,16 @@ func ClaimPoolSlot(ex Executor, name string, alloc state.NetAllocation) (int, st
 	)
 	if _, err := ex.Run(linkCmd); err != nil {
 		log.Printf("warning: failed to symlink UDS paths for pool slot %d -> %s: %v", slotIdx, name, err)
+	}
+
+	// The slot was marked ready during fillSlot which already waited for
+	// the agent. But changing the TAP device triggers a new network config
+	// via agent.Exec in the post-boot goroutine, which briefly interrupts
+	// the agent. Wait one more ping to make sure the caller can exec
+	// immediately after start returns.
+	if err := waitForAgent(slotIdx, 2*time.Second); err != nil {
+		log.Printf("warning: agent not responsive after claim: %v", err)
+		// Don't fail the claim — the VM is usable, exec retries are cheap.
 	}
 
 	return pid, SocketPath(name), nil
