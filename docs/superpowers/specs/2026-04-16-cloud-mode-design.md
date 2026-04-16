@@ -20,34 +20,49 @@ Cloud mode (new):
 Same daemon binary, same API, same VM management.
 ```
 
+## Hardware Requirements
+
+Cloud mode requires bare-metal Linux with KVM (`/dev/kvm` must be accessible). Firecracker needs direct hardware virtualization — most cloud VMs do not support this.
+
+**Supported providers:** AWS `.metal` instances, GCP with nested virt enabled, Hetzner dedicated servers, OVH bare metal, any bare-metal Linux with KVM.
+
+**Not supported:** Standard cloud VMs (EC2 t3, GCP e2, etc.) unless the provider explicitly enables nested virtualization.
+
+The install script verifies `/dev/kvm` exists before proceeding.
+
 ## Scope
 
 ### In scope
 - TCP listener with TLS support on the daemon
 - API key authentication middleware
 - CLI remote mode (`--remote`, `MVM_REMOTE` env var)
-- Configurable data paths (replace hardcoded `/opt/mvm/`)
+- Configurable data paths (replace ~50 hardcoded path references)
 - Systemd unit file for Linux deployment
 - Python SDK (PyPI package)
 - TypeScript SDK (npm package)
-- Go SDK (extracted from internal/server/client.go)
+- Go SDK (public package with duplicated types)
 - Install script for bare-metal Linux
 
 ### Out of scope
 - Multi-tenancy (project namespacing, per-tenant API keys)
 - Distributed state (PostgreSQL/etcd backends)
 - Docker packaging
-- Rate limiting
+- Rate limiting, structured logging (follow-up)
 - OAuth/JWT authentication
 - Clustering (multiple daemon instances)
+- Async SDK support (follow-up)
 
 ## Design
 
-### 1. Server: TCP + TLS listener
+### 1. Server: Dual listeners
 
 `internal/server/server.go`
 
-Add a `ListenAddr` field to `ServerConfig`. When set, the daemon listens on TCP instead of (or in addition to) the Unix socket.
+Two `http.Server` instances sharing one `http.ServeMux`:
+- **Unix socket server** uses `mux` directly (no auth — local connections are trusted)
+- **TCP server** uses `authMiddleware(mux)` (requires API key)
+
+This cleanly separates auth concerns — no need to inspect connection type in middleware.
 
 ```go
 type ServerConfig struct {
@@ -59,55 +74,84 @@ type ServerConfig struct {
 }
 ```
 
-When both `SocketPath` and `ListenAddr` are set, the daemon serves on both (Unix for local CLI, TCP for remote clients). Unix socket connections skip auth.
+When both `SocketPath` and `ListenAddr` are set, both servers start in separate goroutines with `errgroup.Group` coordinating shutdown. Either server failing triggers shutdown of both.
 
-TLS is required for TCP — plaintext TCP is rejected unless `MVM_INSECURE=true` is explicitly set (for development/testing behind a reverse proxy).
+TLS is required for TCP unless `MVM_INSECURE=true` is set (for development behind a reverse proxy).
+
+**HTTP timeouts** (TCP server only):
+- `ReadTimeout: 30s`
+- `WriteTimeout: 5m` (long exec operations)
+- `IdleTimeout: 120s`
+- Shutdown timeout: 30s
 
 ### 2. Auth middleware
 
 `internal/server/auth.go` (new)
 
-HTTP middleware that checks `Authorization: Bearer <api-key>` on every request. Skips auth for:
-- Unix socket connections (local CLI, already trusted)
-- `GET /health` (load balancer probes)
+```go
+func authMiddleware(apiKey string, next http.Handler) http.Handler
+```
 
-The API key is a static string set via `--api-key` flag or `MVM_API_KEY` env var. No key rotation, no scoping — simple is correct for single-tenant.
+Checks `Authorization: Bearer <api-key>` on every request except `GET /health` (load balancer probes). Returns 401 with `{"error":"unauthorized"}` on failure.
+
+The API key is set via `--api-key` flag, `MVM_API_KEY` env var, or read from `/etc/mvm/api-key` file (checked in that order). File-based key is preferred for production — env vars are visible via `/proc/*/environ`.
 
 ### 3. CLI remote mode
 
 `internal/cli/root.go`, `internal/server/client.go`
 
-Two new env vars / flags:
+New env vars / persistent flags:
 ```
 MVM_REMOTE=https://my-server:19876  (or --remote flag)
 MVM_API_KEY=secret-key              (or --api-key flag)
+MVM_CA_CERT=/path/to/ca.pem        (for self-signed TLS)
 ```
 
-When `MVM_REMOTE` is set, `DefaultClient()` returns an HTTP client targeting the remote URL instead of the Unix socket. All CLI commands work unchanged — they call the same daemon API.
+When `MVM_REMOTE` is set, `DefaultClient()` returns an HTTP client targeting the remote URL with TLS and auth. All CLI commands work unchanged.
 
-The client adds `Authorization: Bearer <key>` to every request when `MVM_API_KEY` is set.
+**Self-signed cert trust:** `mvm remote trust <server:port>` fetches and pins the server's certificate (TOFU model, like SSH `known_hosts`). Stored at `~/.mvm/trusted-certs/`. Alternatively, use `MVM_CA_CERT` to specify a CA bundle.
 
-For TLS, the client uses the system CA pool by default. Custom CA via `MVM_CA_CERT` env var.
+**Interactive exec over TCP+TLS:** `ExecInteractive` needs a dialer abstraction — currently hardcodes `net.DialTimeout("unix", ...)`. Add a `dialFunc` to the client that returns either a Unix conn or a `tls.Conn` depending on mode. The raw HTTP upgrade request then goes over the TLS connection transparently.
 
-### 4. Configurable paths
+### 4. `serve start` flags
+
+```
+mvm serve start                                          # Unix socket only (local)
+mvm serve start --listen 0.0.0.0:19876                   # + TCP (insecure, dev only)
+mvm serve start --listen 0.0.0.0:19876 \
+    --tls-cert /etc/mvm/cert.pem \
+    --tls-key /etc/mvm/key.pem \
+    --api-key-file /etc/mvm/api-key                      # Full cloud mode
+```
+
+### 5. Configurable paths
 
 `internal/firecracker/config.go`
 
-Replace constants with functions that read env vars with defaults:
+Replace all hardcoded path constants with functions. Full list of constants to migrate:
+
+| Constant | Current value | References |
+|----------|--------------|------------|
+| `CacheDir` | `/opt/mvm/cache` | 9 sites |
+| `VMsDir` | `/opt/mvm/vms` | 1 site (via VMDir) |
+| `KeyDir` | `/opt/mvm/keys` | 3 sites |
+| `RunDir` | `/run/mvm` | 12+ sites |
+| `PoolDir` | `/opt/mvm/pool` | 3 sites |
+| `poolSnapshotDir` | `/opt/mvm/pool/snapshot` | 8 sites |
+| `snapshotsBaseDir` (routes.go) | `/opt/mvm/snapshots` | 6 sites |
+
+~50 call sites across config.go, pool.go, routes.go, init.go, install.go, snapshot.go, and their tests.
 
 ```go
 func DataDir() string {
     if d := os.Getenv("MVM_DATA_DIR"); d != "" { return d }
     return "/opt/mvm"
 }
-func CacheDir() string { return filepath.Join(DataDir(), "cache") }
-func VMsDir() string   { return filepath.Join(DataDir(), "vms") }
-func KeysDir() string  { return filepath.Join(DataDir(), "keys") }
 ```
 
-Update all references from constants to function calls.
+Also rename `IsInsideLima()` to `IsLinux()` — it returns `runtime.GOOS == "linux"` and the name is misleading when running on cloud servers.
 
-### 5. Systemd unit + install script
+### 6. Systemd unit + install script
 
 `deploy/mvm-daemon.service`:
 ```ini
@@ -116,9 +160,8 @@ Description=mvm sandbox daemon
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/mvm serve start --listen 0.0.0.0:19876
+ExecStart=/usr/local/bin/mvm serve start --listen 0.0.0.0:19876 --tls-cert /etc/mvm/cert.pem --tls-key /etc/mvm/key.pem --api-key-file /etc/mvm/api-key
 Environment=MVM_DATA_DIR=/var/mvm
-Environment=MVM_API_KEY=change-me
 Restart=always
 RestartSec=5
 
@@ -126,52 +169,46 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-`scripts/install-cloud.sh`: Downloads mvm binary + Firecracker, creates data dirs, installs systemd unit, generates TLS cert (self-signed), generates random API key, enables and starts the service.
+`scripts/install-cloud.sh`:
+1. Check `/dev/kvm` exists — fail with clear error if not
+2. Download mvm binary + Firecracker for linux/arm64 or linux/amd64
+3. Create `/var/mvm/{cache,vms,keys,pool}` and `/etc/mvm/`
+4. Generate self-signed TLS cert at `/etc/mvm/cert.pem`
+5. Generate random API key at `/etc/mvm/api-key` (0600, root-only)
+6. Install systemd unit, enable, start
+7. Print: remote URL, API key, `mvm remote trust` command
 
-### 6. Python SDK
+### 7. Python SDK
 
-Package: `mvm` on PyPI
+Package: verify `mvm-sandbox` on PyPI (fallback: `agentstep-mvm`)
 
 ```python
 from mvm import Sandbox
 
-# Connect to remote
 client = Sandbox.connect("https://my-server:19876", api_key="secret")
+# Or local: client = Sandbox.connect()
 
-# Or local (auto-detects Unix socket)
-client = Sandbox.connect()
-
-# Create and use
 vm = client.create("my-sandbox", cpus=2, memory_mb=512)
 result = vm.exec("echo hello")
 print(result.output)     # "hello\n"
 print(result.exit_code)  # 0
 
-# Interactive
-vm.exec_interactive("bash")  # Opens PTY
-
-# Checkpoint
 vm.snapshot("before-install")
 vm.exec("pip install pandas")
-vm.restore("before-install")  # Reverts to pre-install state
+vm.restore("before-install")
 
-# Custom image
-client.build("Dockerfile", tag="with-postgres")
-vm = client.create("db-sandbox", image="with-postgres")
-
-# Cleanup
 vm.stop()
 vm.delete()
 ```
 
-Implementation: thin HTTP client using `requests` or `httpx`. ~300 lines. Maps 1:1 to the REST API.
+MVP implementation: `httpx` client, ~400 lines. Includes error hierarchy, type hints, custom CA cert support via `verify` parameter. Excludes async support, retries, streaming (v2).
 
-### 7. TypeScript SDK
+### 8. TypeScript SDK
 
-Package: `@mvm/sdk` on npm
+Package: verify `@agentstep/mvm-sdk` on npm
 
 ```typescript
-import { Sandbox } from '@mvm/sdk';
+import { Sandbox } from '@agentstep/mvm-sdk';
 
 const client = new Sandbox({
   remote: 'https://my-server:19876',
@@ -189,13 +226,13 @@ await vm.restore('checkpoint-1');
 await vm.delete();
 ```
 
-Implementation: thin HTTP client using `fetch`. ~300 lines. Same API shape as Python.
+MVP implementation: `fetch`-based, ~400 lines. Full TypeScript types for all request/response shapes, error classes, custom CA via `https.Agent`. Excludes AbortController, streaming (v2).
 
-### 8. Go SDK
+### 9. Go SDK
 
 Package: `github.com/agentstep/mvm/sdk`
 
-Extract `internal/server/client.go` into a public `sdk/` package. The Go client already has all the methods — just make it importable:
+**Not a simple extraction** — `internal/server/client.go` imports internal types. The SDK duplicates all request/response types (~70 lines) to avoid coupling to server internals. `ExecInteractive` is excluded from the SDK (raw PTY relay is an edge case for programmatic clients).
 
 ```go
 import "github.com/agentstep/mvm/sdk"
@@ -206,29 +243,31 @@ result, _ := client.Exec(ctx, "sandbox", "echo hello")
 client.DeleteVM(ctx, "sandbox")
 ```
 
+~400 lines including type definitions.
+
 ## API Reference
 
-All existing endpoints, unchanged:
+All existing endpoints, unchanged. Auth required on TCP; not on Unix socket.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | /health | Health check (no auth) |
-| GET | /vms | List VMs |
-| POST | /vms | Create VM |
-| POST | /vms/{name}/exec | Execute command |
-| POST | /vms/{name}/stop | Stop VM |
-| DELETE | /vms/{name} | Delete VM |
-| POST | /vms/{name}/pause | Pause VM |
-| POST | /vms/{name}/resume | Resume VM |
-| POST | /vms/{name}/snapshot | Create snapshot |
-| POST | /vms/{name}/restore | Restore snapshot |
-| GET | /snapshots | List snapshots |
-| DELETE | /snapshots/{name} | Delete snapshot |
-| POST | /build | Build custom image |
-| GET | /images | List images |
-| DELETE | /images/{name} | Delete image |
-| GET | /pool | Pool status |
-| POST | /pool/warm | Warm pool |
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | /health | No | Health check |
+| GET | /vms | Yes | List VMs |
+| POST | /vms | Yes | Create VM |
+| POST | /vms/{name}/exec | Yes | Execute command |
+| POST | /vms/{name}/stop | Yes | Stop VM |
+| DELETE | /vms/{name} | Yes | Delete VM |
+| POST | /vms/{name}/pause | Yes | Pause VM |
+| POST | /vms/{name}/resume | Yes | Resume VM |
+| POST | /vms/{name}/snapshot | Yes | Create snapshot |
+| POST | /vms/{name}/restore | Yes | Restore snapshot |
+| GET | /snapshots | Yes | List snapshots |
+| DELETE | /snapshots/{name} | Yes | Delete snapshot |
+| POST | /build | Yes | Build custom image |
+| GET | /images | Yes | List images |
+| DELETE | /images/{name} | Yes | Delete image |
+| GET | /pool | Yes | Pool status |
+| POST | /pool/warm | Yes | Warm pool |
 
 ## Verification
 
@@ -236,12 +275,12 @@ All existing endpoints, unchanged:
 ```bash
 # On a Linux server with KVM:
 curl -sSL https://get.mvm.dev | bash
-# Edit /etc/mvm/config: set API key
-systemctl start mvm-daemon
+cat /etc/mvm/api-key  # auto-generated
 
 # From laptop:
-export MVM_REMOTE=https://server:19876
-export MVM_API_KEY=the-key
+mvm remote trust my-server:19876
+export MVM_REMOTE=https://my-server:19876
+export MVM_API_KEY=$(ssh root@my-server cat /etc/mvm/api-key)
 mvm pool status
 mvm start test1
 mvm exec test1 -- uname -a
@@ -259,7 +298,7 @@ vm.delete()
 
 ### SDK test (TypeScript)
 ```typescript
-import { Sandbox } from '@mvm/sdk';
+import { Sandbox } from '@agentstep/mvm-sdk';
 const client = new Sandbox({ remote: 'https://server:19876', apiKey: 'key' });
 const vm = await client.create('sdk-test');
 const r = await vm.exec('echo works');
