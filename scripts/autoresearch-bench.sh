@@ -97,7 +97,10 @@ fi
 echo "[bench] measuring TTI..." >&2
 declare -a TTI_SAMPLES=()
 TTI_FAILS=0
-# Up to 5 attempts, keep going until we have 3 successful samples or too many fails.
+# Up to 5 attempts, keep going until we have 3 successful samples.
+# Keep the LAST successful VM alive for the exec_warm phase so we don't
+# have to wait for pool refill (which can take 60-90s on cloud VMs).
+KEEP_VM=""
 for i in 1 2 3 4 5; do
     if [ "${#TTI_SAMPLES[@]}" -ge 3 ]; then break; fi
 
@@ -112,6 +115,12 @@ for i in 1 2 3 4 5; do
         fi
     done
     sleep 2
+
+    # Delete the previously-kept VM so only ONE VM is alive at a time.
+    if [ -n "$KEEP_VM" ]; then
+        mvm delete "$KEEP_VM" --force >/dev/null 2>&1 || true
+        KEEP_VM=""
+    fi
 
     T0=$(date +%s%N)
     if ! mvm start "b$i" >/dev/null 2>&1; then
@@ -136,12 +145,12 @@ for i in 1 2 3 4 5; do
     T1=$(date +%s%N)
     MS=$(( (T1 - T0) / 1000000 ))
     TTI_SAMPLES+=( "$MS" )
-
-    mvm delete "b$i" --force >/dev/null 2>&1 || true
+    KEEP_VM="b$i"   # keep this VM for exec_warm phase
 done
 
 if [ "${#TTI_SAMPLES[@]}" -lt 3 ]; then
     echo "ERROR: only ${#TTI_SAMPLES[@]}/5 TTI samples succeeded (fails=$TTI_FAILS)" >&2
+    mvm delete "$KEEP_VM" --force >/dev/null 2>&1 || true
     exit 4
 fi
 
@@ -155,38 +164,17 @@ echo "METRIC tti_ms=$TTI_MEDIAN"
 # -------------------------------------------------------------------
 
 echo "[bench] measuring exec latency..." >&2
-# Wait for pool refill (TTI loop just consumed slots)
-POOL_WAIT=0
-while ! mvm pool status 2>/dev/null | grep -q "3/3"; do
-    mvm pool warm >/dev/null 2>&1 || true
-    sleep 3
-    POOL_WAIT=$((POOL_WAIT + 3))
-    if [ $POOL_WAIT -gt 90 ]; then
-        echo "ERROR: pool couldn't refill for exec_warm phase" >&2
-        exit 4
-    fi
-done
-sleep 3
-
-# Retry start a few times if pool-claim races
-BW_STARTED=0
-for attempt in 1 2 3; do
-    if mvm start bw >/dev/null 2>&1; then
-        BW_STARTED=1
-        break
-    fi
-    mvm delete bw --force >/dev/null 2>&1 || true
-    sleep 3
-done
-if [ $BW_STARTED -eq 0 ]; then
-    echo "ERROR: start bw failed after 3 attempts" >&2
+# Reuse the last TTI VM (KEEP_VM) — avoids waiting for pool refill.
+if [ -z "${KEEP_VM:-}" ]; then
+    echo "ERROR: no VM held over from TTI phase" >&2
     exit 4
 fi
+BW_VM="$KEEP_VM"
 
 # First exec is slow (page-in); warmup and discard, with retry
 WARMUP_OK=0
 for _ in 1 2 3 4 5; do
-    if mvm exec bw -- true >/dev/null 2>&1; then
+    if mvm exec "$BW_VM" -- true >/dev/null 2>&1; then
         WARMUP_OK=1
         break
     fi
@@ -197,14 +185,14 @@ if [ $WARMUP_OK -eq 0 ]; then
     exit 4
 fi
 # Extra warmup to fully page in
-mvm exec bw -- true >/dev/null 2>&1 || true
-mvm exec bw -- true >/dev/null 2>&1 || true
+mvm exec "$BW_VM" -- true >/dev/null 2>&1 || true
+mvm exec "$BW_VM" -- true >/dev/null 2>&1 || true
 
 declare -a EX_SAMPLES=()
 FAILS=0
 for _ in $(seq 1 10); do
     T0=$(date +%s%N)
-    if mvm exec bw -- true >/dev/null 2>&1; then
+    if mvm exec "$BW_VM" -- true >/dev/null 2>&1; then
         T1=$(date +%s%N)
         EX_SAMPLES+=( "$(( (T1 - T0) / 1000000 ))" )
     else
@@ -235,18 +223,18 @@ SNAP_RESTORE_MS=0
 if [ "${BENCH_FAST:-0}" != "1" ]; then
     echo "[bench] measuring snapshot create..." >&2
     T0=$(date +%s%N)
-    mvm snapshot create bw bench_snap >/dev/null 2>&1 || { echo "ERROR: snapshot create failed" >&2; exit 4; }
+    mvm snapshot create "$BW_VM" bench_snap >/dev/null 2>&1 || { echo "ERROR: snapshot create failed" >&2; exit 4; }
     T1=$(date +%s%N)
     SNAP_CREATE_MS=$(( (T1 - T0) / 1000000 ))
     echo "METRIC snap_create_ms=$SNAP_CREATE_MS"
 
     echo "[bench] measuring snapshot restore..." >&2
-    mvm stop bw --force >/dev/null 2>&1 || true
-    mvm delete bw --force >/dev/null 2>&1 || true
+    mvm stop "$BW_VM" --force >/dev/null 2>&1 || true
+    mvm delete "$BW_VM" --force >/dev/null 2>&1 || true
     sleep 2
 
     T0=$(date +%s%N)
-    mvm snapshot restore bw bench_snap >/dev/null 2>&1 || { echo "ERROR: snapshot restore failed" >&2; exit 4; }
+    mvm snapshot restore "$BW_VM" bench_snap >/dev/null 2>&1 || { echo "ERROR: snapshot restore failed" >&2; exit 4; }
     T1=$(date +%s%N)
     SNAP_RESTORE_MS=$(( (T1 - T0) / 1000000 ))
     echo "METRIC snap_restore_ms=$SNAP_RESTORE_MS"
@@ -262,13 +250,13 @@ fi
 echo "[bench] running correctness gate..." >&2
 
 # Restored VM must still be functional.
-if ! mvm exec bw -- true >/dev/null 2>&1; then
+if ! mvm exec "$BW_VM" -- true >/dev/null 2>&1; then
     echo "ERROR: exec failed on restored VM (correctness regression)" >&2
     exit 5
 fi
 
 # Guest agent protocol works end-to-end.
-OUT=$(mvm exec bw -- echo "correctness_ok" 2>&1 | head -1)
+OUT=$(mvm exec "$BW_VM" -- echo "correctness_ok" 2>&1 | head -1)
 if [ "$OUT" != "correctness_ok" ]; then
     echo "ERROR: exec returned wrong output '$OUT' (expected 'correctness_ok')" >&2
     exit 5
@@ -276,16 +264,16 @@ fi
 
 # Agent stdout is not being short-circuited.
 # Writing + reading a file round-trips data.
-mvm exec bw -- sh -c 'echo roundtrip_$$ > /tmp/rt' >/dev/null 2>&1 \
+mvm exec "$BW_VM" -- sh -c 'echo roundtrip_$$ > /tmp/rt' >/dev/null 2>&1 \
     || { echo "ERROR: file write via exec failed" >&2; exit 5; }
-RTOUT=$(mvm exec bw -- cat /tmp/rt 2>&1 | head -1)
+RTOUT=$(mvm exec "$BW_VM" -- cat /tmp/rt 2>&1 | head -1)
 if ! echo "$RTOUT" | grep -q "roundtrip_"; then
     echo "ERROR: file roundtrip failed: got '$RTOUT'" >&2
     exit 5
 fi
 
 # Exit code propagation (prevents agent-stub hacks that always return 0).
-if mvm exec bw -- false >/dev/null 2>&1; then
+if mvm exec "$BW_VM" -- false >/dev/null 2>&1; then
     echo "ERROR: exec returned 0 for false (exit code not propagated)" >&2
     exit 5
 fi
@@ -332,5 +320,5 @@ echo "METRIC score=$SCORE"
 # Cleanup
 # -------------------------------------------------------------------
 
-mvm delete bw --force >/dev/null 2>&1 || true
+mvm delete "$BW_VM" --force >/dev/null 2>&1 || true
 mvm snapshot delete bench_snap >/dev/null 2>&1 || true
