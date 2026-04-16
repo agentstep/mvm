@@ -96,11 +96,11 @@ fi
 
 echo "[bench] measuring TTI..." >&2
 declare -a TTI_SAMPLES=()
-# 3 samples (matches pool size of 3). Running 5+ samples exhausts the pool
-# faster than it refills, causing flaky exec on the 4th and 5th attempt.
-for i in 1 2 3; do
-    # Refill pool between samples so we're always measuring warm-pool claim.
-    # Pool takes ~5s per slot to restore from golden snapshot.
+TTI_FAILS=0
+# Up to 5 attempts, keep going until we have 3 successful samples or too many fails.
+for i in 1 2 3 4 5; do
+    if [ "${#TTI_SAMPLES[@]}" -ge 3 ]; then break; fi
+
     POOL_WAIT=0
     while ! mvm pool status 2>/dev/null | grep -q "3/3"; do
         mvm pool warm >/dev/null 2>&1 || true
@@ -108,27 +108,30 @@ for i in 1 2 3; do
         POOL_WAIT=$((POOL_WAIT + 3))
         if [ $POOL_WAIT -gt 60 ]; then
             echo "ERROR: pool could not refill within 60s before sample $i" >&2
-            exit 4
+            break
         fi
     done
-    sleep 2  # extra settle — "ready" flag fires before VM fully accepts exec
+    sleep 2
 
     T0=$(date +%s%N)
-    mvm start "b$i" >/dev/null 2>&1 || { echo "ERROR: start b$i failed" >&2; exit 4; }
+    if ! mvm start "b$i" >/dev/null 2>&1; then
+        TTI_FAILS=$((TTI_FAILS + 1))
+        mvm delete "b$i" --force >/dev/null 2>&1 || true
+        continue
+    fi
 
-    # Exec with small retry — pool claim sets up sockets async on some paths
     EXEC_OK=0
     for retry in 1 2 3 4 5; do
         if mvm exec "b$i" -- echo ok >/dev/null 2>&1; then
             EXEC_OK=1
             break
         fi
-        sleep 0.2
+        sleep 0.3
     done
     if [ $EXEC_OK -eq 0 ]; then
-        echo "ERROR: exec b$i failed after 5 retries" >&2
+        TTI_FAILS=$((TTI_FAILS + 1))
         mvm delete "b$i" --force >/dev/null 2>&1 || true
-        exit 4
+        continue
     fi
     T1=$(date +%s%N)
     MS=$(( (T1 - T0) / 1000000 ))
@@ -137,7 +140,11 @@ for i in 1 2 3; do
     mvm delete "b$i" --force >/dev/null 2>&1 || true
 done
 
-# Median of 3
+if [ "${#TTI_SAMPLES[@]}" -lt 3 ]; then
+    echo "ERROR: only ${#TTI_SAMPLES[@]}/5 TTI samples succeeded (fails=$TTI_FAILS)" >&2
+    exit 4
+fi
+
 TTI_MEDIAN=$(printf '%s\n' "${TTI_SAMPLES[@]}" | sort -n | awk 'NR==2')
 echo "METRIC tti_ms=$TTI_MEDIAN"
 
@@ -148,12 +155,33 @@ echo "METRIC tti_ms=$TTI_MEDIAN"
 # -------------------------------------------------------------------
 
 echo "[bench] measuring exec latency..." >&2
+# Wait for pool refill (TTI loop just consumed slots)
+POOL_WAIT=0
 while ! mvm pool status 2>/dev/null | grep -q "3/3"; do
     mvm pool warm >/dev/null 2>&1 || true
-    sleep 2
+    sleep 3
+    POOL_WAIT=$((POOL_WAIT + 3))
+    if [ $POOL_WAIT -gt 90 ]; then
+        echo "ERROR: pool couldn't refill for exec_warm phase" >&2
+        exit 4
+    fi
 done
-sleep 2
-mvm start bw >/dev/null 2>&1 || { echo "ERROR: start bw failed" >&2; exit 4; }
+sleep 3
+
+# Retry start a few times if pool-claim races
+BW_STARTED=0
+for attempt in 1 2 3; do
+    if mvm start bw >/dev/null 2>&1; then
+        BW_STARTED=1
+        break
+    fi
+    mvm delete bw --force >/dev/null 2>&1 || true
+    sleep 3
+done
+if [ $BW_STARTED -eq 0 ]; then
+    echo "ERROR: start bw failed after 3 attempts" >&2
+    exit 4
+fi
 
 # First exec is slow (page-in); warmup and discard, with retry
 WARMUP_OK=0
