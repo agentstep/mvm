@@ -355,6 +355,22 @@ func (c *Client) PauseVM(ctx context.Context, name string) error {
 	return nil
 }
 
+// SuspendVM snapshots a running/paused VM to disk and frees its guest RAM.
+// The VM is transparently restored on the next exec.
+func (c *Client) SuspendVM(ctx context.Context, name string) error {
+	req, _ := http.NewRequestWithContext(ctx, "POST",
+		c.url(fmt.Sprintf("/vms/%s/suspend", name)), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("suspend failed: %s", err)
+	}
+	return nil
+}
+
 // ResumeVM resumes a paused VM.
 func (c *Client) ResumeVM(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST",

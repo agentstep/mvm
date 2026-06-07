@@ -34,16 +34,18 @@ func newIdleCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 
 func newIdleEnableCmd() *cobra.Command {
 	var timeout string
+	var suspendAfter string
 
 	cmd := &cobra.Command{
 		Use:   "enable",
 		Short: "Enable auto-idle (installs launchd agent)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return enableIdle(timeout)
+			return enableIdle(timeout, suspendAfter)
 		},
 	}
 
-	cmd.Flags().StringVar(&timeout, "timeout", "5m", "idle timeout before auto-pause")
+	cmd.Flags().StringVar(&timeout, "timeout", "5m", "idle timeout before auto-pause (RAM stays resident)")
+	cmd.Flags().StringVar(&suspendAfter, "suspend-after", "", "idle timeout before suspend-to-disk (frees RAM); empty disables")
 	return cmd
 }
 
@@ -90,10 +92,15 @@ func plistPath() string {
 	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
 }
 
-func enableIdle(timeout string) error {
+func enableIdle(timeout, suspendAfter string) error {
 	// Validate timeout
 	if _, err := time.ParseDuration(timeout); err != nil {
 		return fmt.Errorf("invalid timeout %q: %w", timeout, err)
+	}
+	if suspendAfter != "" {
+		if _, err := time.ParseDuration(suspendAfter); err != nil {
+			return fmt.Errorf("invalid --suspend-after %q: %w", suspendAfter, err)
+		}
 	}
 
 	// Find mvm binary
@@ -128,9 +135,11 @@ func enableIdle(timeout string) error {
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>MVM_IDLE_TIMEOUT</key>
         <string>%s</string>
+        <key>MVM_SUSPEND_TIMEOUT</key>
+        <string>%s</string>
     </dict>
 </dict>
-</plist>`, launchdLabel, mvmBin, mvmDir, mvmDir, mvmDir, timeout)
+</plist>`, launchdLabel, mvmBin, mvmDir, mvmDir, mvmDir, timeout, suspendAfter)
 
 	path := plistPath()
 	os.MkdirAll(filepath.Dir(path), 0o755)
@@ -168,6 +177,14 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 			timeout = d
 		}
 	}
+	// suspendTimeout is the deeper tier: snapshot to disk and free RAM.
+	// Disabled unless MVM_SUSPEND_TIMEOUT is set.
+	var suspendTimeout time.Duration
+	if t := os.Getenv("MVM_SUSPEND_TIMEOUT"); t != "" {
+		if d, err := time.ParseDuration(t); err == nil {
+			suspendTimeout = d
+		}
+	}
 
 	// Guard: skip if Lima isn't running (Firecracker backend)
 	backend := store.GetBackend()
@@ -182,15 +199,15 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 		}
 	}
 
-	// Check all running VMs
+	// Check all idle-eligible VMs.
 	return store.Transact(func(st *state.State) error {
 		now := time.Now()
 		for _, vm := range st.VMs {
-			if vm.Status != "running" {
-				continue
-			}
 			if vm.Backend == "applevz" {
-				continue // no pause support
+				continue // no pause/snapshot support
+			}
+			if vm.Status != "running" && vm.Status != "paused" {
+				continue
 			}
 
 			// Check last activity
@@ -198,18 +215,32 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 			if vm.LastActivity != nil {
 				lastActive = *vm.LastActivity
 			}
+			idle := now.Sub(lastActive)
 
-			if now.Sub(lastActive) > timeout {
-				// Pause the VM via daemon if available, fall back to direct.
+			// Tier 2 (deepest): suspend-to-disk frees the guest's RAM. Applies
+			// to both running and already-paused VMs once they're idle long
+			// enough. Requires the daemon (snapshot machinery lives there).
+			if suspendTimeout > 0 && idle > suspendTimeout {
+				if sc, scErr := requireDaemon(); scErr == nil {
+					if err := sc.SuspendVM(context.Background(), vm.Name); err == nil {
+						vm.Status = "suspended"
+						fmt.Printf("[idle-check] Suspended %s (idle %s)\n", vm.Name, idle.Round(time.Second))
+						continue
+					}
+				}
+			}
+
+			// Tier 1: pause (freeze vCPUs, RAM resident) for running VMs.
+			if vm.Status == "running" && idle > timeout {
 				sc, scErr := requireDaemon()
 				if scErr == nil {
 					if err := sc.PauseVM(context.Background(), vm.Name); err == nil {
 						vm.Status = "paused"
-						fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
+						fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, idle.Round(time.Second))
 					}
 				} else if err := firecracker.Pause(limaClient, vm); err == nil {
 					vm.Status = "paused"
-					fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
+					fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, idle.Round(time.Second))
 				}
 			}
 		}

@@ -122,6 +122,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("POST /vms/{name}/stop", s.handleStopVM)
 	mux.HandleFunc("POST /vms/{name}/pause", s.handlePauseVM)
 	mux.HandleFunc("POST /vms/{name}/resume", s.handleResumeVM)
+	mux.HandleFunc("POST /vms/{name}/suspend", s.handleSuspendVM)
 	mux.HandleFunc("POST /vms/{name}/snapshot", s.handleSnapshotCreate)
 	mux.HandleFunc("POST /vms/{name}/restore", s.handleSnapshotRestore)
 	mux.HandleFunc("GET /snapshots", s.handleSnapshotList)

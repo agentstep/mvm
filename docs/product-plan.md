@@ -35,6 +35,12 @@ billing, gVisor, Windows, Docker packaging.
 
 ## Phase 1 — Persistent "idle-to-zero" sandboxes  · effort M
 
+> **Status: spiked.** A working vertical slice has landed — `firecracker.SuspendVM` /
+> `ResumeFromSuspend` (`internal/firecracker/suspend.go`), a `suspended` VM state,
+> daemon `POST /vms/{name}/suspend` + transparent restore in `handleExec`, the
+> `mvm suspend` CLI, and an idle-checker `--suspend-after` tier. Needs end-to-end
+> validation on a KVM host (snapshot/UFFD restore can't run in CI).
+
 **Learn from:** Sprites (idle compute to $0, persistent FS), Blaxel (<25ms
 resume with memory state). This is the feature the market leads with.
 

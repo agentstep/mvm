@@ -257,14 +257,40 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-resume paused VMs so idle-pause doesn't break exec.
-	if vm.Status == "paused" {
+	// Auto-resume dormant VMs so idle-pause / idle-suspend doesn't break exec.
+	switch vm.Status {
+	case "running":
+		// ready
+	case "paused":
+		// Tier 1: vCPUs frozen, memory resident — instant unfreeze.
 		if err := firecracker.Resume(s.executor, vm); err != nil {
 			httpError(w, fmt.Errorf("auto-resume failed: %w", err), http.StatusInternalServerError)
 			return
 		}
 		s.store.UpdateVM(name, func(v *state.VM) { v.Status = "running" })
-	} else if vm.Status != "running" {
+	case "suspended":
+		// Tier 2: process gone, memory freed — restore from suspend snapshot
+		// (UFFD lazy restore) reusing the VM's existing network allocation.
+		pid, socketPath, uffdPid, rerr := firecracker.ResumeFromSuspend(s.executor, vm)
+		if rerr != nil {
+			httpError(w, fmt.Errorf("auto-resume from suspend failed: %w", rerr), http.StatusInternalServerError)
+			return
+		}
+		s.store.UpdateVM(name, func(v *state.VM) {
+			v.Status = "running"
+			v.PID = pid
+			v.SocketPath = socketPath
+			v.UFFDPid = uffdPid
+		})
+		// Host-side DNAT is torn down on suspend; re-apply it. In-guest
+		// network policy lives in the snapshotted memory and survives.
+		if rvm, gerr := s.store.GetVM(name); gerr == nil {
+			firecracker.SetupPortForwarding(s.executor, rvm)
+		}
+		// The guest agent re-binds its vsock listener a few hundred ms after
+		// vCPUs resume; wait so the exec below doesn't race it.
+		waitAgentReady(name, 3*time.Second)
+	default:
 		httpError(w, fmt.Errorf("VM %q is %s", name, vm.Status), http.StatusConflict)
 		return
 	}
@@ -497,6 +523,62 @@ func (s *Server) handlePauseVM(w http.ResponseWriter, r *http.Request) {
 
 	s.store.UpdateVM(name, func(v *state.VM) { v.Status = "paused" })
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleSuspendVM frees a VM's guest RAM by snapshotting it to disk and
+// terminating the Firecracker process. The VM's state entry and network
+// allocation are preserved; the next `exec` transparently restores it (see
+// handleExec). Called explicitly by `mvm suspend` and by the idle-checker.
+func (s *Server) handleSuspendVM(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	vm, err := s.store.GetVM(name)
+	if err != nil {
+		httpError(w, err, http.StatusNotFound)
+		return
+	}
+	if vm.Status != "running" && vm.Status != "paused" {
+		httpError(w, fmt.Errorf("VM %q is %s, cannot suspend", name, vm.Status), http.StatusConflict)
+		return
+	}
+	// A paused VM must be resumed first — SnapshotVM pauses/resumes around
+	// the snapshot, and pausing an already-paused VM errors.
+	if vm.Status == "paused" {
+		if err := firecracker.Resume(s.executor, vm); err != nil {
+			httpError(w, fmt.Errorf("resume before suspend: %w", err), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	// Host-side port forwarding is re-applied on resume; drop it now.
+	firecracker.RemovePortForwarding(s.executor, vm)
+
+	if _, err := firecracker.SuspendVM(s.executor, vm); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	s.store.UpdateVM(name, func(v *state.VM) { v.Status = "suspended" })
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// waitAgentReady polls the in-guest agent over vsock until it responds or the
+// timeout elapses. Used after a suspend-restore, where the agent re-binds its
+// vsock listener shortly after vCPUs resume.
+func waitAgentReady(name string, timeout time.Duration) {
+	client := agentclient.New(&agentclient.FirecrackerVsockDialer{
+		UDSPath: firecracker.VsockUDSPath(name),
+	})
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		err := client.Ping(ctx)
+		cancel()
+		if err == nil {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (s *Server) handleResumeVM(w http.ResponseWriter, r *http.Request) {

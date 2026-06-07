@@ -104,17 +104,30 @@ Same daemon binary. HTTPS with API key auth. No cloud vendor.
 
 ## Competitive landscape
 
+Verified against primary sources (mid-2026). Full landscape with funding,
+pricing, and sources: [`agent-sandbox-landscape.md`](./agent-sandbox-landscape.md).
+
 | Product | Isolation | Local dev | Self-host | Open source | Per-call latency |
 |---------|-----------|-----------|-----------|-------------|-------------------|
-| **mvm** | Firecracker+KVM | **Yes** | **Yes** | **Yes** | **16ms local / 100ms cloud** |
-| E2B | Firecracker | No | No | Partial | 50-200ms |
-| Daytona | Docker | No | Enterprise | No | 50-200ms |
-| Sprites | Firecracker | No | No | No | 50-200ms |
-| Cloudflare Sandbox | Container | No | No | No | 50-200ms |
-| microsandbox | libkrun+KVM | Yes | Local only | Yes | ~local |
-| Docker Sandboxes | microVM | Yes | Yes | Proprietary | — |
+| **mvm** | Firecracker+KVM | **Yes** | **Yes** | **Apache-2.0** | **16ms local / 100ms cloud** |
+| E2B | Firecracker | No | No | Apache core | 50-200ms |
+| Daytona | Containers (opt. Kata) | No | Yes (AGPL) | AGPL-3.0 | 50-200ms |
+| Sprites (Fly.io) | Firecracker | No | No | No | 50-200ms |
+| Vercel Sandbox | Firecracker | No | No | SDK only | 50-200ms |
+| Cloudflare Sandbox | Containers-in-VM | No | No | SDK only | 50-200ms |
+| Modal | gVisor | No | No | SDK only | ~ms (gVisor) |
+| microsandbox | libkrun+KVM | Yes | Local only | Apache-2.0 | ~local |
+| Docker Sandboxes | Cross-platform microVM | Yes | Yes | Proprietary | — |
 
-**mvm is the only Firecracker+KVM product that runs local AND self-hosted with the same API.**
+**mvm is the only Firecracker+KVM product that runs local AND self-hosted with the same API.** No
+hosted vendor runs locally; the local-first tools (microsandbox, Docker Sandboxes) lack a
+self-hostable server fleet with the same CLI/SDK.
+
+> Funding corrections vs. the catalogued figures (verified mid-2026): **Modal ~$435M+** (not $111M;
+> $355M Series C, May 2026), **Daytona ~$24M** (not $31M), **E2B $21M Series A / ~$32M total** (not
+> $35M), **Blaxel $7.3M** (not $7.8M). The closest strategic threats are **Docker Sandboxes**
+> (cross-platform microVM, local+server, but proprietary) and **libkrun players** (microsandbox /
+> SmolVM) if they add a cloud story.
 
 ## Target users
 
