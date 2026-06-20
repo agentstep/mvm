@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentstep/mvm/internal/state"
@@ -100,11 +102,11 @@ func runExec(store *state.Store, name string, remoteArgs []string, interactive b
 // runExecAppleVZ runs a command on an Apple VZ VM via the per-VM mvm-vz
 // helper's vsock-bridged agent (no daemon). MVP: non-interactive only.
 func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
-	if interactive {
-		return fmt.Errorf("interactive exec (-i/-t) is not yet supported on the Apple VZ backend; run without -i/-t")
-	}
 	if vm.Status != "running" && vm.Status != "paused" {
 		return fmt.Errorf("microVM %q is not running (status: %s)", vm.Name, vm.Status)
+	}
+	if interactive {
+		return runExecAppleVZInteractive(store, vm, remoteArgs, workdir, envVars, user)
 	}
 
 	// Resume-on-exec: wake a paused VM before running, then record activity
@@ -134,6 +136,55 @@ func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, inter
 	}
 	if res.ExitCode != 0 {
 		return fmt.Errorf("exit code %d", res.ExitCode)
+	}
+	return nil
+}
+
+// runExecAppleVZInteractive runs an interactive PTY session against an Apple VZ
+// VM: it puts the local terminal in raw mode, forwards SIGWINCH resizes, and
+// relays the terminal to the guest agent's PTY over vsock until the command exits.
+func runExecAppleVZInteractive(store *state.Store, vm *state.VM, remoteArgs []string, workdir string, envVars []string, user string) error {
+	AutoResumeIfPaused(nil, store, vm)
+	TouchActivity(store, vm.Name)
+
+	script := buildExecScript(remoteArgs, workdir, envVars, user)
+
+	fd := int(os.Stdin.Fd())
+	var rows, cols uint16 = 24, 80
+	if term.IsTerminal(fd) {
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return fmt.Errorf("set raw terminal: %w", err)
+		}
+		defer term.Restore(fd, oldState)
+		if w, h, err := term.GetSize(fd); err == nil {
+			cols, rows = uint16(w), uint16(h)
+		}
+	}
+
+	// Forward terminal resizes to the guest PTY.
+	resize := make(chan [2]uint16, 1)
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	go func() {
+		for range winch {
+			if w, h, err := term.GetSize(fd); err == nil {
+				select {
+				case resize <- [2]uint16{uint16(h), uint16(w)}:
+				default:
+				}
+			}
+		}
+	}()
+
+	code, err := vm_pkg.NewAppleVZBackend(mvmDir).AgentClient(vm.Name).ExecInteractive(
+		context.Background(), script, rows, cols, os.Getenv("TERM"), nil, os.Stdin, os.Stdout, resize)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("exit code %d", code)
 	}
 	return nil
 }

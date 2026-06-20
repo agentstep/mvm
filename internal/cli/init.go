@@ -409,6 +409,10 @@ cat > /rootfs/sbin/mvm-init << MVMINIT
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
+# devpts + /dev/ptmx are required for PTY allocation (interactive exec -it).
+mkdir -p /dev/pts
+mount -t devpts -o mode=620,ptmxmode=666 devpts /dev/pts 2>/dev/null
+ln -sf /dev/pts/ptmx /dev/ptmx
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /opt/mvm-agent
 MVMINIT

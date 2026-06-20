@@ -21,14 +21,18 @@ import (
 const (
 	reqPing     = "ping"
 	reqExec     = "exec"
+	reqExecPty  = "exec_pty"
 	reqPoweroff = "poweroff"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
 const (
-	respOK    = "ok"
-	respError = "error"
-	respExit  = "exit"
+	respOK     = "ok"
+	respError  = "error"
+	respExit   = "exit"
+	respStdout = "stdout"
+	respStdin  = "stdin"  // host→agent: terminal input
+	respResize = "resize" // host→agent: window resize (exit_code = rows<<16|cols)
 )
 
 const maxFrameSize = 10 * 1024 * 1024 // 10 MiB, matches agent
@@ -38,6 +42,7 @@ type request struct {
 	Type string       `json:"type"`
 	ID   string       `json:"id"`
 	Exec *execPayload `json:"exec,omitempty"`
+	Pty  *ptyPayload  `json:"pty,omitempty"`
 }
 
 type execPayload struct {
@@ -45,6 +50,16 @@ type execPayload struct {
 	Stdin   string            `json:"stdin,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	WorkDir string            `json:"workdir,omitempty"`
+}
+
+// ptyPayload matches agent/internal/protocol.ExecPtyRequest.
+type ptyPayload struct {
+	Command string            `json:"command"`
+	Env     map[string]string `json:"env,omitempty"`
+	WorkDir string            `json:"workdir,omitempty"`
+	Rows    uint16            `json:"rows"`
+	Cols    uint16            `json:"cols"`
+	Term    string            `json:"term,omitempty"`
 }
 
 // response is the wire-format response envelope.
