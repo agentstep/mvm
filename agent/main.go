@@ -32,10 +32,16 @@ func main() {
 		}
 	}()
 
-	// Try vsock in background — upgrade to vsock when driver is ready
+	// Try vsock in background — upgrade to vsock when driver is ready.
+	// Poll with backoff: the vsock driver is usually probe-ready within tens
+	// of ms of boot, so start tight (5ms) to bind ASAP, then back off toward
+	// 250ms so a vsock-less guest doesn't busy-spin. Same ~15s overall budget.
 	var ln net.Listener
 	go func() {
-		for i := 0; i < 60; i++ {
+		delay := 5 * time.Millisecond
+		const maxDelay = 250 * time.Millisecond
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
 			if _, err := os.Stat("/sys/class/misc/vsock"); err == nil {
 				if vsockLn, err := listenVsock(vsockPort); err == nil {
 					log.Printf("vsock listener ready")
@@ -48,7 +54,13 @@ func main() {
 					}
 				}
 			}
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(delay)
+			if delay < maxDelay {
+				delay *= 2
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+			}
 		}
 		log.Printf("vsock not available, TCP-only mode")
 	}()

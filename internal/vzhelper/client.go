@@ -139,6 +139,26 @@ func (c *Client) Connect(ctx context.Context, guestPort uint32) (*os.File, error
 		return nil, fmt.Errorf("recvmsg: %w", err)
 	}
 
+	// Extract any passed fd BEFORE inspecting the response, so that the
+	// error paths below cannot leak it. A misbehaving (or simply failing)
+	// helper can attach an fd alongside an error response; if we returned
+	// on !resp.OK or a decode error without closing it, that fd would leak
+	// for the lifetime of the process. extractFd closes any extra fds; we
+	// guard the primary fd with a deferred close until it's handed off.
+	fd := -1
+	if oobn > 0 {
+		fd, err = extractFd(oobBuf[:oobn])
+		if err != nil {
+			return nil, fmt.Errorf("extract fd: %w", err)
+		}
+	}
+	handedOff := false
+	defer func() {
+		if fd >= 0 && !handedOff {
+			syscall.Close(fd)
+		}
+	}()
+
 	resp, err := decodeFrameFromBuffer(dataBuf[:n])
 	if err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
@@ -146,13 +166,8 @@ func (c *Client) Connect(ctx context.Context, guestPort uint32) (*os.File, error
 	if !resp.OK {
 		return nil, fmt.Errorf("helper rejected connect: %s", resp.Error)
 	}
-	if oobn == 0 {
+	if fd < 0 {
 		return nil, fmt.Errorf("helper returned ok with no fd: %+v", resp)
-	}
-
-	fd, err := extractFd(oobBuf[:oobn])
-	if err != nil {
-		return nil, fmt.Errorf("extract fd: %w", err)
 	}
 
 	// Mark the fd close-on-exec so children of the Go process don't inherit
@@ -164,6 +179,7 @@ func (c *Client) Connect(ctx context.Context, guestPort uint32) (*os.File, error
 	}
 
 	name := fmt.Sprintf("vz-vsock-%s-port-%d", c.socketPath, guestPort)
+	handedOff = true
 	return os.NewFile(uintptr(fd), name), nil
 }
 

@@ -172,7 +172,7 @@ echo "Preparing microVM '${VM_NAME}'..."
 
 # Create VM directory and copy rootfs (sparse copy — fast, skips zero blocks)
 sudo mkdir -p "$VM_DIR"
-sudo cp --sparse=always "$CACHE_DIR/base.ext4" "$VM_DIR/rootfs.ext4"
+sudo cp --reflink=auto --sparse=always "$CACHE_DIR/base.ext4" "$VM_DIR/rootfs.ext4"
 echo "  Rootfs ready"
 
 # Set up TAP device
@@ -243,7 +243,7 @@ echo "Preparing microVM '${VM_NAME}' (image: %s)..."
 
 # Create VM directory and copy custom rootfs (sparse copy — fast, skips zero blocks)
 sudo mkdir -p "$VM_DIR"
-sudo cp --sparse=always "$IMAGE_PATH" "$VM_DIR/rootfs.ext4"
+sudo cp --reflink=auto --sparse=always "$IMAGE_PATH" "$VM_DIR/rootfs.ext4"
 echo "  Rootfs ready (custom image: %s)"
 
 # Set up TAP device
@@ -378,10 +378,10 @@ echo "Restoring microVM '${VM_NAME}' from snapshot..."
 sudo mkdir -p "$VM_DIR"
 
 # Copy snapshot memory file (sparse copy)
-sudo cp --sparse=always "$SNAPSHOT_DIR/mem_file" "$VM_DIR/mem_file"
+sudo cp --reflink=auto --sparse=always "$SNAPSHOT_DIR/mem_file" "$VM_DIR/mem_file"
 
 # Copy rootfs (sparse)
-sudo cp --sparse=always "$SNAPSHOT_DIR/rootfs.ext4" "$VM_DIR/rootfs.ext4"
+sudo cp --reflink=auto --sparse=always "$SNAPSHOT_DIR/rootfs.ext4" "$VM_DIR/rootfs.ext4"
 
 # Set up TAP device
 sudo ip link del "$TAP_DEV" 2>/dev/null || true
@@ -404,9 +404,9 @@ sudo setsid firecracker \
 FC_PID=$!
 
 # Wait for API socket
-for i in $(seq 1 30); do
+for i in $(seq 1 150); do
     sudo test -S "$SOCKET_PATH" && break
-    sleep 0.1
+    sleep 0.02
 done
 if ! sudo test -S "$SOCKET_PATH"; then
     echo "ERROR: Firecracker socket not ready" >&2

@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/agentstep/mvm/internal/state"
+	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 )
 
@@ -36,10 +38,23 @@ func newResumeCmd(store *state.Store) *cobra.Command {
 }
 
 func runPause(store *state.Store, name string) error {
-	// Check for Apple VZ backend (not supported)
 	vm, _ := store.GetVM(name)
+
+	// Apple VZ backend: pause via the per-VM mvm-vz helper. This is a
+	// memory-resident pause (vCPUs frozen, RAM unchanged); resume is
+	// essentially instant. No daemon is involved on this path.
 	if vm != nil && vm.Backend == "applevz" {
-		return fmt.Errorf("pause/resume is not supported on the Apple VZ backend. It requires Firecracker's snapshot support (M3+)")
+		if vm.Status != "running" {
+			return fmt.Errorf("microVM %q is not running (status: %s)", name, vm.Status)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vm_pkg.NewAppleVZBackend(mvmDir).HelperClient(name).Pause(ctx); err != nil {
+			return fmt.Errorf("pause %q: %w", name, err)
+		}
+		store.UpdateVM(name, func(v *state.VM) { v.Status = "paused" })
+		fmt.Printf("  ✓ %s paused (resume with: mvm resume %s)\n", name, name)
+		return nil
 	}
 
 	// Firecracker path — use daemon API
@@ -58,10 +73,21 @@ func runPause(store *state.Store, name string) error {
 }
 
 func runResume(store *state.Store, name string) error {
-	// Check for Apple VZ backend (not supported)
 	vm, _ := store.GetVM(name)
+
+	// Apple VZ backend: resume via the per-VM mvm-vz helper.
 	if vm != nil && vm.Backend == "applevz" {
-		return fmt.Errorf("pause/resume is not supported on the Apple VZ backend")
+		if vm.Status != "paused" {
+			return fmt.Errorf("microVM %q is not paused (status: %s)", name, vm.Status)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vm_pkg.NewAppleVZBackend(mvmDir).HelperClient(name).Resume(ctx); err != nil {
+			return fmt.Errorf("resume %q: %w", name, err)
+		}
+		store.UpdateVM(name, func(v *state.VM) { v.Status = "running" })
+		fmt.Printf("  ✓ %s resumed\n", name)
+		return nil
 	}
 
 	// Firecracker path — use daemon API

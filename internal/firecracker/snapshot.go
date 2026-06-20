@@ -57,7 +57,7 @@ func SnapshotVM(exec Executor, vm *state.VM, snapDir string) error {
 	for _, f := range []string{"snapshot.bin", "mem.bin"} {
 		src := vmDir + "/" + f
 		dst := filepath.Join(snapDir, f)
-		cpCmd := fmt.Sprintf("sudo cp --sparse=always %s %s", src, dst)
+		cpCmd := fmt.Sprintf("sudo cp --reflink=auto --sparse=always %s %s", src, dst)
 		if _, err := exec.Run(cpCmd); err != nil {
 			Resume(exec, vm)
 			return fmt.Errorf("copy %s to snapshot dir: %w", f, err)
@@ -67,7 +67,7 @@ func SnapshotVM(exec Executor, vm *state.VM, snapDir string) error {
 	// Copy rootfs.ext4 into the snapshot dir (required for restore)
 	rootfsSrc := vmDir + "/rootfs.ext4"
 	rootfsDst := filepath.Join(snapDir, "rootfs.ext4")
-	cpCmd := fmt.Sprintf("sudo cp --sparse=always %s %s", rootfsSrc, rootfsDst)
+	cpCmd := fmt.Sprintf("sudo cp --reflink=auto --sparse=always %s %s", rootfsSrc, rootfsDst)
 	if _, err := exec.Run(cpCmd); err != nil {
 		Resume(exec, vm)
 		return fmt.Errorf("copy rootfs to snapshot dir: %w", err)
@@ -120,8 +120,9 @@ func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAll
 
 	vmDir := VMDir(vmName)
 
-	// Copy rootfs (guest writes to it — COW with reflinks would be ideal
-	// but we use sparse copy for portability). Snapshot.bin is tiny. With
+	// Copy rootfs (guest writes to it — cp --reflink=auto gives a CoW clone
+	// on reflink-capable filesystems and falls back to a sparse copy
+	// elsewhere, so the pristine source stays intact either way). Snapshot.bin is tiny. With
 	// UFFD, mem.bin stays in snapDir and is mmap'd by the handler directly
 	// — saves a multi-GB copy. Without UFFD, we have to copy mem.bin into
 	// vmDir because the File backend wants the file at that path.
@@ -129,12 +130,12 @@ func RestoreVMSnapshot(exec Executor, vmName, snapDir string, alloc state.NetAll
 	var setupCmd string
 	if useUFFD {
 		setupCmd = fmt.Sprintf(
-			`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/snapshot.bin %s/snapshot.bin && echo COPY_OK`,
+			`sudo mkdir -p %s && sudo cp --reflink=auto --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --reflink=auto --sparse=always %s/snapshot.bin %s/snapshot.bin && echo COPY_OK`,
 			vmDir, snapDir, vmDir, snapDir, vmDir,
 		)
 	} else {
 		setupCmd = fmt.Sprintf(
-			`sudo mkdir -p %s && sudo cp --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --sparse=always %s/snapshot.bin %s/snapshot.bin && sudo cp --sparse=always %s/mem.bin %s/mem.bin && echo COPY_OK`,
+			`sudo mkdir -p %s && sudo cp --reflink=auto --sparse=always %s/rootfs.ext4 %s/rootfs.ext4 && sudo cp --reflink=auto --sparse=always %s/snapshot.bin %s/snapshot.bin && sudo cp --reflink=auto --sparse=always %s/mem.bin %s/mem.bin && echo COPY_OK`,
 			vmDir,
 			snapDir, vmDir,
 			snapDir, vmDir,
@@ -211,7 +212,7 @@ func loadSnapshotImpl(ex Executor, vmName string, alloc state.NetAllocation, mem
 
 	// Wait for API socket
 	waitCmd := fmt.Sprintf(
-		`for j in $(seq 1 30); do sudo test -S %s && break; sleep 0.1; done; sudo test -S %s && echo SOCK_OK`,
+		`for j in $(seq 1 150); do sudo test -S %s && break; sleep 0.02; done; sudo test -S %s && echo SOCK_OK`,
 		socketPath, socketPath,
 	)
 	out, err = ex.Run(waitCmd)

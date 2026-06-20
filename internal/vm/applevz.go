@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
@@ -133,6 +134,11 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 	}
 
 	cmd := exec.Command(b.binary, args...)
+	// Put the helper in its own session (setsid) so a Ctrl-C / SIGINT sent
+	// to the CLI's foreground process group is NOT also delivered to the VM.
+	// Without this, pressing Ctrl-C during the post-start agent wait tears
+	// the VM down even though state already records it as running.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
@@ -223,8 +229,12 @@ func (b *AppleVZBackend) IsRunning(pid int) bool {
 	if err != nil {
 		return false
 	}
-	// Signal 0 tests if process exists.
-	return process.Signal(nil) == nil
+	// kill(pid, 0) probes for existence without delivering a signal.
+	// It must be syscall.Signal(0): os.Process.Signal(nil) fails the
+	// internal syscall.Signal type assertion and always returns an error,
+	// which made this method report every process — alive or dead — as
+	// not running.
+	return process.Signal(syscall.Signal(0)) == nil
 }
 
 // StatusVM returns the VM status by querying the helper IPC.

@@ -135,8 +135,8 @@ BASE_PATH='%s'
 IMAGE_PATH='%s'
 MNT='%s'
 
-# Copy base image (sparse)
-cp --sparse=always "$BASE_PATH" "$IMAGE_PATH"
+# Copy base image (CoW reflink where the fs supports it, sparse fallback)
+cp --reflink=auto --sparse=always "$BASE_PATH" "$IMAGE_PATH"
 
 # Expand image
 truncate -s +%dM "$IMAGE_PATH"

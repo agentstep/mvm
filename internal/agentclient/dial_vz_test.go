@@ -31,8 +31,14 @@ type fakeVZHelper struct {
 
 func newFakeVZHelper(t *testing.T, agentFn func(net.Conn)) *fakeVZHelper {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "vz.sock")
+	// Short temp dir (not t.TempDir(), which embeds the full test name and
+	// can overflow the ~104-char macOS sun_path limit → bind: invalid argument).
+	dir, err := os.MkdirTemp("", "acvz")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s.sock")
 	addr, err := net.ResolveUnixAddr("unix", path)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)

@@ -30,8 +30,16 @@ type fakeHelper struct {
 
 func newFakeHelper(t *testing.T, handler func(t *testing.T, conn *net.UnixConn, req *Request)) *fakeHelper {
 	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "vz.sock")
+	// Deliberately NOT t.TempDir(): it embeds the full test name, which can
+	// push the Unix socket path past the ~104-char sun_path limit on macOS
+	// (bind: invalid argument). A short fixed-prefix temp dir keeps us well
+	// under the limit regardless of test-name length.
+	dir, err := os.MkdirTemp("", "vzh")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s.sock")
 	addr, err := net.ResolveUnixAddr("unix", path)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -278,6 +286,42 @@ func TestClient_Connect_HelperError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "vsock not available") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+// Regression guard: a helper that returns an error response but still
+// attaches an fd must not leak that fd. We detect the leak via pipe
+// semantics: send the read end of a pipe, and after Connect fails, close
+// our own read end. If Connect closed the dup it received, zero readers
+// remain and writing to the write end returns EPIPE; if it leaked the fd,
+// a reader is still open and the write succeeds.
+func TestClient_Connect_ErrorWithFd_NoLeak(t *testing.T) {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer pw.Close()
+	prFd := int(pr.Fd()) // capture once to avoid racing the helper goroutine
+
+	helper := newFakeHelper(t, func(t *testing.T, conn *net.UnixConn, req *Request) {
+		// Error response, but an fd is still attached — client must close it.
+		if err := writeFrameWithFd(conn, &Response{OK: false, Error: "vsock not available"}, prFd); err != nil {
+			t.Errorf("writeFrameWithFd: %v", err)
+		}
+	})
+
+	c := New(helper.path)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := c.Connect(ctx, 5123); err == nil {
+		t.Fatal("expected error from helper")
+	}
+
+	// Drop our own read end. If the received dup was closed, no readers
+	// remain and the write must fail with EPIPE.
+	pr.Close()
+	if _, werr := pw.Write([]byte("x")); werr == nil {
+		t.Error("fd leaked: write succeeded, so a reader fd is still open in the client")
 	}
 }
 

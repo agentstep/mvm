@@ -163,7 +163,7 @@ echo "Creating template VM for snapshot..."
 sudo mkdir -p "$SNAPSHOT_DIR"
 
 # Copy rootfs for template
-sudo cp --sparse=always "$CACHE_DIR/base.ext4" "$SNAPSHOT_DIR/rootfs.ext4"
+sudo cp --reflink=auto --sparse=always "$CACHE_DIR/base.ext4" "$SNAPSHOT_DIR/rootfs.ext4"
 
 # Create TAP for template (uses same subnet as VM index 0: tap0/172.16.0.0/30)
 # This way the snapshot's guest network matches the first restored VM.

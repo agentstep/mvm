@@ -175,7 +175,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 
 	// Setup rootfs and TAP
 	setup := fmt.Sprintf(
-		`sudo cp --sparse=always %s/base.ext4 %s/rootfs.ext4 && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
+		`sudo cp --reflink=auto --sparse=always %s/base.ext4 %s/rootfs.ext4 && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
 		CacheDir(), poolSlotDir(i),
 		alloc.TAPDev, alloc.TAPDev, alloc.TAPIP, alloc.TAPDev, alloc.TAPDev,
 		poolSlotDir(i), poolSlotDir(i),
@@ -240,7 +240,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	if _, err := ex.RunWithTimeout(createCmd, 300*time.Second); err != nil {
 		return fmt.Errorf("slot %d: snapshot/create: %w", i, err)
 	}
-	cpRootCmd := fmt.Sprintf("sudo cp --sparse=always %s/rootfs.ext4 %s", poolSlotDir(i), poolSlotPristineRoot(i))
+	cpRootCmd := fmt.Sprintf("sudo cp --reflink=auto --sparse=always %s/rootfs.ext4 %s", poolSlotDir(i), poolSlotPristineRoot(i))
 	if _, err := ex.RunWithTimeout(cpRootCmd, 300*time.Second); err != nil {
 		return fmt.Errorf("slot %d: cp rootfs: %w", i, err)
 	}
@@ -279,7 +279,7 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 	// The refill itself is slightly slower but happens in the background
 	// and doesn't block any user-facing request.
 	setupCmd := fmt.Sprintf(
-		`sudo mkdir -p %s && sudo nice -n 19 ionice -c3 cp --sparse=always %s %s/rootfs.ext4 && sudo nice -n 19 ionice -c3 cp --sparse=always %s %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
+		`sudo mkdir -p %s && sudo nice -n 19 ionice -c3 cp --reflink=auto --sparse=always %s %s/rootfs.ext4 && sudo nice -n 19 ionice -c3 cp --reflink=auto --sparse=always %s %s/mem_file && sudo ip link del %s 2>/dev/null; sudo ip tuntap add dev %s mode tap && sudo ip addr add %s/30 dev %s && sudo ip link set dev %s up && sudo touch %s/firecracker.log && sudo chmod 666 %s/firecracker.log && echo SETUP_OK`,
 		poolSlotDir(i),
 		poolSlotPristineRoot(i), poolSlotDir(i),
 		poolSlotPristineMem(i), poolSlotDir(i),
@@ -304,7 +304,7 @@ func restoreSlotFromSnapshot(ex Executor, i int) error {
 	pid, _ := strconv.Atoi(strings.TrimSpace(out))
 
 	// Wait for API socket
-	waitSocket := fmt.Sprintf(`for j in $(seq 1 30); do sudo test -S %s && break; sleep 0.1; done; sudo test -S %s && echo SOCK_OK`, socket, socket)
+	waitSocket := fmt.Sprintf(`for j in $(seq 1 150); do sudo test -S %s && break; sleep 0.02; done; sudo test -S %s && echo SOCK_OK`, socket, socket)
 	out, err = ex.Run(waitSocket)
 	if err != nil || !strings.Contains(out, "SOCK_OK") {
 		return fmt.Errorf("API socket not ready")

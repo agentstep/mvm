@@ -1,6 +1,7 @@
 package vm
 
 import (
+	"os"
 	"testing"
 )
 
@@ -63,6 +64,16 @@ func TestAppleVZIsRunningWithHighPID(t *testing.T) {
 	// Very high PID that definitely doesn't exist
 	if b.IsRunning(999999999) {
 		t.Error("nonexistent PID should not be running")
+	}
+}
+
+// Regression guard: IsRunning previously used process.Signal(nil), which
+// always errored, so it reported every process — including this live one —
+// as not running. The current process must report as running.
+func TestAppleVZIsRunningCurrentProcess(t *testing.T) {
+	b := NewAppleVZBackend("/tmp")
+	if !b.IsRunning(os.Getpid()) {
+		t.Error("the current (alive) process must report as running")
 	}
 }
 

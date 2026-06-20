@@ -92,7 +92,7 @@ func WaitForGuest(ex Executor, guestIP string, timeout time.Duration) bool {
 		if err == nil && strings.Contains(out, "OK") {
 			return true
 		}
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(250 * time.Millisecond)
 	}
 	return false
 }

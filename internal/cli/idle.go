@@ -11,6 +11,7 @@ import (
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/lima"
 	"github.com/agentstep/mvm/internal/state"
+	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 )
 
@@ -189,10 +190,6 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 			if vm.Status != "running" {
 				continue
 			}
-			if vm.Backend == "applevz" {
-				continue // no pause support
-			}
-
 			// Check last activity
 			lastActive := vm.CreatedAt
 			if vm.LastActivity != nil {
@@ -200,6 +197,17 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 			}
 
 			if now.Sub(lastActive) > timeout {
+				if vm.Backend == "applevz" {
+					// Pause via the per-VM mvm-vz helper (no daemon).
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					err := vm_pkg.NewAppleVZBackend(mvmDir).HelperClient(vm.Name).Pause(ctx)
+					cancel()
+					if err == nil {
+						vm.Status = "paused"
+						fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
+					}
+					continue
+				}
 				// Pause the VM via daemon if available, fall back to direct.
 				sc, scErr := requireDaemon()
 				if scErr == nil {
@@ -231,7 +239,15 @@ func AutoResumeIfPaused(limaClient *lima.Client, store *state.Store, vm *state.V
 		return false
 	}
 	if vm.Backend == "applevz" {
-		return false
+		// Resume via the per-VM mvm-vz helper (in-memory, near-instant).
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := vm_pkg.NewAppleVZBackend(mvmDir).HelperClient(vm.Name).Resume(ctx); err != nil {
+			return false
+		}
+		store.UpdateVM(vm.Name, func(v *state.VM) { v.Status = "running" })
+		fmt.Printf("  Auto-resumed %s\n", vm.Name)
+		return true
 	}
 	if err := firecracker.Resume(limaClient, vm); err != nil {
 		return false
