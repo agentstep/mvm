@@ -112,14 +112,14 @@ func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, inter
 	AutoResumeIfPaused(nil, store, vm)
 	TouchActivity(store, vm.Name)
 
-	// Forward piped stdin (e.g. `echo data | mvm exec vm -- cat`). Skip when
-	// stdin is a terminal so we don't block waiting for input that isn't coming.
-	var stdin string
-	if !term.IsTerminal(int(os.Stdin.Fd())) {
-		if b, err := io.ReadAll(os.Stdin); err == nil {
-			stdin = string(b)
-		}
-	}
+	// Forward piped/redirected stdin (echo data | mvm exec vm -- cat, or
+	// mvm exec vm -- cat < file). Only attempt this when stdin is not an
+	// interactive tty, and bound the read: an inherited fd that never reaches
+	// EOF (a held-open pipe under CI/cron, or /dev/null variants) must not be
+	// able to hang exec. A real pipe/file delivers its data + EOF promptly, so
+	// the select returns as soon as the data is in — the timeout only fires for
+	// a source that is never going to send anything.
+	stdin := readStdinNonBlocking()
 
 	script := buildExecScript(remoteArgs, workdir, envVars, user)
 
@@ -136,6 +136,29 @@ func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, inter
 		return fmt.Errorf("exit code %d", res.ExitCode)
 	}
 	return nil
+}
+
+// readStdinNonBlocking reads piped/redirected stdin for a non-interactive
+// exec, bounded so a never-closing fd can't hang the command. Returns "" for
+// an interactive terminal, or if no data/EOF arrives before the deadline.
+// A real pipe or file delivers its data and EOF promptly; the timeout only
+// fires for a source that will never send anything (e.g. an inherited,
+// held-open fd under CI/cron).
+func readStdinNonBlocking() string {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return ""
+	}
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(os.Stdin)
+		done <- string(b)
+	}()
+	select {
+	case s := <-done:
+		return s
+	case <-time.After(500 * time.Millisecond):
+		return ""
+	}
 }
 
 func buildExecScript(remoteArgs []string, workdir string, envVars []string, user string) string {
