@@ -3,10 +3,13 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/agentstep/mvm/internal/state"
+	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -47,6 +50,12 @@ func newExecCmd(store *state.Store) *cobra.Command {
 }
 
 func runExec(store *state.Store, name string, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
+	// Apple VZ VMs aren't managed by the daemon — exec directly against the
+	// per-VM mvm-vz helper's vsock-bridged agent.
+	if vm, _ := store.GetVM(name); vm != nil && vm.Backend == "applevz" {
+		return runExecAppleVZ(store, vm, remoteArgs, interactive, workdir, envVars, user)
+	}
+
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
@@ -84,6 +93,47 @@ func runExec(store *state.Store, name string, remoteArgs []string, interactive b
 	}
 	if exitCode != 0 {
 		return fmt.Errorf("exit code %d", exitCode)
+	}
+	return nil
+}
+
+// runExecAppleVZ runs a command on an Apple VZ VM via the per-VM mvm-vz
+// helper's vsock-bridged agent (no daemon). MVP: non-interactive only.
+func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
+	if interactive {
+		return fmt.Errorf("interactive exec (-i/-t) is not yet supported on the Apple VZ backend; run without -i/-t")
+	}
+	if vm.Status != "running" && vm.Status != "paused" {
+		return fmt.Errorf("microVM %q is not running (status: %s)", vm.Name, vm.Status)
+	}
+
+	// Resume-on-exec: wake a paused VM before running, then record activity
+	// so the idle checker doesn't immediately re-pause it.
+	AutoResumeIfPaused(nil, store, vm)
+	TouchActivity(store, vm.Name)
+
+	// Forward piped stdin (e.g. `echo data | mvm exec vm -- cat`). Skip when
+	// stdin is a terminal so we don't block waiting for input that isn't coming.
+	var stdin string
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		if b, err := io.ReadAll(os.Stdin); err == nil {
+			stdin = string(b)
+		}
+	}
+
+	script := buildExecScript(remoteArgs, workdir, envVars, user)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	res, err := vm_pkg.NewAppleVZBackend(mvmDir).AgentClient(vm.Name).Exec(ctx, script, stdin)
+	if err != nil {
+		return fmt.Errorf("exec on %q: %w", vm.Name, err)
+	}
+	if res.Output != "" {
+		os.Stdout.WriteString(res.Output)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("exit code %d", res.ExitCode)
 	}
 	return nil
 }
