@@ -236,8 +236,8 @@ mkdir -p "$CACHE_DIR"
 
 # --- Download kernel ---
 echo "Downloading kernel..."
-latest_kernel_key=$(wget -q "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.13/${ARCH}/vmlinux-5.10&list-type=2" -O - \
-    | sed -n "s/.*<Key>\(firecracker-ci\/v1.13\/${ARCH}\/vmlinux-5\.10\.[0-9]*\)<\/Key>.*/\1/p" \
+latest_kernel_key=$(wget -q "http://spec.ccfc.min.s3.amazonaws.com/?prefix=firecracker-ci/v1.13/${ARCH}/vmlinux-6.1&list-type=2" -O - \
+    | sed -n "s/.*<Key>\(firecracker-ci\/v1.13\/${ARCH}\/vmlinux-6\.1\.[0-9]*\)<\/Key>.*/\1/p" \
     | sort -V | tail -1)
 if [ -z "$latest_kernel_key" ]; then
     echo "ERROR: Could not find kernel image" >&2

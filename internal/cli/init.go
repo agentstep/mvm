@@ -277,7 +277,7 @@ func runInitAppleVZ(store *state.Store, cpus int, minimal bool) error {
 	if _, err := os.Stat(kernelPath); os.IsNotExist(err) {
 		// Download via curl (no Lima needed)
 		if err := downloadFile(
-			"https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.13/aarch64/vmlinux-5.10.239",
+			"https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.13/aarch64/vmlinux-6.1.141",
 			kernelPath,
 		); err != nil {
 			return fmt.Errorf("download kernel: %w", err)
