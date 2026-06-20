@@ -1,6 +1,9 @@
 import ArgumentParser
 import Foundation
-import Virtualization
+// Virtualization's types (VZVirtualMachine et al.) predate Sendable
+// annotations. We confine all VM access to a single dispatch queue, so
+// @preconcurrency suppresses the not-yet-Sendable diagnostics under Swift 6.
+@preconcurrency import Virtualization
 
 struct Create: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Create and boot a VM")
@@ -83,9 +86,16 @@ struct Create: ParsableCommand {
         let delegate = VMDelegate()
         _vmDelegateHolder = delegate // keep alive (machine.delegate is weak)
         let startSemaphore = DispatchSemaphore(value: 0)
-        var startError: Error?
+        // Written only inside the start completion handler below and read only
+        // after startSemaphore.wait(), which establishes the happens-before
+        // ordering — hence nonisolated(unsafe) is sound.
+        nonisolated(unsafe) var startError: Error?
 
-        let machine = VZVirtualMachine(configuration: vzConfig, queue: vmQueue)
+        // Confined to vmQueue for its whole lifetime (created with that queue;
+        // every access below and in ManagedVM is dispatched on it), so the
+        // capture into the @Sendable closure is sound despite VZVirtualMachine
+        // not being Sendable.
+        nonisolated(unsafe) let machine = VZVirtualMachine(configuration: vzConfig, queue: vmQueue)
 
         vmQueue.async {
             machine.delegate = delegate
@@ -158,7 +168,9 @@ nonisolated(unsafe) var _ipcServerHolder: IPCServer?
 // be deallocated once Create.run() returns into dispatchMain().
 nonisolated(unsafe) var _vmDelegateHolder: VMDelegate?
 
-class VMDelegate: NSObject, VZVirtualMachineDelegate {
+// @unchecked Sendable: VMDelegate has no mutable stored state; its callbacks
+// only stop the IPC server and exit. Safe to capture across queues.
+final class VMDelegate: NSObject, VZVirtualMachineDelegate, @unchecked Sendable {
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
         fputs("VM stopped with error: \(error)\n", stderr)
         _ipcServerHolder?.stop()

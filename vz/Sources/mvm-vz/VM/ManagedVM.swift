@@ -13,7 +13,11 @@ import Virtualization
 // command holds a strong reference to IPCServer, so the chain stays
 // alive for the helper process's entire lifetime.
 
-final class ManagedVM {
+// @unchecked Sendable: ManagedVM is thread-safe by construction — every
+// VZVirtualMachine access is confined to vmQueue, and heldConnections is
+// guarded by heldLock. The compiler can't verify the queue discipline, so we
+// assert it.
+final class ManagedVM: @unchecked Sendable {
     let name: String
     private let machine: VZVirtualMachine
     private let socketDevice: VZVirtioSocketDevice
@@ -44,7 +48,7 @@ final class ManagedVM {
     /// Returns the current VM state as the lowercase string the Go side
     /// expects: "running", "paused", "stopped", "error", or "starting".
     /// Dispatches to vmQueue to satisfy VZ's queue-affinity requirement.
-    func stateString(_ completion: @escaping (String) -> Void) {
+    func stateString(_ completion: @escaping @Sendable (String) -> Void) {
         vmQueue.async {
             let s: String
             switch self.machine.state {
@@ -65,7 +69,7 @@ final class ManagedVM {
     }
 
     /// Pause the VM. On VZ this freezes vCPUs and keeps memory resident.
-    func pause(_ completion: @escaping (Result<Void, Error>) -> Void) {
+    func pause(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         vmQueue.async {
             self.machine.pause { result in
                 switch result {
@@ -77,7 +81,7 @@ final class ManagedVM {
     }
 
     /// Resume a previously paused VM.
-    func resume(_ completion: @escaping (Result<Void, Error>) -> Void) {
+    func resume(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         vmQueue.async {
             self.machine.resume { result in
                 switch result {
@@ -89,7 +93,7 @@ final class ManagedVM {
     }
 
     /// Stop the VM. The helper process exits shortly afterward.
-    func stop(_ completion: @escaping (Result<Void, Error>) -> Void) {
+    func stop(_ completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
         vmQueue.async {
             do {
                 try self.machine.requestStop()
@@ -105,7 +109,7 @@ final class ManagedVM {
     /// by the underlying VZVirtioSocketConnection; ManagedVM holds a
     /// strong reference to that connection so the fd stays valid even
     /// after the receiver dups it via SCM_RIGHTS.
-    func openVsockConnection(port: UInt32, completion: @escaping (Result<Int32, Error>) -> Void) {
+    func openVsockConnection(port: UInt32, completion: @escaping @Sendable (Result<Int32, Error>) -> Void) {
         vmQueue.async {
             self.socketDevice.connect(toPort: port) { result in
                 switch result {
