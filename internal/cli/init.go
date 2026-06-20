@@ -285,6 +285,13 @@ func runInitAppleVZ(store *state.Store, cpus int, minimal bool) error {
 	}
 	fmt.Println("  ✓ Kernel ready")
 
+	// The rootfs build injects the guest agent + a minimal init that launches
+	// it on boot, so the agent must exist before we build the image.
+	if err := ensureAgentBinary(cacheDir); err != nil {
+		return err
+	}
+	fmt.Println("  ✓ Guest agent ready")
+
 	// For Apple VZ, we need a rootfs. For now, point users to build one
 	// or reuse the Firecracker rootfs if they have Lima available.
 	rootfsPath := filepath.Join(cacheDir, "base.ext4")
@@ -322,6 +329,49 @@ func downloadFile(url, dest string) error {
 	return execLocal(fmt.Sprintf("curl -sL -o %s %s", dest, url))
 }
 
+// ensureAgentBinary makes sure a linux/arm64 mvm-agent binary exists in
+// cacheDir; the rootfs build injects it as the guest's init-launched agent.
+// If missing, it builds it from the agent module located relative to the repo,
+// otherwise returns an actionable error.
+func ensureAgentBinary(cacheDir string) error {
+	agentBin := filepath.Join(cacheDir, "mvm-agent")
+	if st, err := os.Stat(agentBin); err == nil && st.Size() > 0 {
+		return nil
+	}
+	src := findAgentSrc()
+	if src == "" {
+		return fmt.Errorf("mvm-agent not found at %s; build it with: (cd agent && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o %s .)", agentBin, agentBin)
+	}
+	fmt.Println("Building guest agent (linux/arm64)...")
+	cmd := exec.Command("go", "build", "-ldflags", "-s -w", "-o", agentBin, ".")
+	cmd.Dir = src
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=arm64", "CGO_ENABLED=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("build mvm-agent: %w\n%s", err, out)
+	}
+	return nil
+}
+
+// findAgentSrc walks up from the working directory looking for the agent
+// module (agent/go.mod). Returns "" if not found.
+func findAgentSrc() string {
+	dir, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for {
+		cand := filepath.Join(dir, "agent")
+		if _, err := os.Stat(filepath.Join(cand, "go.mod")); err == nil {
+			return cand
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
 func buildLocalRootfs(dest string, minimal bool) error {
 	// Try Docker if available
 	if _, err := os.Stat("/usr/local/bin/docker"); err == nil {
@@ -351,6 +401,18 @@ echo "root:root" | chpasswd -R /rootfs
 mkdir -p /rootfs/root/.ssh
 chmod 755 /rootfs/root/.ssh
 echo "nameserver 8.8.8.8" > /rootfs/etc/resolv.conf
+mkdir -p /rootfs/opt /rootfs/sbin
+cp /output/mvm-agent /rootfs/opt/mvm-agent
+chmod +x /rootfs/opt/mvm-agent
+cat > /rootfs/sbin/mvm-init << MVMINIT
+#!/bin/sh
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+exec /opt/mvm-agent
+MVMINIT
+chmod +x /rootfs/sbin/mvm-init
 dd if=/dev/zero of=/output/base.ext4 bs=1M count=0 seek=512
 mkfs.ext4 -F -d /rootfs /output/base.ext4
 '`, dest, packages)
