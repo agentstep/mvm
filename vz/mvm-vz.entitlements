@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required to create a VZVirtualMachine. Without this entitlement,
+         VZVirtualMachineConfiguration.validate() / machine creation fails with
+         "The process doesn't have the com.apple.security.virtualization
+         entitlement." Ad-hoc signing (codesign -s -) grants it for local dev
+         on Apple Silicon; VZNATNetworkDeviceAttachment needs only this (the
+         restricted com.apple.vm.networking entitlement is for bridged mode). -->
+    <key>com.apple.security.virtualization</key>
+    <true/>
+</dict>
+</plist>

@@ -73,21 +73,25 @@ struct Create: ParsableCommand {
         let vzConfig = try VMConfigBuilder.build(config)
         try vzConfig.validate()
 
-        var machine: VZVirtualMachine!
-        vmQueue.sync {
-            machine = VZVirtualMachine(configuration: vzConfig)
-        }
+        // VZVirtualMachine is queue-affine: every method/property access must
+        // happen on the queue the machine is bound to. The one-arg
+        // VZVirtualMachine(configuration:) binds the machine to the MAIN queue,
+        // so driving start()/pause()/vsock-connect from vmQueue tripped VZ's
+        // dispatch_assert_queue (SIGTRAP). Use the queue-taking initializer so
+        // the machine is bound to vmQueue — the same queue ManagedVM dispatches
+        // all of its operations on — and invoke start() on that queue.
         let delegate = VMDelegate()
-        machine.delegate = delegate
-
+        _vmDelegateHolder = delegate // keep alive (machine.delegate is weak)
         let startSemaphore = DispatchSemaphore(value: 0)
         var startError: Error?
 
+        let machine = VZVirtualMachine(configuration: vzConfig, queue: vmQueue)
+
         vmQueue.async {
+            machine.delegate = delegate
             machine.start { result in
-                switch result {
-                case .success: break
-                case .failure(let error): startError = error
+                if case .failure(let error) = result {
+                    startError = error
                 }
                 startSemaphore.signal()
             }
@@ -148,6 +152,11 @@ struct Create: ParsableCommand {
 // signal handlers need to read this from arbitrary threads. Access is
 // effectively single-writer (set once during boot) and read-only after.
 nonisolated(unsafe) var _ipcServerHolder: IPCServer?
+
+// File-scope strong reference to keep the VM delegate alive for the process
+// lifetime — VZVirtualMachine.delegate is a weak reference, so a local would
+// be deallocated once Create.run() returns into dispatchMain().
+nonisolated(unsafe) var _vmDelegateHolder: VMDelegate?
 
 class VMDelegate: NSObject, VZVirtualMachineDelegate {
     func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {

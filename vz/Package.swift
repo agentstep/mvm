@@ -26,6 +26,11 @@ let package = Package(
             path: "Sources/mvm-vz",
             swiftSettings: [
                 .unsafeFlags(["-parse-as-library"]),
+                // This code predates Swift 6 strict concurrency. Compile it in
+                // Swift 5 language mode so the framework-interaction patterns
+                // (VZ callbacks mutating captured vars under a semaphore, etc.)
+                // remain warnings rather than hard errors on Swift 6.x toolchains.
+                .swiftLanguageMode(.v5),
             ],
             linkerSettings: [
                 .linkedFramework("Virtualization"),
