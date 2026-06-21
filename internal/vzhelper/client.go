@@ -60,6 +60,13 @@ func (c *Client) Resume(ctx context.Context) error {
 	return err
 }
 
+// Save pauses the VM (if running) and writes its full state to path. The VM
+// remains paused afterward; the caller typically stops it next.
+func (c *Client) Save(ctx context.Context, path string) error {
+	_, err := c.exchange(ctx, &Request{Cmd: CmdSave, Path: path})
+	return err
+}
+
 // Stop asks the helper to gracefully shut the VM down. The helper
 // process exits shortly afterward, and the IPC socket is removed.
 //

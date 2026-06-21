@@ -43,6 +43,7 @@ const (
 	CmdResume  = "resume"
 	CmdStop    = "stop"
 	CmdStatus  = "status"
+	CmdSave    = "save"
 )
 
 const maxFrameSize = 1 * 1024 * 1024 // 1 MiB — control plane messages are tiny
@@ -51,6 +52,7 @@ const maxFrameSize = 1 * 1024 * 1024 // 1 MiB — control plane messages are tin
 type Request struct {
 	Cmd  string `json:"cmd"`
 	Port uint32 `json:"port,omitempty"` // for CmdConnect only
+	Path string `json:"path,omitempty"` // for CmdSave only
 }
 
 // Response is the wire-format response envelope returned by the helper.

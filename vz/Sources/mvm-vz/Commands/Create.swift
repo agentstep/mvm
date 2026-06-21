@@ -38,6 +38,12 @@ struct Create: ParsableCommand {
     @Option(name: .long, help: "Path to per-VM IPC socket (defaults to ~/.mvm/run/vz-<name>.sock)")
     var ipcSocket: String?
 
+    @Option(name: .long, help: "Restore VM state from a .vzvmsave file instead of cold-booting")
+    var restoreFrom: String?
+
+    @Flag(name: .long, help: "Build a save/restore-compatible config (omit entropy/console/balloon)")
+    var saveRestore: Bool = false
+
     @Flag(name: .long, help: "Run in foreground (block until VM stops)")
     var foreground: Bool = false
 
@@ -73,7 +79,7 @@ struct Create: ParsableCommand {
         // the start callback, and hand it to ManagedVM for IPC dispatch.
         let vmQueue = DispatchQueue(label: "mvm.vz.vm.\(name)")
 
-        let vzConfig = try VMConfigBuilder.build(config)
+        let vzConfig = try VMConfigBuilder.build(config, saveRestore: saveRestore)
         try vzConfig.validate()
 
         // VZVirtualMachine is queue-affine: every method/property access must
@@ -99,11 +105,31 @@ struct Create: ParsableCommand {
 
         vmQueue.async {
             machine.delegate = delegate
-            machine.start { result in
-                if case .failure(let error) = result {
-                    startError = error
+            if let statePath = restoreFrom {
+                // Restore saved memory+CPU+device state. The config must match
+                // what was saved (same kernel/rootfs/devices — it does, since
+                // both go through VMConfigBuilder). restoreMachineState leaves
+                // the VM paused, so resume it to make it runnable.
+                machine.restoreMachineStateFrom(url: URL(fileURLWithPath: statePath)) { error in
+                    if let error = error {
+                        let ns = error as NSError
+                        fputs("restore failed: domain=\(ns.domain) code=\(ns.code) reason=\(ns.localizedFailureReason ?? "?") userInfo=\(ns.userInfo)\n", stderr)
+                        startError = error
+                        startSemaphore.signal()
+                        return
+                    }
+                    machine.resume { result in
+                        if case .failure(let e) = result { startError = e }
+                        startSemaphore.signal()
+                    }
                 }
-                startSemaphore.signal()
+            } else {
+                machine.start { result in
+                    if case .failure(let error) = result {
+                        startError = error
+                    }
+                    startSemaphore.signal()
+                }
             }
         }
 

@@ -14,11 +14,13 @@ enum IPCCommand: String {
     case resume
     case stop
     case status
+    case save
 }
 
 struct IPCRequest {
     let cmd: IPCCommand
     let port: UInt32?
+    let path: String?
 
     static func decode(_ data: Data) throws -> IPCRequest {
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -33,7 +35,7 @@ struct IPCRequest {
         } else if let p = obj["port"] as? UInt32 {
             port = p
         }
-        return IPCRequest(cmd: cmd, port: port)
+        return IPCRequest(cmd: cmd, port: port, path: obj["path"] as? String)
     }
 }
 
