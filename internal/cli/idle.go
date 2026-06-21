@@ -183,46 +183,55 @@ func runIdleCheck(limaClient *lima.Client, store *state.Store) error {
 		}
 	}
 
-	// Check all running VMs
-	return store.Transact(func(st *state.State) error {
+	// Phase 1: collect idle VMs under the lock (read-only). We must NOT pause
+	// here: the daemon's PauseVM calls store.UpdateVM, which takes the same
+	// flock we hold inside Transact — pausing while holding it deadlocks the
+	// idle checker against the daemon.
+	type idleVM struct {
+		name, backend string
+		idle          time.Duration
+	}
+	var idle []idleVM
+	if err := store.Transact(func(st *state.State) error {
 		now := time.Now()
 		for _, vm := range st.VMs {
 			if vm.Status != "running" {
 				continue
 			}
-			// Check last activity
 			lastActive := vm.CreatedAt
 			if vm.LastActivity != nil {
 				lastActive = *vm.LastActivity
 			}
-
-			if now.Sub(lastActive) > timeout {
-				if vm.Backend == "applevz" {
-					// Pause via the per-VM mvm-vz helper (no daemon).
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					err := vm_pkg.NewAppleVZBackend(mvmDir).HelperClient(vm.Name).Pause(ctx)
-					cancel()
-					if err == nil {
-						vm.Status = "paused"
-						fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
-					}
-					continue
-				}
-				// Pause the VM via daemon if available, fall back to direct.
-				sc, scErr := requireDaemon()
-				if scErr == nil {
-					if err := sc.PauseVM(context.Background(), vm.Name); err == nil {
-						vm.Status = "paused"
-						fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
-					}
-				} else if err := firecracker.Pause(limaClient, vm); err == nil {
-					vm.Status = "paused"
-					fmt.Printf("[idle-check] Paused %s (idle %s)\n", vm.Name, now.Sub(lastActive).Round(time.Second))
-				}
+			if d := now.Sub(lastActive); d > timeout {
+				idle = append(idle, idleVM{name: vm.Name, backend: vm.Backend, idle: d})
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Phase 2: pause each idle VM with the lock released.
+	for _, iv := range idle {
+		paused := false
+		switch {
+		case iv.backend == "applevz":
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			paused = vm_pkg.NewAppleVZBackend(mvmDir).HelperClient(iv.name).Pause(ctx) == nil
+			cancel()
+		default:
+			if sc, scErr := requireDaemon(); scErr == nil {
+				paused = sc.PauseVM(context.Background(), iv.name) == nil
+			} else if vm, _ := store.GetVM(iv.name); vm != nil {
+				paused = firecracker.Pause(limaClient, vm) == nil
+			}
+		}
+		if paused {
+			store.UpdateVM(iv.name, func(v *state.VM) { v.Status = "paused" })
+			fmt.Printf("[idle-check] Paused %s (idle %s)\n", iv.name, iv.idle.Round(time.Second))
+		}
+	}
+	return nil
 }
 
 // TouchActivity updates LastActivity for a VM. Call from exec/ssh.
