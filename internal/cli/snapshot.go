@@ -3,11 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/agentstep/mvm/internal/state"
+	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 )
 
-func newSnapshotCmd() *cobra.Command {
+func newSnapshotCmd(store *state.Store) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "snapshot",
 		Short:   "Manage VM snapshots",
@@ -15,7 +19,7 @@ func newSnapshotCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(
-		newSnapshotCreateCmd(),
+		newSnapshotCreateCmd(store),
 		newSnapshotRestoreCmd(),
 		newSnapshotListCmd(),
 		newSnapshotDeleteCmd(),
@@ -24,7 +28,7 @@ func newSnapshotCmd() *cobra.Command {
 	return cmd
 }
 
-func newSnapshotCreateCmd() *cobra.Command {
+func newSnapshotCreateCmd(store *state.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "create <vm-name> [snapshot-name]",
 		Short: "Create a delta snapshot of a running VM",
@@ -40,7 +44,7 @@ Set MVM_SNAPSHOT_KEY to encrypt snapshots with AES-256-GCM:
 			if len(args) > 1 {
 				snapName = args[1]
 			}
-			return runSnapshotCreate(cmd.Context(), vmName, snapName)
+			return runSnapshotCreate(cmd.Context(), store, vmName, snapName)
 		},
 	}
 }
@@ -79,7 +83,26 @@ func newSnapshotDeleteCmd() *cobra.Command {
 	}
 }
 
-func runSnapshotCreate(ctx context.Context, vmName, snapName string) error {
+func runSnapshotCreate(ctx context.Context, store *state.Store, vmName, snapName string) error {
+	// Apple VZ backend: save full VM state (memory+CPU+devices) via the helper.
+	// The VM is left paused; stop + start restores from it (restore-on-start).
+	if vm, _ := store.GetVM(vmName); vm != nil && vm.Backend == "applevz" {
+		if vm.Status != "running" && vm.Status != "paused" {
+			return fmt.Errorf("microVM %q is not running (status: %s)", vmName, vm.Status)
+		}
+		home, _ := os.UserHomeDir()
+		mvmDir := filepath.Join(home, ".mvm")
+		statePath := filepath.Join(mvmDir, "vms", vmName, "state.vzvmsave")
+		_ = os.RemoveAll(statePath) // VZ rejects saving over an existing file
+		fmt.Printf("Saving VM '%s' state (writes all guest memory; may take a few seconds)...\n", vmName)
+		if err := vm_pkg.NewAppleVZBackend(mvmDir).SaveVM(vmName, statePath); err != nil {
+			return fmt.Errorf("save VM state: %w", err)
+		}
+		store.UpdateVM(vmName, func(v *state.VM) { v.Status = "paused" })
+		fmt.Printf("  ✓ State saved. Restore with: mvm stop %s && mvm start %s\n", vmName, vmName)
+		return nil
+	}
+
 	sc, err := requireDaemon()
 	if err != nil {
 		return err

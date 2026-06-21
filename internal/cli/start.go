@@ -165,33 +165,49 @@ func printPorts(vm *state.VM) {
 // The previous SSH-based post-boot path (and the applyPostBootDirect
 // helper that went with it) has been removed.
 func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string) error {
-	now := time.Now()
-	vmEntry := &state.VM{
-		Name:      name,
-		Status:    "starting",
-		Backend:   "applevz",
-		Ports:     ports,
-		NetPolicy: netPolicy,
-		CreatedAt: now,
-	}
-	netIndex, err := store.ReserveVM(vmEntry)
-	if err != nil {
-		return err
-	}
-	alloc := state.AllocateNet(netIndex)
-
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".mvm", "cache")
 	kernelPath := filepath.Join(cacheDir, "vmlinux")
 	rootfsPath := filepath.Join(cacheDir, "base.ext4")
 
-	// Copy rootfs for this VM
 	vmDir := filepath.Join(home, ".mvm", "vms", name)
 	os.MkdirAll(vmDir, 0o755)
 	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	statePath := filepath.Join(vmDir, "state.vzvmsave")
 
-	// Sparse copy
-	if err := execLocal(fmt.Sprintf("cp %s %s", rootfsPath, vmRootfs)); err != nil {
+	now := time.Now()
+	var netIndex int
+	if existing, _ := store.GetVM(name); existing != nil {
+		// Already in state — allow it only as a restore: a stopped VM that has
+		// a saved state file. Reuse its existing network allocation.
+		if _, statErr := os.Stat(statePath); statErr != nil {
+			return fmt.Errorf("microVM %q already exists", name)
+		}
+		netIndex = existing.NetIndex
+		store.UpdateVM(name, func(v *state.VM) { v.Status = "starting" })
+	} else {
+		vmEntry := &state.VM{
+			Name:      name,
+			Status:    "starting",
+			Backend:   "applevz",
+			Ports:     ports,
+			NetPolicy: netPolicy,
+			CreatedAt: now,
+		}
+		var err error
+		netIndex, err = store.ReserveVM(vmEntry)
+		if err != nil {
+			return err
+		}
+	}
+	alloc := state.AllocateNet(netIndex)
+
+	// If a saved snapshot exists, restore from it. The rootfs already holds the
+	// writes from before the save, so we must NOT re-copy base.ext4 over it.
+	restoreFrom := ""
+	if _, statErr := os.Stat(statePath); statErr == nil {
+		restoreFrom = statePath
+	} else if err := execLocal(fmt.Sprintf("cp %s %s", rootfsPath, vmRootfs)); err != nil {
 		store.RemoveVM(name)
 		return fmt.Errorf("copy rootfs: %w", err)
 	}
@@ -201,7 +217,11 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 
 	vzBackend := vm.NewAppleVZBackend(filepath.Join(home, ".mvm"))
 
-	fmt.Printf("Starting microVM '%s' (Apple VZ)...\n", name)
+	if restoreFrom != "" {
+		fmt.Printf("Restoring microVM '%s' from saved state (Apple VZ)...\n", name)
+	} else {
+		fmt.Printf("Starting microVM '%s' (Apple VZ)...\n", name)
+	}
 
 	vzCpus := cpus
 	if vzCpus <= 0 {
@@ -211,7 +231,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	if vzMem <= 0 {
 		vzMem = 1024
 	}
-	startResult, err := vzBackend.StartVM(name, kernelPath, vmRootfs, bootArgs, alloc.GuestMAC, vzCpus, vzMem, volumes)
+	startResult, err := vzBackend.StartVM(name, kernelPath, vmRootfs, bootArgs, alloc.GuestMAC, vzCpus, vzMem, volumes, restoreFrom)
 	if err != nil {
 		store.RemoveVM(name)
 		return fmt.Errorf("start VM: %w", err)

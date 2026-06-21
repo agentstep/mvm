@@ -104,6 +104,30 @@ final class ManagedVM: @unchecked Sendable {
         }
     }
 
+    /// Save full VM state (memory + CPU + device state) to url. VZ requires
+    /// the VM be paused first, so we pause if running, then save. The disk
+    /// image is NOT part of the save file — it is mutated in place and must be
+    /// the same file on restore.
+    func save(to url: URL, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        vmQueue.async {
+            let doSave: @Sendable () -> Void = {
+                self.machine.saveMachineStateTo(url: url) { error in
+                    if let error = error { completion(.failure(error)) } else { completion(.success(())) }
+                }
+            }
+            if self.machine.state == .running {
+                self.machine.pause { result in
+                    switch result {
+                    case .success:        doSave()
+                    case .failure(let e): completion(.failure(e))
+                    }
+                }
+            } else {
+                doSave()
+            }
+        }
+    }
+
     /// Open a vsock connection from the host to the in-guest agent on
     /// `port` and return the resulting file descriptor. The fd is owned
     /// by the underlying VZVirtioSocketConnection; ManagedVM holds a

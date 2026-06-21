@@ -221,6 +221,22 @@ final class IPCServer: @unchecked Sendable {
                 }
             }
 
+        case .save:
+            guard let path = req.path else {
+                try? IPCFraming.writeResponse(fd, .error("missing 'path'"))
+                close(fd)
+                return
+            }
+            vm.save(to: URL(fileURLWithPath: path)) { result in
+                let resp: IPCResponse
+                switch result {
+                case .success: resp = .ok()
+                case .failure(let e): resp = .error("\(e)")
+                }
+                try? IPCFraming.writeResponse(fd, resp)
+                close(fd)
+            }
+
         case .connect:
             guard let port = req.port else {
                 try? IPCFraming.writeResponse(fd, .error("missing 'port'"))

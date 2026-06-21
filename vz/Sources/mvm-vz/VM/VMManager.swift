@@ -28,8 +28,30 @@ enum VMError: Error, LocalizedError {
 
 /// Builds VZVirtualMachineConfiguration from our VMConfig.
 enum VMConfigBuilder {
-    static func build(_ config: VMConfig) throws -> VZVirtualMachineConfiguration {
+    // saveRestore: when true, omit the devices that VZ's save/restore API
+    // rejects (entropy, serial console, memory balloon). Storage, network, and
+    // the vsock control plane are kept — the spike validates whether that set
+    // passes validateSaveRestoreSupport().
+    static func build(_ config: VMConfig, saveRestore: Bool = false, machineIdPath: String? = nil) throws -> VZVirtualMachineConfiguration {
         let vzConfig = VZVirtualMachineConfiguration()
+
+        // Stable machine identifier — REQUIRED for save/restore. restore fails
+        // with VZError.restore ("invalid argument") if the restore config's
+        // identifier differs from the saved one, and a default config gets a
+        // fresh random identifier every run. Persist it per-VM so save and
+        // restore share it (this is what Lima does).
+        if let idPath = machineIdPath {
+            let platform = VZGenericPlatformConfiguration()
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: idPath)),
+               let id = VZGenericMachineIdentifier(dataRepresentation: data) {
+                platform.machineIdentifier = id
+            } else {
+                let id = VZGenericMachineIdentifier()
+                try? id.dataRepresentation.write(to: URL(fileURLWithPath: idPath))
+                platform.machineIdentifier = id
+            }
+            vzConfig.platform = platform
+        }
 
         vzConfig.cpuCount = config.cpus
         vzConfig.memorySize = UInt64(config.memoryMB) * 1024 * 1024
@@ -54,22 +76,24 @@ enum VMConfigBuilder {
         }
         vzConfig.networkDevices = [networkDevice]
 
-        // Serial console
-        let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
-        if let logPath = config.logPath {
-            FileManager.default.createFile(atPath: logPath, contents: nil)
-            let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
-            logHandle.seekToEndOfFile()
-            serialPort.attachment = VZFileHandleSerialPortAttachment(
-                fileHandleForReading: nil,
-                fileHandleForWriting: logHandle
-            )
-        }
-        vzConfig.serialPorts = [serialPort]
+        // Serial console, entropy, and memory balloon are all rejected by VZ's
+        // save/restore API, so they are omitted in saveRestore mode.
+        if !saveRestore {
+            let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
+            if let logPath = config.logPath {
+                FileManager.default.createFile(atPath: logPath, contents: nil)
+                let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
+                logHandle.seekToEndOfFile()
+                serialPort.attachment = VZFileHandleSerialPortAttachment(
+                    fileHandleForReading: nil,
+                    fileHandleForWriting: logHandle
+                )
+            }
+            vzConfig.serialPorts = [serialPort]
 
-        // Entropy + memory balloon
-        vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
-        vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+            vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+            vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        }
 
         // Vsock device — out-of-band control plane to the in-guest agent.
         // The Go side reaches the agent via the helper's IPC socket: the

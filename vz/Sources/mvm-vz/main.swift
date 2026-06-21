@@ -6,7 +6,7 @@ struct MvmVZ: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mvm-vz",
         abstract: "Manage lightweight Linux VMs using Apple Virtualization.framework",
-        subcommands: [Create.self, Start.self, Stop.self, Status.self, Version.self]
+        subcommands: [Create.self, Start.self, Stop.self, Status.self, Version.self, ValidateSaveRestore.self]
     )
 }
 
