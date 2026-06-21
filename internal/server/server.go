@@ -102,7 +102,12 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", cfg.SocketPath, err)
 	}
-	os.Chmod(cfg.SocketPath, 0o666) // allow CLI on macOS to connect via Lima socket forward
+	// 0600, not 0666: the daemon shells out as root, so a world-writable
+	// control socket lets any local user take over the host. The unix handler
+	// has no other auth — these socket permissions ARE the auth. The macOS
+	// Lima socket-forwarder and the CLI run as the same user, so owner-only
+	// access is sufficient there.
+	os.Chmod(cfg.SocketPath, 0o600)
 
 	s := &Server{
 		store:        cfg.Store,
@@ -136,6 +141,13 @@ func New(cfg Config) (*Server, error) {
 
 	// Set up TCP listener if ListenAddr is configured.
 	if cfg.ListenAddr != "" {
+		// Refuse to expose the control plane over the network without auth —
+		// the API can exec/build/snapshot as root, so an unauthenticated TCP
+		// listener is a remote root RCE.
+		if cfg.APIKey == "" {
+			ln.Close()
+			return nil, fmt.Errorf("refusing to start TCP listener on %s without an API key: set MVM_API_KEY / --api-key (or --api-key-file)", cfg.ListenAddr)
+		}
 		tcpLn, err := net.Listen("tcp", cfg.ListenAddr)
 		if err != nil {
 			ln.Close()
@@ -143,10 +155,7 @@ func New(cfg Config) (*Server, error) {
 		}
 		s.tcpListener = tcpLn
 
-		var tcpHandler http.Handler = mux
-		if cfg.APIKey != "" {
-			tcpHandler = authMiddleware(cfg.APIKey, mux)
-		}
+		tcpHandler := authMiddleware(cfg.APIKey, mux)
 
 		s.tcpServer = &http.Server{
 			Handler:      tcpHandler,
