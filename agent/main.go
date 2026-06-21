@@ -5,6 +5,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/agentstep/mvm/agent/internal/handler"
@@ -17,16 +19,30 @@ func main() {
 	log.SetPrefix("[mvm-agent] ")
 	log.SetFlags(log.LstdFlags)
 
-	// Start TCP listener immediately (for SSH tunnel connectivity)
+	// Start TCP listener immediately (legacy host-side control path).
 	tcpLn, tcpErr := net.Listen("tcp", ":5123")
 	if tcpErr != nil {
 		log.Fatalf("TCP listen failed: %v", tcpErr)
 	}
+	// The agent protocol is unauthenticated, and on the Firecracker/TAP backend
+	// other VMs on the host can route to this guest's IP:5123. Restrict the TCP
+	// port to the host (this guest's default gateway): legitimate host->guest
+	// calls arrive from the gateway, cross-VM traffic arrives from a different
+	// subnet. vsock (the primary path) has no IP and is unaffected. If the
+	// gateway can't be determined the guest has no routing, so other VMs can't
+	// reach it either — allow in that case to preserve functionality.
+	gateway := hostGatewayIP()
 	go func() {
 		for {
 			conn, err := tcpLn.Accept()
 			if err != nil {
 				continue
+			}
+			if gateway != "" {
+				if ta, ok := conn.RemoteAddr().(*net.TCPAddr); !ok || ta.IP.String() != gateway {
+					conn.Close()
+					continue
+				}
 			}
 			go handleConnection(conn)
 		}
@@ -77,6 +93,32 @@ func main() {
 		}
 		go handleConnection(conn)
 	}
+}
+
+// hostGatewayIP returns the guest's default-route gateway (the host's TAP IP),
+// or "" if it can't be determined. Parses /proc/net/route, where the default
+// route has Destination 00000000 and the Gateway is a hex little-endian IPv4.
+func hostGatewayIP() string {
+	data, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	return parseDefaultGateway(string(data))
+}
+
+func parseDefaultGateway(routeTable string) string {
+	for _, line := range strings.Split(routeTable, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[1] != "00000000" || f[2] == "00000000" {
+			continue
+		}
+		v, err := strconv.ParseUint(f[2], 16, 32)
+		if err != nil {
+			return ""
+		}
+		return fmt.Sprintf("%d.%d.%d.%d", byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	}
+	return ""
 }
 
 func handleConnection(conn net.Conn) {
