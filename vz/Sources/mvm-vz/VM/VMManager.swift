@@ -32,8 +32,26 @@ enum VMConfigBuilder {
     // rejects (entropy, serial console, memory balloon). Storage, network, and
     // the vsock control plane are kept — the spike validates whether that set
     // passes validateSaveRestoreSupport().
-    static func build(_ config: VMConfig, saveRestore: Bool = false) throws -> VZVirtualMachineConfiguration {
+    static func build(_ config: VMConfig, saveRestore: Bool = false, machineIdPath: String? = nil) throws -> VZVirtualMachineConfiguration {
         let vzConfig = VZVirtualMachineConfiguration()
+
+        // Stable machine identifier — REQUIRED for save/restore. restore fails
+        // with VZError.restore ("invalid argument") if the restore config's
+        // identifier differs from the saved one, and a default config gets a
+        // fresh random identifier every run. Persist it per-VM so save and
+        // restore share it (this is what Lima does).
+        if let idPath = machineIdPath {
+            let platform = VZGenericPlatformConfiguration()
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: idPath)),
+               let id = VZGenericMachineIdentifier(dataRepresentation: data) {
+                platform.machineIdentifier = id
+            } else {
+                let id = VZGenericMachineIdentifier()
+                try? id.dataRepresentation.write(to: URL(fileURLWithPath: idPath))
+                platform.machineIdentifier = id
+            }
+            vzConfig.platform = platform
+        }
 
         vzConfig.cpuCount = config.cpus
         vzConfig.memorySize = UInt64(config.memoryMB) * 1024 * 1024

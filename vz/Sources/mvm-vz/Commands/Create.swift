@@ -44,6 +44,9 @@ struct Create: ParsableCommand {
     @Flag(name: .long, help: "Build a save/restore-compatible config (omit entropy/console/balloon)")
     var saveRestore: Bool = false
 
+    @Option(name: .long, help: "Path to persist the VM's machine identifier (stable across save/restore)")
+    var machineIdPath: String?
+
     @Flag(name: .long, help: "Run in foreground (block until VM stops)")
     var foreground: Bool = false
 
@@ -79,7 +82,7 @@ struct Create: ParsableCommand {
         // the start callback, and hand it to ManagedVM for IPC dispatch.
         let vmQueue = DispatchQueue(label: "mvm.vz.vm.\(name)")
 
-        let vzConfig = try VMConfigBuilder.build(config, saveRestore: saveRestore)
+        let vzConfig = try VMConfigBuilder.build(config, saveRestore: saveRestore, machineIdPath: machineIdPath)
         try vzConfig.validate()
 
         // VZVirtualMachine is queue-affine: every method/property access must

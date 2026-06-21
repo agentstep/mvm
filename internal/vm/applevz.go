@@ -132,6 +132,10 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 	// balloon) so that any VM can be snapshotted and restored — VZ's actual
 	// save/restore rejects those devices even though validate() accepts them.
 	args = append(args, "--save-restore")
+	// Persist the machine identifier per VM so the restore config matches the
+	// saved one — a fresh random identifier each run is what made restore fail
+	// with VZError.restore ("invalid argument").
+	args = append(args, "--machine-id-path", filepath.Join(b.dataDir, "vms", name, "machine-id"))
 	if restoreFrom != "" {
 		args = append(args, "--restore-from", restoreFrom)
 	}
@@ -219,12 +223,29 @@ func (b *AppleVZBackend) StopVM(name string, pid int) error {
 	// Preferred: graceful stop via IPC.
 	helper := b.HelperClient(name)
 	if err := helper.Stop(ctx); err == nil {
+		b.waitForExit(pid, 5*time.Second)
 		return nil
 	}
 
 	// Fallback: send SIGTERM via the legacy stop subcommand.
 	cmd := exec.CommandContext(ctx, b.binary, "stop", "--pid", strconv.Itoa(pid))
-	return cmd.Run()
+	err := cmd.Run()
+	b.waitForExit(pid, 5*time.Second)
+	return err
+}
+
+// waitForExit blocks until the helper process exits (releasing its exclusive
+// lock on the disk image) or the timeout elapses. Without this, a restore that
+// immediately follows a stop can fail to attach the disk ("storage device
+// attachment is invalid") because the previous helper still holds it.
+func (b *AppleVZBackend) waitForExit(pid int, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if !b.IsRunning(pid) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // IsRunning checks if the mvm-vz process is alive.
