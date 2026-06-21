@@ -1,13 +1,15 @@
-# mvm — Firecracker MicroVMs, local or self-hosted
+# mvm — hardware-isolated microVMs, local or self-hosted
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Hardware-isolated Linux sandboxes for AI agents. **Same binary runs on your Mac and on your servers.** No cloud vendor. Same API.
+Hardware-isolated Linux sandboxes for AI agents. **Native microVMs on Apple Silicon, Firecracker on the Linux servers you own — same binary, same API.** No cloud vendor.
 
 ```bash
-# On your Mac:
-mvm start sandbox                      # 1.4s, claimed from warm pool
-mvm exec sandbox -- npm test           # 16ms exec latency — vsock to agent
+# On your Mac — native Apple Silicon microVM, no nested layer:
+mvm start sandbox                      # ~0.7s cold boot to an agent-ready VM
+mvm exec sandbox -- npm test           # exec over vsock to the in-guest agent
+mvm snapshot create sandbox            # checkpoint memory + disk
+mvm stop sandbox && mvm start sandbox  # restore in ~0.3s, exactly where you left off
 
 # Or on a Linux server you own:
 curl -sSL https://get.mvm.dev | sudo bash    # 95s: fresh box → working sandbox service
@@ -20,19 +22,28 @@ mvm exec sandbox -- npm test           # same CLI, same API
 AI coding agents need root, shell, and network access to do real work. The options available today:
 
 - **Docker** — namespace isolation, shared kernel, one CVE from container escape
-- **Cloud sandboxes (E2B, Daytona, Sprites, Cloudflare)** — real isolation but your code and credentials leave your machine, with per-second billing
-- **mvm** — Firecracker+KVM hardware isolation, local-first, optional self-hosted, free
+- **gVisor (Modal)** — userspace syscall interception, not a hardware-virtualized VM
+- **Cloud sandboxes (E2B, Sprites, Cloudflare, Vercel)** — real isolation but your code and credentials leave your machine, with per-second billing
+- **mvm** — hardware-isolated microVMs (Apple Virtualization.framework on macOS, Firecracker+KVM on Linux), local-first, optional self-hosted, free
 
-mvm is the only product that gives you the same sandbox API locally and on infrastructure you control. Dev on your Mac, deploy to your own servers, no code changes.
+mvm is the only hardware-isolated sandbox that runs natively on your Mac **and** self-hosts on infrastructure you control, behind one API. Dev on your Mac, deploy to your own servers, no code changes.
 
 ## Quick start
 
 ### On macOS (local mode)
 
+mvm has two macOS backends. Pick at `init`:
+
 ```bash
-# Requires Apple Silicon M3+ (nested virtualization)
 brew install agentstep/tap/mvm
-mvm init
+
+# Native Apple Virtualization.framework — fastest, runs on any Apple Silicon (M1+),
+# no nested layer. ~0.7s cold boot, ~0.3s save/restore.
+mvm init --backend applevz
+
+# — or — Firecracker nested in a Lima VM (needs M3+). Adds the full Firecracker
+# feature set: warm pool, UFFD lazy restore, named multi-snapshot history.
+mvm init --backend firecracker
 
 mvm start sandbox
 mvm exec sandbox -- echo hello
@@ -90,6 +101,20 @@ result, _ := client.Exec(ctx, "agent-work", "uname -a")
 
 ## Performance
 
+### macOS — native Apple VZ backend
+
+Measured on Apple Silicon, June 2026. Every sample verified *running + agent-responding* before counting (n=6 cold boot, n=8 restore, zero failures):
+
+| Operation | mvm (Apple VZ) | Notes |
+|-----------|----------------|-------|
+| **Cold boot** (fresh VM → agent ready) | **0.697s** (0.660–0.718s) | native, no nested layer |
+| **Fast-restore** (memory + disk checkpoint) | **0.293s** (0.289–0.353s) | vs Fly Sprites' published ~300ms — and local, not cloud |
+| **Disk rollback** on restore | ✅ works | files written after the checkpoint vanish |
+
+These are single-machine numbers on Apple Silicon; cross-machine and in-guest I/O (fio) figures aren't published yet.
+
+### Linux — Firecracker (cloud mode)
+
 Real measurements on GCP n2-standard-4, April 2026. See [`docs/benchmarks.md`](docs/benchmarks.md) for full comparison.
 
 | Operation | mvm | Competitors |
@@ -117,17 +142,18 @@ mvm start sandbox --net-policy allow:github.com,npmjs.org  # allowlist
 
 ## Pause, resume, and snapshot
 
-Firecracker supports full memory-state checkpoints. Use them as a habit:
+Both backends do full memory-state checkpoints — freeze the whole machine, restore it exactly, roll the disk back. Use them as a habit:
 
 ```bash
 mvm pause sandbox            # freeze VM in memory, zero CPU
 mvm resume sandbox           # instant resume
-mvm snapshot create sandbox before-install
+mvm snapshot create sandbox  # checkpoint memory + disk
 mvm exec sandbox -- risky-install.sh
-mvm snapshot restore sandbox before-install     # roll back full VM state
+mvm stop sandbox && mvm start sandbox   # restore: memory and disk roll back
 ```
 
-No Virtualization.framework-based tool on macOS can do memory-state pause/resume. Requires Firecracker's snapshot support, which is why mvm uses nested KVM.
+- **Apple VZ (macOS):** uses Virtualization.framework's `saveMachineStateTo` / `restoreMachineStateFrom` (macOS 14+) for ~0.29s fast-restore, plus an APFS copy-on-write disk clone for instant rollback. A running process survives the round-trip; any file written after the checkpoint is gone on restore.
+- **Firecracker (Linux):** full memory snapshots with UFFD lazy (page-in-on-demand) restore and named, multi-snapshot history (`mvm snapshot create/restore/list`).
 
 ## Custom images
 
@@ -186,23 +212,27 @@ All three are thin HTTP clients against the same REST API. Work against local or
 
 ## Competitive landscape
 
-| Product | Isolation | Local dev | Self-host | Cost model |
-|---------|-----------|-----------|-----------|------------|
-| **mvm** | Firecracker+KVM | **Yes (macOS/Linux)** | **Yes** | **Free, open source** |
-| E2B | Firecracker+KVM | No | No | $0.10/vCPU-hr + Pro $150/mo |
-| Daytona | Docker | No | Enterprise | $0.05/vCPU-hr |
-| Sprites (Fly.io) | Firecracker+KVM | No | No | $0.07/CPU-hr + storage |
-| Cloudflare Sandbox | Container | No | No | $0.072/vCPU-hr + $5/mo |
-| microsandbox | libkrun | Yes (local) | No server | Free (local only) |
-| Docker Sandboxes | microVM | Yes | Yes | Proprietary |
+Competitor facts gathered June 2026 from vendors' own sites/docs — verify before relying on them.
 
-**mvm is the only Firecracker-grade product that works both locally and as a self-hosted service.**
+| Product | Isolation | Native macOS | Self-host | Open source | Cost model |
+|---------|-----------|--------------|-----------|-------------|------------|
+| **mvm** | **Apple VZ + Firecracker/KVM** | **Yes** | **Yes** | **Apache 2.0** | **Free (your hardware)** |
+| microsandbox | libkrun (KVM/HVF) | Yes | Yes | Apache 2.0 | Free / cloud beta |
+| E2B | Firecracker | No | Yes (BYOC) | Apache 2.0 | ~$0.05/vCPU-hr + $150/mo Pro |
+| Fly Sprites | Firecracker | No | No | Closed | $0.07/CPU-hr + storage |
+| Daytona | Docker¹ (Kata opt-in) | Yes (Docker) | Yes | AGPL-3.0 | ~$0.05/vCPU-hr |
+| Modal | gVisor² | No | No | Closed | ~$0.047/core-hr |
+| Cloudflare | Containers + V8 isolates | No | No | SDK only | $0.00002/vCPU-sec |
+
+¹ Daytona defaults to shared-kernel Docker containers; microVM isolation requires opting into Kata. ² Modal uses gVisor — userspace syscall interception, not a hardware-virtualized VM.
+
+**The wedge:** every Firecracker-grade competitor is cloud-first (E2B, Sprites, Vercel) or closed (Sprites, Modal, Cloudflare); the one that's genuinely local-and-open (Daytona) defaults to plain Docker, not a microVM. **microsandbox is the only true overlap** — and against it, mvm's edge is first-party engines per OS (Apple's own hypervisor on the Mac, battle-tested Firecracker on Linux) instead of one library VMM, shipped as a single binary. mvm is the only hardware-isolated sandbox that runs natively on your Mac **and** self-hosts behind one API.
 
 ## Requirements
 
 ### Local (macOS)
-- Apple Silicon M3 or newer (nested virtualization requires M3+)
-- macOS 15 (Sequoia) or newer
+- **Native Apple VZ backend:** any Apple Silicon (M1+), macOS 14+ (save/restore needs macOS 14)
+- **Firecracker (Lima) backend:** Apple Silicon M3+ (nested virtualization requires M3+), macOS 15+
 - Homebrew
 
 ### Cloud (Linux)
@@ -212,14 +242,23 @@ All three are thin HTTP clients against the same REST API. Work against local or
 
 ## Architecture
 
-### Local mode
+### macOS, native (Apple VZ backend)
+```
+mvm (macOS) → mvm-vz helper → Apple Virtualization.framework → microVM
+                    │
+               vsock control plane → in-guest agent (exec, PTY, net setup)
+```
+
+No nested layer — the microVM runs directly on Apple's hypervisor. The `mvm-vz` helper is a small codesigned Swift binary (needs the `com.apple.security.virtualization` entitlement); the in-guest agent speaks a vsock protocol for exec, interactive PTY, and network setup.
+
+### macOS, Firecracker (Lima backend)
 ```
 mvm (macOS) → Unix socket → daemon (in Lima VM) → Firecracker microVMs
 ```
 
-[Lima](https://github.com/lima-vm/lima) provides Linux with nested virtualization. [Firecracker](https://github.com/firecracker-microvm/firecracker) runs inside Lima.
+[Lima](https://github.com/lima-vm/lima) provides Linux with nested virtualization; [Firecracker](https://github.com/firecracker-microvm/firecracker) runs inside it. Adds the full Firecracker feature set (pool, UFFD restore, named snapshots) at the cost of a nested layer and M3+.
 
-### Cloud mode
+### Cloud mode (Linux)
 ```
 mvm / SDK → TCP+TLS → daemon (on bare-metal Linux) → Firecracker microVMs
 ```
