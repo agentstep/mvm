@@ -557,6 +557,14 @@ func (s *Server) handleSnapshotCreate(w http.ResponseWriter, r *http.Request) {
 	if snapName == "" {
 		snapName = name + "-snap"
 	}
+	// Validate: snapName is interpolated into shell commands in SnapshotVM and
+	// used as a path component. ValidateName restricts to [a-zA-Z0-9._-], which
+	// blocks shell metacharacters and path separators (prevents command
+	// injection / path traversal). Also reject ".." explicitly.
+	if err := state.ValidateName(snapName); err != nil || snapName == "." || snapName == ".." {
+		httpError(w, fmt.Errorf("invalid snapshot name %q", snapName), http.StatusBadRequest)
+		return
+	}
 
 	snapDir := filepath.Join(snapshotsBaseDir(), snapName)
 	if err := firecracker.SnapshotVM(s.executor, vm, snapDir); err != nil {
@@ -580,8 +588,8 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 		httpError(w, fmt.Errorf("invalid request: %w", err), http.StatusBadRequest)
 		return
 	}
-	if req.Name == "" {
-		httpError(w, fmt.Errorf("snapshot name is required"), http.StatusBadRequest)
+	if err := state.ValidateName(req.Name); err != nil || req.Name == "." || req.Name == ".." {
+		httpError(w, fmt.Errorf("invalid snapshot name %q", req.Name), http.StatusBadRequest)
 		return
 	}
 
@@ -702,8 +710,11 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ImageName == "" {
-		httpError(w, fmt.Errorf("image_name is required"), http.StatusBadRequest)
+	// ImageName is interpolated into shell paths and a generated build script
+	// (firecracker.BuildRootfs), so restrict it to safe characters to prevent
+	// command injection.
+	if err := state.ValidateName(req.ImageName); err != nil || req.ImageName == "." || req.ImageName == ".." {
+		httpError(w, fmt.Errorf("invalid image_name %q", req.ImageName), http.StatusBadRequest)
 		return
 	}
 	if len(req.Steps) == 0 {
