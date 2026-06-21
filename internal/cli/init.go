@@ -31,8 +31,8 @@ func newInitCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 		Long: `One-time setup that installs everything needed to run microVMs.
 
   mvm init                         # auto-detect backend
-  mvm init --backend firecracker   # Firecracker via Lima (M3+, has pause/resume)
-  mvm init --backend applevz       # Apple Virtualization.framework (M1+, no pause/resume)
+  mvm init --backend applevz       # Apple Virtualization.framework (M1+, native, ~0.7s boot, save/restore)
+  mvm init --backend firecracker   # Firecracker via Lima (M3+, adds pool + UFFD + named snapshots)
   mvm init --minimal               # slim image without agents`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runInit(limaClient, store, cpus, memory, fcVersion, force, minimal, backend)
