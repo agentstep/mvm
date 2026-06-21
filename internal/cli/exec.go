@@ -3,10 +3,15 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/agentstep/mvm/internal/state"
+	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -47,6 +52,12 @@ func newExecCmd(store *state.Store) *cobra.Command {
 }
 
 func runExec(store *state.Store, name string, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
+	// Apple VZ VMs aren't managed by the daemon — exec directly against the
+	// per-VM mvm-vz helper's vsock-bridged agent.
+	if vm, _ := store.GetVM(name); vm != nil && vm.Backend == "applevz" {
+		return runExecAppleVZ(store, vm, remoteArgs, interactive, workdir, envVars, user)
+	}
+
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
@@ -86,6 +97,119 @@ func runExec(store *state.Store, name string, remoteArgs []string, interactive b
 		return fmt.Errorf("exit code %d", exitCode)
 	}
 	return nil
+}
+
+// runExecAppleVZ runs a command on an Apple VZ VM via the per-VM mvm-vz
+// helper's vsock-bridged agent (no daemon). MVP: non-interactive only.
+func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
+	if vm.Status != "running" && vm.Status != "paused" {
+		return fmt.Errorf("microVM %q is not running (status: %s)", vm.Name, vm.Status)
+	}
+	if interactive {
+		return runExecAppleVZInteractive(store, vm, remoteArgs, workdir, envVars, user)
+	}
+
+	// Resume-on-exec: wake a paused VM before running, then record activity
+	// so the idle checker doesn't immediately re-pause it.
+	AutoResumeIfPaused(nil, store, vm)
+	TouchActivity(store, vm.Name)
+
+	// Forward piped/redirected stdin (echo data | mvm exec vm -- cat, or
+	// mvm exec vm -- cat < file). Only attempt this when stdin is not an
+	// interactive tty, and bound the read: an inherited fd that never reaches
+	// EOF (a held-open pipe under CI/cron, or /dev/null variants) must not be
+	// able to hang exec. A real pipe/file delivers its data + EOF promptly, so
+	// the select returns as soon as the data is in — the timeout only fires for
+	// a source that is never going to send anything.
+	stdin := readStdinNonBlocking()
+
+	script := buildExecScript(remoteArgs, workdir, envVars, user)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	res, err := vm_pkg.NewAppleVZBackend(mvmDir).AgentClient(vm.Name).Exec(ctx, script, stdin)
+	if err != nil {
+		return fmt.Errorf("exec on %q: %w", vm.Name, err)
+	}
+	if res.Output != "" {
+		os.Stdout.WriteString(res.Output)
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("exit code %d", res.ExitCode)
+	}
+	return nil
+}
+
+// runExecAppleVZInteractive runs an interactive PTY session against an Apple VZ
+// VM: it puts the local terminal in raw mode, forwards SIGWINCH resizes, and
+// relays the terminal to the guest agent's PTY over vsock until the command exits.
+func runExecAppleVZInteractive(store *state.Store, vm *state.VM, remoteArgs []string, workdir string, envVars []string, user string) error {
+	AutoResumeIfPaused(nil, store, vm)
+	TouchActivity(store, vm.Name)
+
+	script := buildExecScript(remoteArgs, workdir, envVars, user)
+
+	fd := int(os.Stdin.Fd())
+	var rows, cols uint16 = 24, 80
+	if term.IsTerminal(fd) {
+		oldState, err := term.MakeRaw(fd)
+		if err != nil {
+			return fmt.Errorf("set raw terminal: %w", err)
+		}
+		defer term.Restore(fd, oldState)
+		if w, h, err := term.GetSize(fd); err == nil {
+			cols, rows = uint16(w), uint16(h)
+		}
+	}
+
+	// Forward terminal resizes to the guest PTY.
+	resize := make(chan [2]uint16, 1)
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	go func() {
+		for range winch {
+			if w, h, err := term.GetSize(fd); err == nil {
+				select {
+				case resize <- [2]uint16{uint16(h), uint16(w)}:
+				default:
+				}
+			}
+		}
+	}()
+
+	code, err := vm_pkg.NewAppleVZBackend(mvmDir).AgentClient(vm.Name).ExecInteractive(
+		context.Background(), script, rows, cols, os.Getenv("TERM"), nil, os.Stdin, os.Stdout, resize)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("exit code %d", code)
+	}
+	return nil
+}
+
+// readStdinNonBlocking reads piped/redirected stdin for a non-interactive
+// exec, bounded so a never-closing fd can't hang the command. Returns "" for
+// an interactive terminal, or if no data/EOF arrives before the deadline.
+// A real pipe or file delivers its data and EOF promptly; the timeout only
+// fires for a source that will never send anything (e.g. an inherited,
+// held-open fd under CI/cron).
+func readStdinNonBlocking() string {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		return ""
+	}
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(os.Stdin)
+		done <- string(b)
+	}()
+	select {
+	case s := <-done:
+		return s
+	case <-time.After(500 * time.Millisecond):
+		return ""
+	}
 }
 
 func buildExecScript(remoteArgs []string, workdir string, envVars []string, user string) string {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -87,6 +88,99 @@ func (c *Client) Exec(ctx context.Context, command, stdin string) (*ExecResult, 
 		Output:   string(resp.Data),
 		ExitCode: resp.ExitCode,
 	}, nil
+}
+
+// ExecInteractive runs command in a PTY on the guest and relays the local
+// terminal to it until the command exits, returning the command's exit code.
+//
+// The caller owns terminal mode: put stdin into raw mode before calling and
+// restore it after. stdin/stdout are the local terminal ends. resize (may be
+// nil) delivers {rows, cols} updates, e.g. from a SIGWINCH handler.
+//
+// Unlike the other methods this holds one connection open for the whole
+// session (the agent's exec_pty takes over the connection).
+func (c *Client) ExecInteractive(ctx context.Context, command string, rows, cols uint16, termType string, env map[string]string, stdin io.Reader, stdout io.Writer, resize <-chan [2]uint16) (int, error) {
+	conn, err := c.dialer.Dial(ctx)
+	if err != nil {
+		return -1, fmt.Errorf("dial agent: %w", err)
+	}
+	defer conn.Close()
+
+	// Start the PTY session and wait for the agent's initial OK.
+	if err := writeFrame(conn, &request{
+		Type: reqExecPty,
+		ID:   newID(),
+		Pty:  &ptyPayload{Command: command, Env: env, Rows: rows, Cols: cols, Term: termType},
+	}); err != nil {
+		return -1, fmt.Errorf("send exec_pty: %w", err)
+	}
+	var resp response
+	if err := readFrame(conn, &resp); err != nil {
+		return -1, fmt.Errorf("read agent response: %w", err)
+	}
+	if resp.Type == respError {
+		return -1, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	if resp.Type != respOK {
+		return -1, fmt.Errorf("unexpected agent response %q", resp.Type)
+	}
+
+	exitCode := -1
+	var wg sync.WaitGroup
+
+	// Agent -> local stdout, until the exit frame. This is the goroutine we
+	// wait on; the others are fire-and-forget and unblock when conn closes.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			var f response
+			if err := readFrame(conn, &f); err != nil {
+				return
+			}
+			switch f.Type {
+			case respStdout:
+				if len(f.Data) > 0 {
+					stdout.Write(f.Data)
+				}
+			case respExit:
+				exitCode = f.ExitCode
+				return
+			}
+		}
+	}()
+
+	// Local stdin -> agent.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := stdin.Read(buf)
+			if n > 0 {
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				if werr := writeFrame(conn, &response{Type: respStdin, Data: data}); werr != nil {
+					return
+				}
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	// Terminal resize -> agent. The agent decodes exit_code as rows<<16|cols.
+	if resize != nil {
+		go func() {
+			for sz := range resize {
+				if werr := writeFrame(conn, &response{Type: respResize, ExitCode: int(sz[0])<<16 | int(sz[1])}); werr != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	return exitCode, nil
 }
 
 // Poweroff requests a graceful guest shutdown.

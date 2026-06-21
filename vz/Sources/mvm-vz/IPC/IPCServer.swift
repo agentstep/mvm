@@ -22,7 +22,10 @@ import MvmVZShim
 // dispatched onto `vmQueue` so the VM object is only ever touched from
 // one queue.
 
-final class IPCServer {
+// @unchecked Sendable: IPCServer's mutable state (listenFd, stopped) is guarded
+// by `lock`, and all VZVirtualMachine access goes through ManagedVM's queue.
+// The compiler can't see the lock discipline, so we assert thread-safety.
+final class IPCServer: @unchecked Sendable {
     private let socketPath: String
     private let vm: ManagedVM
     private let acceptQueue = DispatchQueue(label: "mvm.vz.ipc.accept")

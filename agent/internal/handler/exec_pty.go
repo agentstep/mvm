@@ -148,10 +148,15 @@ func HandleExecPty(conn io.ReadWriter, req *protocol.ExecPtyRequest, id string) 
 		}
 	}()
 
-	// Goroutine 2: Read request frames from conn, handle stdin and resize
-	wg.Add(1)
+	// Goroutine 2: Read request frames from conn, handle stdin and resize.
+	//
+	// Deliberately NOT part of wg. It blocks in ReadFrame until the client
+	// sends more input or closes the connection. If we waited for it before
+	// sending the exit frame, we'd deadlock: the client is itself waiting for
+	// that exit frame and won't close the connection until it arrives. Instead
+	// we send exit as soon as the PTY output drains (wg below), and this
+	// goroutine returns when the client then closes the connection.
 	go func() {
-		defer wg.Done()
 		for {
 			var frame protocol.Response
 			if err := protocol.ReadFrame(conn, &frame); err != nil {

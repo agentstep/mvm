@@ -196,7 +196,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		return fmt.Errorf("copy rootfs: %w", err)
 	}
 
-	bootArgs := fmt.Sprintf("console=hvc0 reboot=k panic=1 quiet random.trust_cpu=on rootfstype=ext4 ip=%s::%s:255.255.255.252::eth0:off",
+	bootArgs := fmt.Sprintf("console=hvc0 root=/dev/vda rw reboot=k panic=1 quiet random.trust_cpu=on rootfstype=ext4 init=/sbin/mvm-init ip=%s::%s:255.255.255.252::eth0:off",
 		alloc.GuestIP, alloc.TAPIP)
 
 	vzBackend := vm.NewAppleVZBackend(filepath.Join(home, ".mvm"))

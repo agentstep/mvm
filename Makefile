@@ -14,6 +14,10 @@ agent:
 vz:
 	cd vz && swift build -c release
 	cp vz/.build/release/mvm-vz bin/mvm-vz
+	# Ad-hoc sign with the virtualization entitlement. Without this the helper
+	# cannot create a VZVirtualMachine ("doesn't have the
+	# com.apple.security.virtualization entitlement").
+	codesign --force --sign - --entitlements vz/mvm-vz.entitlements bin/mvm-vz
 
 menu:
 	CGO_ENABLED=1 go build -ldflags "$(LDFLAGS)" -o bin/mvm-menu ./cmd/mvm-menu
