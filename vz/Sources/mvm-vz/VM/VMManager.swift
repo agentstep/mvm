@@ -28,7 +28,11 @@ enum VMError: Error, LocalizedError {
 
 /// Builds VZVirtualMachineConfiguration from our VMConfig.
 enum VMConfigBuilder {
-    static func build(_ config: VMConfig) throws -> VZVirtualMachineConfiguration {
+    // saveRestore: when true, omit the devices that VZ's save/restore API
+    // rejects (entropy, serial console, memory balloon). Storage, network, and
+    // the vsock control plane are kept — the spike validates whether that set
+    // passes validateSaveRestoreSupport().
+    static func build(_ config: VMConfig, saveRestore: Bool = false) throws -> VZVirtualMachineConfiguration {
         let vzConfig = VZVirtualMachineConfiguration()
 
         vzConfig.cpuCount = config.cpus
@@ -54,22 +58,24 @@ enum VMConfigBuilder {
         }
         vzConfig.networkDevices = [networkDevice]
 
-        // Serial console
-        let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
-        if let logPath = config.logPath {
-            FileManager.default.createFile(atPath: logPath, contents: nil)
-            let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
-            logHandle.seekToEndOfFile()
-            serialPort.attachment = VZFileHandleSerialPortAttachment(
-                fileHandleForReading: nil,
-                fileHandleForWriting: logHandle
-            )
-        }
-        vzConfig.serialPorts = [serialPort]
+        // Serial console, entropy, and memory balloon are all rejected by VZ's
+        // save/restore API, so they are omitted in saveRestore mode.
+        if !saveRestore {
+            let serialPort = VZVirtioConsoleDeviceSerialPortConfiguration()
+            if let logPath = config.logPath {
+                FileManager.default.createFile(atPath: logPath, contents: nil)
+                let logHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: logPath))
+                logHandle.seekToEndOfFile()
+                serialPort.attachment = VZFileHandleSerialPortAttachment(
+                    fileHandleForReading: nil,
+                    fileHandleForWriting: logHandle
+                )
+            }
+            vzConfig.serialPorts = [serialPort]
 
-        // Entropy + memory balloon
-        vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
-        vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+            vzConfig.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
+            vzConfig.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        }
 
         // Vsock device — out-of-band control plane to the in-guest agent.
         // The Go side reaches the agent via the helper's IPC socket: the
