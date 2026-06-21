@@ -207,6 +207,18 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	restoreFrom := ""
 	if _, statErr := os.Stat(statePath); statErr == nil {
 		restoreFrom = statePath
+		// Roll the disk back to the checkpoint snapshot — the saved memory state
+		// expects the disk contents from save time. (No-op if the disk is
+		// unchanged; undoes post-checkpoint filesystem writes if it changed.)
+		diskSnap := filepath.Join(vmDir, "rootfs.snapshot.ext4")
+		if _, e := os.Stat(diskSnap); e == nil {
+			_ = os.Remove(vmRootfs)
+			if err := execLocal(fmt.Sprintf("cp -c %s %s", diskSnap, vmRootfs)); err != nil {
+				if err := execLocal(fmt.Sprintf("cp %s %s", diskSnap, vmRootfs)); err != nil {
+					return fmt.Errorf("restore disk snapshot: %w", err)
+				}
+			}
+		}
 	} else if err := execLocal(fmt.Sprintf("cp %s %s", rootfsPath, vmRootfs)); err != nil {
 		store.RemoveVM(name)
 		return fmt.Errorf("copy rootfs: %w", err)

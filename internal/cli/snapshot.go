@@ -98,8 +98,21 @@ func runSnapshotCreate(ctx context.Context, store *state.Store, vmName, snapName
 		if err := vm_pkg.NewAppleVZBackend(mvmDir).SaveVM(vmName, statePath); err != nil {
 			return fmt.Errorf("save VM state: %w", err)
 		}
+		// Snapshot the disk too (CoW clone — instant on APFS), so restore rolls
+		// the filesystem back to this checkpoint, not just memory. Without it,
+		// disk changes made after the checkpoint would survive a "restore" and
+		// the disk could diverge from the saved memory state. The VM is paused
+		// here, so the clone is consistent.
+		rootfs := filepath.Join(mvmDir, "vms", vmName, "rootfs.ext4")
+		diskSnap := filepath.Join(mvmDir, "vms", vmName, "rootfs.snapshot.ext4")
+		_ = os.Remove(diskSnap)
+		if err := execLocal(fmt.Sprintf("cp -c %s %s", rootfs, diskSnap)); err != nil {
+			if err := execLocal(fmt.Sprintf("cp %s %s", rootfs, diskSnap)); err != nil {
+				return fmt.Errorf("snapshot disk: %w", err)
+			}
+		}
 		store.UpdateVM(vmName, func(v *state.VM) { v.Status = "paused" })
-		fmt.Printf("  ✓ State saved. Restore with: mvm stop %s && mvm start %s\n", vmName, vmName)
+		fmt.Printf("  ✓ Checkpoint saved (memory + disk). Restore with: mvm stop %s && mvm start %s\n", vmName, vmName)
 		return nil
 	}
 
