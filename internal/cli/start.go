@@ -30,6 +30,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 		memoryMB  int
 		image     string
 		jsonOut   bool
+		startup   string
 	)
 
 	cmd := &cobra.Command{
@@ -53,12 +54,20 @@ func newStartCmd(store *state.Store) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut)
+			var spec *StartupSpec
+			if startup != "" {
+				spec, err = loadStartupSpec(startup)
+				if err != nil {
+					return err
+				}
+			}
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "detach: don't stream boot output, return immediately after VM starts")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a structured JSON result with boot path and per-phase timing")
+	cmd.Flags().StringVar(&startup, "startup", "", "JSON startup recipe: git clone + commands + ready-check (applevz)")
 	cmd.Flags().StringArrayVarP(&ports, "publish", "p", nil, "publish port (hostPort:guestPort[/proto])")
 	cmd.Flags().StringVar(&netPolicy, "net-policy", "open", "network policy: open, deny, or allow:domain1,domain2")
 	cmd.Flags().StringArrayVarP(&volumes, "volume", "V", nil, "bind mount (hostPath:guestPath)")
@@ -96,10 +105,13 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 	return result, nil
 }
 
-func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool) error {
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec) error {
 	// Cloud/remote mode: the local state doesn't matter — the daemon is
 	// the source of truth. Skip the local init check entirely.
 	if os.Getenv("MVM_REMOTE") != "" {
+		if startup != nil {
+			return fmt.Errorf("--startup is not yet supported on the daemon/firecracker path")
+		}
 		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image)
 	}
 
@@ -119,8 +131,11 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 		if jsonOut {
 			out = outJSON
 		}
-		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out)
+		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup)
 		return err
+	}
+	if startup != nil {
+		return fmt.Errorf("--startup is not yet supported on the daemon/firecracker path")
 	}
 
 	// Firecracker path: route through daemon
@@ -172,7 +187,7 @@ func printPorts(vm *state.VM) {
 // per-VM mvm-vz helper IPC socket — no SSH, no TAP-IP TCP, no Lima.
 // The previous SSH-based post-boot path (and the applyPostBootDirect
 // helper that went with it) has been removed.
-func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode) (*BootResult, error) {
+func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode, startup *StartupSpec) (*BootResult, error) {
 	// Progress goes to stderr unless we're in human mode, so stdout stays a
 	// clean JSON object (or silent, for the bench harness).
 	logf := func(format string, a ...any) {
@@ -328,6 +343,15 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		timer.mark("net_setup")
 	}
 
+	// Run the declarative startup recipe (git clone + commands + ready check)
+	// over the agent. Uses its own context — clones/installs run far longer
+	// than the 30s net-setup window. A failure is surfaced but the VM stays up
+	// so it can be inspected.
+	var startupErr error
+	if agentReady && startup != nil {
+		startupErr = runStartupRecipe(context.Background(), agent, startup, timer, logf)
+	}
+
 	result := &BootResult{
 		Name:       name,
 		Backend:    "applevz",
@@ -341,9 +365,9 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	switch out {
 	case outJSON:
 		json.NewEncoder(os.Stdout).Encode(result)
-		return result, nil
+		return result, startupErr
 	case outQuiet:
-		return result, nil
+		return result, startupErr
 	}
 
 	if agentReady {
@@ -356,7 +380,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		fmt.Printf("\n  %s started but agent not reachable yet.\n", name)
 		fmt.Printf("    Exec: mvm exec %s -- <command>  (when ready)\n", name)
 	}
-	return result, nil
+	if startupErr != nil {
+		fmt.Printf("    Startup recipe failed: %v\n", startupErr)
+	}
+	return result, startupErr
 }
 
 // waitForAgent polls the agent client until Ping succeeds or the deadline
