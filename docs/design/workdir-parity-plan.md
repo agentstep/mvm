@@ -9,6 +9,11 @@ dependency. VZ-first (our differentiator), Firecracker following where cheap.
   start, per-phase timing, `mvm bench` p50/p90/p95). Verified for `cold_boot`
   (635ms p50). Telemetry immediately surfaced that the base.ext4→rootfs copy is
   ~261ms of a ~697ms cold boot — a reflink/CoW optimization target.
+- **Phase 3 — DONE (applevz).** Encrypted secrets: `mvm secret put/list/rm`
+  (AES-256-GCM, key out of the store), attach with `mvm start --secret NAME`,
+  injected per-exec from host memory (never to a guest file), and memory
+  snapshots refused while a secret is attached. Verified end to end incl. no
+  plaintext on disk + snapshot refusal.
 - **Phase 2 — DONE (applevz).** `mvm start --startup recipe.json`: declarative
   git clone + env + foreground/background commands + in-guest ready-check, each
   phase timed into the BootResult. Verified: env injection, foreground exit-code

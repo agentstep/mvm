@@ -21,6 +21,7 @@ type StartupSpec struct {
 	Git      *GitSpec          `json:"git,omitempty"`
 	Workdir  string            `json:"workdir,omitempty"` // default /workspace
 	Env      map[string]string `json:"env,omitempty"`
+	Secrets  []string          `json:"secrets,omitempty"` // attached secret names (merged with --secret)
 	Commands []StartupCommand  `json:"commands,omitempty"`
 	Ready    *ReadySpec        `json:"ready,omitempty"`
 }

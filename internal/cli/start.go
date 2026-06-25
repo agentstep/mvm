@@ -31,6 +31,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 		image     string
 		jsonOut   bool
 		startup   string
+		secretsF  []string
 	)
 
 	cmd := &cobra.Command{
@@ -61,13 +62,14 @@ func newStartCmd(store *state.Store) *cobra.Command {
 					return err
 				}
 			}
-			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec)
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec, secretsF)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "detach: don't stream boot output, return immediately after VM starts")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a structured JSON result with boot path and per-phase timing")
 	cmd.Flags().StringVar(&startup, "startup", "", "JSON startup recipe: git clone + commands + ready-check (applevz)")
+	cmd.Flags().StringArrayVar(&secretsF, "secret", nil, "attach a stored secret, injected per-exec (repeatable; applevz)")
 	cmd.Flags().StringArrayVarP(&ports, "publish", "p", nil, "publish port (hostPort:guestPort[/proto])")
 	cmd.Flags().StringVar(&netPolicy, "net-policy", "open", "network policy: open, deny, or allow:domain1,domain2")
 	cmd.Flags().StringArrayVarP(&volumes, "volume", "V", nil, "bind mount (hostPath:guestPath)")
@@ -105,12 +107,21 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 	return result, nil
 }
 
-func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec) error {
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec, secretNames []string) error {
+	// Merge secrets from the startup spec, then validate they all exist up front
+	// (a typo'd secret should fail the start, not silently inject nothing).
+	if startup != nil {
+		secretNames = append(secretNames, startup.Secrets...)
+	}
+	if err := validateSecretsExist(secretNames); err != nil {
+		return err
+	}
+
 	// Cloud/remote mode: the local state doesn't matter — the daemon is
 	// the source of truth. Skip the local init check entirely.
 	if os.Getenv("MVM_REMOTE") != "" {
-		if startup != nil {
-			return fmt.Errorf("--startup is not yet supported on the daemon/firecracker path")
+		if startup != nil || len(secretNames) > 0 {
+			return fmt.Errorf("--startup/--secret are not yet supported on the daemon/firecracker path")
 		}
 		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image)
 	}
@@ -131,11 +142,11 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 		if jsonOut {
 			out = outJSON
 		}
-		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup)
+		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup, secretNames)
 		return err
 	}
-	if startup != nil {
-		return fmt.Errorf("--startup is not yet supported on the daemon/firecracker path")
+	if startup != nil || len(secretNames) > 0 {
+		return fmt.Errorf("--startup/--secret are not yet supported on the daemon/firecracker path")
 	}
 
 	// Firecracker path: route through daemon
@@ -187,7 +198,7 @@ func printPorts(vm *state.VM) {
 // per-VM mvm-vz helper IPC socket — no SSH, no TAP-IP TCP, no Lima.
 // The previous SSH-based post-boot path (and the applyPostBootDirect
 // helper that went with it) has been removed.
-func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode, startup *StartupSpec) (*BootResult, error) {
+func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode, startup *StartupSpec, secretNames []string) (*BootResult, error) {
 	// Progress goes to stderr unless we're in human mode, so stdout stays a
 	// clean JSON object (or silent, for the bench harness).
 	logf := func(format string, a ...any) {
@@ -297,6 +308,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		v.PID = pid
 		v.RootfsPath = vmRootfs
 		v.Backend = "applevz"
+		v.Secrets = secretNames
 	}); err != nil {
 		store.RemoveVM(name)
 		return nil, err
@@ -349,7 +361,23 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	// so it can be inspected.
 	var startupErr error
 	if agentReady && startup != nil {
-		startupErr = runStartupRecipe(context.Background(), agent, startup, timer, logf)
+		// Make attached secrets available to startup commands too (decrypted
+		// from host memory here; never written to a guest file).
+		if env, err := secretEnvVars(secretNames); err != nil {
+			startupErr = err
+		} else if len(env) > 0 {
+			if startup.Env == nil {
+				startup.Env = map[string]string{}
+			}
+			for _, kv := range env {
+				if i := strings.IndexByte(kv, '='); i > 0 {
+					startup.Env[kv[:i]] = kv[i+1:]
+				}
+			}
+		}
+		if startupErr == nil {
+			startupErr = runStartupRecipe(context.Background(), agent, startup, timer, logf)
+		}
 	}
 
 	result := &BootResult{
