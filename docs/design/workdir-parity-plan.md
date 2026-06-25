@@ -9,6 +9,10 @@ dependency. VZ-first (our differentiator), Firecracker following where cheap.
   start, per-phase timing, `mvm bench` p50/p90/p95). Verified for `cold_boot`
   (635ms p50). Telemetry immediately surfaced that the base.ext4→rootfs copy is
   ~261ms of a ~697ms cold boot — a reflink/CoW optimization target.
+- **Phase 2 — DONE (applevz).** `mvm start --startup recipe.json`: declarative
+  git clone + env + foreground/background commands + in-guest ready-check, each
+  phase timed into the BootResult. Verified: env injection, foreground exit-code
+  checks, and detached background commands (a `sleep 120` survives start return).
 - **Phase 1 — architect-reviewed, BLOCKED.** Design corrected below. Blocked by:
 
 > ### ⚠️ BLOCKER: VZ save/restore regressed on macOS 26.2
