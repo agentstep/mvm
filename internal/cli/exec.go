@@ -123,6 +123,16 @@ func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, inter
 	// a source that is never going to send anything.
 	stdin := readStdinNonBlocking()
 
+	// Inject the VM's attached secrets, decrypted from host memory at call time.
+	// They go in as env exports and are never written to a guest file.
+	if len(vm.Secrets) > 0 {
+		secretEnv, err := secretEnvVars(vm.Secrets)
+		if err != nil {
+			return fmt.Errorf("load secrets for %q: %w", vm.Name, err)
+		}
+		envVars = append(envVars, secretEnv...)
+	}
+
 	script := buildExecScript(remoteArgs, workdir, envVars, user)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)

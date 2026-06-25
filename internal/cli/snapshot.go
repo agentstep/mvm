@@ -90,6 +90,11 @@ func runSnapshotCreate(ctx context.Context, store *state.Store, vmName, snapName
 		if vm.Status != "running" && vm.Status != "paused" {
 			return fmt.Errorf("microVM %q is not running (status: %s)", vmName, vm.Status)
 		}
+		// A memory snapshot can capture a secret value resident in guest RAM.
+		// Refuse while any secret is attached (matches workdir's 409).
+		if len(vm.Secrets) > 0 {
+			return fmt.Errorf("refusing to snapshot %q: %d secret(s) attached could be captured in the memory image; start without --secret to snapshot", vmName, len(vm.Secrets))
+		}
 		home, _ := os.UserHomeDir()
 		mvmDir := filepath.Join(home, ".mvm")
 		statePath := filepath.Join(mvmDir, "vms", vmName, "state.vzvmsave")

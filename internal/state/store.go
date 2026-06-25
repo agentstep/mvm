@@ -27,6 +27,7 @@ type VM struct {
 	Backend      string         `json:"backend,omitempty"`      // "firecracker" or "applevz"
 	Cpus         int            `json:"cpus,omitempty"`         // vCPU count (0 = default)
 	MemoryMB     int            `json:"memory_mb,omitempty"`    // RAM in MiB (0 = default)
+	Secrets      []string       `json:"secrets,omitempty"`      // attached secret names (injected per-exec)
 	IdleTimeout  string         `json:"idle_timeout,omitempty"` // e.g. "5m"
 	LastActivity *time.Time     `json:"last_activity,omitempty"`
 	CreatedAt    time.Time      `json:"created_at"`
