@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 		cpus      int
 		memoryMB  int
 		image     string
+		jsonOut   bool
 	)
 
 	cmd := &cobra.Command{
@@ -51,11 +53,12 @@ func newStartCmd(store *state.Store) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image)
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "detach: don't stream boot output, return immediately after VM starts")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a structured JSON result with boot path and per-phase timing")
 	cmd.Flags().StringArrayVarP(&ports, "publish", "p", nil, "publish port (hostPort:guestPort[/proto])")
 	cmd.Flags().StringVar(&netPolicy, "net-policy", "open", "network policy: open, deny, or allow:domain1,domain2")
 	cmd.Flags().StringArrayVarP(&volumes, "volume", "V", nil, "bind mount (hostPath:guestPath)")
@@ -93,7 +96,7 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 	return result, nil
 }
 
-func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string) error {
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool) error {
 	// Cloud/remote mode: the local state doesn't matter — the daemon is
 	// the source of truth. Skip the local init check entirely.
 	if os.Getenv("MVM_REMOTE") != "" {
@@ -112,7 +115,12 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 
 	// Apple VZ path — dispatch to separate function
 	if backend == "applevz" {
-		return runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes)
+		out := outHuman
+		if jsonOut {
+			out = outJSON
+		}
+		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out)
+		return err
 	}
 
 	// Firecracker path: route through daemon
@@ -164,7 +172,18 @@ func printPorts(vm *state.VM) {
 // per-VM mvm-vz helper IPC socket — no SSH, no TAP-IP TCP, no Lima.
 // The previous SSH-based post-boot path (and the applyPostBootDirect
 // helper that went with it) has been removed.
-func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string) error {
+func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode) (*BootResult, error) {
+	// Progress goes to stderr unless we're in human mode, so stdout stays a
+	// clean JSON object (or silent, for the bench harness).
+	logf := func(format string, a ...any) {
+		if out == outHuman {
+			fmt.Printf(format, a...)
+		} else {
+			fmt.Fprintf(os.Stderr, format, a...)
+		}
+	}
+	timer := newPhaseTimer()
+
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".mvm", "cache")
 	kernelPath := filepath.Join(cacheDir, "vmlinux")
@@ -181,7 +200,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		// Already in state — allow it only as a restore: a stopped VM that has
 		// a saved state file. Reuse its existing network allocation.
 		if _, statErr := os.Stat(statePath); statErr != nil {
-			return fmt.Errorf("microVM %q already exists", name)
+			return nil, fmt.Errorf("microVM %q already exists", name)
 		}
 		netIndex = existing.NetIndex
 		store.UpdateVM(name, func(v *state.VM) { v.Status = "starting" })
@@ -197,7 +216,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		var err error
 		netIndex, err = store.ReserveVM(vmEntry)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
 	alloc := state.AllocateNet(netIndex)
@@ -205,8 +224,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	// If a saved snapshot exists, restore from it. The rootfs already holds the
 	// writes from before the save, so we must NOT re-copy base.ext4 over it.
 	restoreFrom := ""
+	bootPath := BootCold
 	if _, statErr := os.Stat(statePath); statErr == nil {
 		restoreFrom = statePath
+		bootPath = BootRestore
 		// Roll the disk back to the checkpoint snapshot — the saved memory state
 		// expects the disk contents from save time. (No-op if the disk is
 		// unchanged; undoes post-checkpoint filesystem writes if it changed.)
@@ -215,14 +236,15 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 			_ = os.Remove(vmRootfs)
 			if err := execLocal(fmt.Sprintf("cp -c %s %s", diskSnap, vmRootfs)); err != nil {
 				if err := execLocal(fmt.Sprintf("cp %s %s", diskSnap, vmRootfs)); err != nil {
-					return fmt.Errorf("restore disk snapshot: %w", err)
+					return nil, fmt.Errorf("restore disk snapshot: %w", err)
 				}
 			}
 		}
 	} else if err := execLocal(fmt.Sprintf("cp %s %s", rootfsPath, vmRootfs)); err != nil {
 		store.RemoveVM(name)
-		return fmt.Errorf("copy rootfs: %w", err)
+		return nil, fmt.Errorf("copy rootfs: %w", err)
 	}
+	timer.mark("disk_prep")
 
 	bootArgs := fmt.Sprintf("console=hvc0 root=/dev/vda rw reboot=k panic=1 quiet random.trust_cpu=on rootfstype=ext4 init=/sbin/mvm-init ip=%s::%s:255.255.255.252::eth0:off",
 		alloc.GuestIP, alloc.TAPIP)
@@ -230,9 +252,9 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	vzBackend := vm.NewAppleVZBackend(filepath.Join(home, ".mvm"))
 
 	if restoreFrom != "" {
-		fmt.Printf("Restoring microVM '%s' from saved state (Apple VZ)...\n", name)
+		logf("Restoring microVM '%s' from saved state (Apple VZ)...\n", name)
 	} else {
-		fmt.Printf("Starting microVM '%s' (Apple VZ)...\n", name)
+		logf("Starting microVM '%s' (Apple VZ)...\n", name)
 	}
 
 	vzCpus := cpus
@@ -246,9 +268,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	startResult, err := vzBackend.StartVM(name, kernelPath, vmRootfs, bootArgs, alloc.GuestMAC, vzCpus, vzMem, volumes, restoreFrom)
 	if err != nil {
 		store.RemoveVM(name)
-		return fmt.Errorf("start VM: %w", err)
+		return nil, fmt.Errorf("start VM: %w", err)
 	}
 	pid := startResult.PID
+	timer.mark("vmm_spawn")
 
 	if err := store.UpdateVM(name, func(v *state.VM) {
 		v.Status = "running"
@@ -261,7 +284,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		v.Backend = "applevz"
 	}); err != nil {
 		store.RemoveVM(name)
-		return err
+		return nil, err
 	}
 
 	updatedVM := &state.VM{
@@ -281,8 +304,9 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	// IPC socket was already bound before StartVM returned (we read the
 	// status line), so any failure here is the agent not being up yet.
 	agent := vzBackend.AgentClient(name)
-	fmt.Println("  Waiting for guest agent...")
+	logf("  Waiting for guest agent...\n")
 	agentReady := waitForAgent(agent, 60*time.Second)
+	timer.mark("agent_ready")
 
 	if agentReady {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -294,23 +318,45 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 			alloc.TAPIP,
 		)
 		if _, err := agent.Exec(ctx, setupCmd, ""); err != nil {
-			fmt.Printf("  Warning: setup network: %v\n", err)
+			logf("  Warning: setup network: %v\n", err)
 		}
 
 		// Apply network policy via the agent.
 		if err := applyVZNetworkPolicy(ctx, agent, netPolicy); err != nil {
-			fmt.Printf("  Warning: apply network policy: %v\n", err)
+			logf("  Warning: apply network policy: %v\n", err)
 		}
+		timer.mark("net_setup")
+	}
 
+	result := &BootResult{
+		Name:       name,
+		Backend:    "applevz",
+		BootPath:   bootPath,
+		GuestIP:    alloc.GuestIP,
+		AgentReady: agentReady,
+		TotalMs:    timer.totalMs(),
+		Phases:     timer.phases,
+	}
+
+	switch out {
+	case outJSON:
+		json.NewEncoder(os.Stdout).Encode(result)
+		return result, nil
+	case outQuiet:
+		return result, nil
+	}
+
+	if agentReady {
 		fmt.Printf("\n  %s is running! (Apple VZ)\n", name)
 		fmt.Printf("    IP:   %s\n", alloc.GuestIP)
 		printPorts(updatedVM)
+		fmt.Printf("    Boot: %s in %.0fms\n", bootPath, result.TotalMs)
 		fmt.Printf("    Exec: mvm exec %s -- <command>\n", name)
 	} else {
 		fmt.Printf("\n  %s started but agent not reachable yet.\n", name)
 		fmt.Printf("    Exec: mvm exec %s -- <command>  (when ready)\n", name)
 	}
-	return nil
+	return result, nil
 }
 
 // waitForAgent polls the agent client until Ping succeeds or the deadline
