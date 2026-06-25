@@ -108,10 +108,17 @@ Measured on Apple Silicon, June 2026. Every sample verified *running + agent-res
 | Operation | mvm (Apple VZ) | Notes |
 |-----------|----------------|-------|
 | **Cold boot** (fresh VM → agent ready) | **0.697s** (0.660–0.718s) | native, no nested layer |
-| **Fast-restore** (memory + disk checkpoint) | **0.293s** (0.289–0.353s) | vs Fly Sprites' published ~300ms — and local, not cloud |
-| **Disk rollback** on restore | ✅ works | files written after the checkpoint vanish |
+| **Fast-restore** (memory + disk checkpoint) | **0.293s** (0.289–0.353s)¹ | vs Fly Sprites' published ~300ms — and local, not cloud |
+| **Disk rollback** on restore | ✅ works¹ | files written after the checkpoint vanish |
 
 These are single-machine numbers on Apple Silicon; cross-machine and in-guest I/O (fio) figures aren't published yet.
+
+> ¹ **Restore is currently broken on macOS 26.2.** The 0.293s restore + disk
+> rollback were verified on macOS ≤26.1, but macOS 26.2 hardened Virtualization.
+> framework to reject the ad-hoc-signed helper on the restore path
+> (`VZError 12 "permission denied"`). Fix in progress: sign the helper with a
+> Developer ID + provisioning profile carrying the virtualization entitlement.
+> Cold boot, exec, and pause/resume are unaffected.
 
 ### Linux — Firecracker (cloud mode)
 

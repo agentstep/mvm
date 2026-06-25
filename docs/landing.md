@@ -61,8 +61,10 @@ Apache 2.0, open source. Self-host on hardware you control — air-gapped, regul
 | Operation | Median | Range |
 |-----------|--------|-------|
 | **Cold boot** (fresh VM → agent ready) | **0.697s** | 0.660–0.718s |
-| **Fast-restore** (from memory+disk checkpoint) | **0.293s** | 0.289–0.353s |
-| **Disk rollback** on restore | ✅ works | post-checkpoint writes vanish |
+| **Fast-restore** (from memory+disk checkpoint) | **0.293s**¹ | 0.289–0.353s |
+| **Disk rollback** on restore | ✅ works¹ | post-checkpoint writes vanish |
+
+> ¹ Verified on macOS ≤26.1. A macOS 26.2 change currently blocks restore on the ad-hoc-signed helper (`VZError 12`); fix in progress (Developer-ID signing). Cold boot and pause/resume are unaffected.
 | **Warm exec** (host → guest agent over vsock) | **16ms** | — |
 
 Why this matters: Firecracker **cannot run natively on macOS** — it needs a Linux host, which on a Mac means a nested VM and a real performance tax. mvm sidesteps that entirely on the desktop by using Apple's own hypervisor, then gives you Firecracker + KVM when you deploy to Linux.
