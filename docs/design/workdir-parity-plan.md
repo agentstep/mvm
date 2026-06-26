@@ -37,11 +37,16 @@ dependency. VZ-first (our differentiator), Firecracker following where cheap.
 > carries a system `com.apple.provenance` xattr that cannot be stripped. This is
 > independent of the Phase 0 Go changes (pure instrumentation), but it **blocks
 > Phase 1** (standby depends on restore) **and contradicts the ~0.29s restore
-> claim now live in the README/landing page.** Must be diagnosed first —
-> likely macOS 26.2 hardening of VZ restore around code identity; candidate
-> fixes: sign the helper with a real Developer ID + provisioning profile bearing
-> the virtualization entitlement (instead of ad-hoc), or capture the underlying
-> Console error for the real reason.
+> claim now live in the README/landing page.**
+>
+> **Update 2026-06-27: signing ruled out.** Re-signed the helper with a real
+> "Apple Development" cert + hardened runtime + the virtualization entitlement —
+> restore fails identically to ad-hoc. `saveMachineStateTo` (checkpoint) works;
+> only `restoreMachineStateFrom` fails ("permission denied"), with nothing in
+> the unified log (VZ runs in-process). This is a **macOS 26.2 framework
+> regression in VZ restore**, not a signing/entitlement issue — no known local
+> fix; needs an Apple Feedback Assistant report. Everything else (cold boot,
+> exec, PTY, pause/resume, preview tunnel) is unaffected.
 
 ## Guiding principles
 
