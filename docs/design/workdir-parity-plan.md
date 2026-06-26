@@ -14,8 +14,9 @@ dependency. VZ-first (our differentiator), Firecracker following where cheap.
   127.0.0.1 (kubectl-port-forward style). Deny-by-default (only published ports;
   5123 refused). Verified: relay unit tests, guards + listener bind against a
   live VM. Live guest data round-trip pending a rootfs rebuild with the new
-  agent. Full design in [preview-proxy-design.md](preview-proxy-design.md);
-  4b (public proxy) and 4c (FC parity) deferred pending the DNS/TLS decision.
+  agent. Full design in [preview-proxy-design.md](preview-proxy-design.md).
+  4b (public proxy) and 4c (FC parity) **not pursued** — owner declined public
+  DNS/TLS (2026-06-27); the local tunnel is the final shape.
 - **Phase 3 — DONE (applevz).** Encrypted secrets: `mvm secret put/list/rm`
   (AES-256-GCM, key out of the store), attach with `mvm start --secret NAME`,
   injected per-exec from host memory (never to a guest file), and memory

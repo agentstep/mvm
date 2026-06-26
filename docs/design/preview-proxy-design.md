@@ -1,8 +1,14 @@
 # Design: authenticated preview-port proxy (workdir-parity Phase 4)
 
-Status: proposed (decision doc). Supersedes the one-paragraph Phase 4 sketch in
-`workdir-parity-plan.md`. Written after an architect review found the original
-design infeasible for the Apple VZ backend.
+Status: **decided (2026-06-27).** Ship Phase 4a (local loopback tunnel) only.
+The public reverse proxy (4b) and Firecracker parity (4c) are **not pursued** —
+the owner declined wildcard DNS + TLS (open question #1), which the public path
+requires. The local tunnel is the final shape of the preview feature unless that
+changes. The 4b/4c design below is retained for the record.
+
+Supersedes the one-paragraph Phase 4 sketch in `workdir-parity-plan.md`. Written
+after an architect review found the original design infeasible for the Apple VZ
+backend.
 
 ## Problem
 
@@ -195,12 +201,13 @@ the VZ path is proven.
 - `Ports` reflects *declared*, not *currently-listening* — a declared port with
   nothing behind it yields a clean connection error, not a hang.
 
-## Open questions for the human
+## Resolved questions
 
-1. **DNS/TLS for per-VM subdomains (D2).** Are we willing to require wildcard
-   DNS + wildcard TLS for the public path, or should public 4b wait until
-   there's demand and stay localhost-only (4a) for now?
-2. **Token minting UX (D1).** `mvm preview token <vm>` printing a URL — good
-   enough, or do we want short-lived links with a TTL flag?
-3. **Scope of first delivery.** Ship 4a only (local tunnel — genuinely useful,
-   zero public risk) and defer 4b/4c until the DNS/TLS questions are answered?
+1. **DNS/TLS for per-VM subdomains (D2).** **Declined** — no public DNS/TLS. The
+   public path (4b) is therefore not pursued; the local tunnel (4a) stands.
+2. **Token minting UX (D1).** Moot while 4b is not pursued.
+3. **Scope of first delivery.** **Ship 4a only** — done and merged. 4b/4c parked.
+
+If a public-sharing need arises later, revisit D1/D2: per-VM subdomain origins +
+one-time-token→cookie auth remain the recommended shape, gated on the operator
+providing wildcard DNS + TLS.
