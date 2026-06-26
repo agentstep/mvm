@@ -19,10 +19,11 @@ import (
 
 // Wire-format request types — must match agent/internal/protocol.
 const (
-	reqPing     = "ping"
-	reqExec     = "exec"
-	reqExecPty  = "exec_pty"
-	reqPoweroff = "poweroff"
+	reqPing       = "ping"
+	reqExec       = "exec"
+	reqExecPty    = "exec_pty"
+	reqPoweroff   = "poweroff"
+	reqTCPForward = "tcp_forward"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
@@ -39,10 +40,16 @@ const maxFrameSize = 10 * 1024 * 1024 // 10 MiB, matches agent
 
 // request is the wire-format request envelope.
 type request struct {
-	Type string       `json:"type"`
-	ID   string       `json:"id"`
-	Exec *execPayload `json:"exec,omitempty"`
-	Pty  *ptyPayload  `json:"pty,omitempty"`
+	Type    string          `json:"type"`
+	ID      string          `json:"id"`
+	Exec    *execPayload    `json:"exec,omitempty"`
+	Pty     *ptyPayload     `json:"pty,omitempty"`
+	Forward *forwardPayload `json:"forward,omitempty"`
+}
+
+// forwardPayload matches agent/internal/protocol.ForwardRequest.
+type forwardPayload struct {
+	Port int `json:"port"`
 }
 
 type execPayload struct {

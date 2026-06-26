@@ -17,6 +17,7 @@ const (
 	ReqReadFile   = "read_file"
 	ReqPoweroff   = "poweroff"
 	ReqSetupNet   = "setup_network"
+	ReqTCPForward = "tcp_forward"
 )
 
 // Response types
@@ -37,6 +38,15 @@ type Request struct {
 	Pty     *ExecPtyRequest `json:"pty,omitempty"`
 	File    *FileRequest    `json:"file,omitempty"`
 	Network *NetworkRequest `json:"network,omitempty"`
+	Forward *ForwardRequest `json:"forward,omitempty"`
+}
+
+// ForwardRequest asks the agent to connect to a TCP port on the guest's own
+// loopback and then relay raw bytes over this connection. The target is always
+// 127.0.0.1 inside the guest — the caller never supplies a host/IP, so the
+// agent can't be used to reach anything but the guest's own services.
+type ForwardRequest struct {
+	Port int `json:"port"`
 }
 
 type ExecRequest struct {
