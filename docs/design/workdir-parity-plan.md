@@ -9,6 +9,13 @@ dependency. VZ-first (our differentiator), Firecracker following where cheap.
   start, per-phase timing, `mvm bench` p50/p90/p95). Verified for `cold_boot`
   (635ms p50). Telemetry immediately surfaced that the base.ext4→rootfs copy is
   ~261ms of a ~697ms cold boot — a reflink/CoW optimization target.
+- **Phase 4a — DONE (applevz), local tunnel.** Agent `tcp_forward` verb (dials
+  the guest's own loopback, raw vsock relay) + `mvm preview <vm> <port>` binding
+  127.0.0.1 (kubectl-port-forward style). Deny-by-default (only published ports;
+  5123 refused). Verified: relay unit tests, guards + listener bind against a
+  live VM. Live guest data round-trip pending a rootfs rebuild with the new
+  agent. Full design in [preview-proxy-design.md](preview-proxy-design.md);
+  4b (public proxy) and 4c (FC parity) deferred pending the DNS/TLS decision.
 - **Phase 3 — DONE (applevz).** Encrypted secrets: `mvm secret put/list/rm`
   (AES-256-GCM, key out of the store), attach with `mvm start --secret NAME`,
   injected per-exec from host memory (never to a guest file), and memory

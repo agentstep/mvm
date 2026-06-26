@@ -184,6 +184,10 @@ func handleConnection(conn net.Conn) {
 				resp.ID = req.ID
 			}
 
+		case protocol.ReqTCPForward:
+			handler.HandleTCPForward(conn, req.Forward)
+			return // forward takes over the connection (raw relay)
+
 		case protocol.ReqPoweroff:
 			resp = handler.HandlePoweroff()
 			resp.ID = req.ID

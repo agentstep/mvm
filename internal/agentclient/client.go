@@ -183,6 +183,40 @@ func (c *Client) ExecInteractive(ctx context.Context, command string, rows, cols
 	return exitCode, nil
 }
 
+// Forward opens a raw byte relay to a TCP port on the guest's loopback. It
+// dials the agent, sends a tcp_forward request, waits for the OK frame, then
+// returns the live connection — after which the stream is raw in both
+// directions. The caller owns the returned conn and must Close it; piping an
+// inbound tunnel connection through it both ways completes the forward.
+func (c *Client) Forward(ctx context.Context, guestPort int) (net.Conn, error) {
+	conn, err := c.dialer.Dial(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("dial agent: %w", err)
+	}
+	if err := writeFrame(conn, &request{
+		Type:    reqTCPForward,
+		ID:      newID(),
+		Forward: &forwardPayload{Port: guestPort},
+	}); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("send tcp_forward: %w", err)
+	}
+	var resp response
+	if err := readFrame(conn, &resp); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read agent response: %w", err)
+	}
+	if resp.Type == respError {
+		conn.Close()
+		return nil, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	if resp.Type != respOK {
+		conn.Close()
+		return nil, fmt.Errorf("unexpected agent response %q", resp.Type)
+	}
+	return conn, nil
+}
+
 // Poweroff requests a graceful guest shutdown.
 //
 // The agent writes a final response and then powers off, so the connection
