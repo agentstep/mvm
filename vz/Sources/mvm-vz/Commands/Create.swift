@@ -116,7 +116,16 @@ struct Create: ParsableCommand {
                 machine.restoreMachineStateFrom(url: URL(fileURLWithPath: statePath)) { error in
                     if let error = error {
                         let ns = error as NSError
-                        fputs("restore failed: domain=\(ns.domain) code=\(ns.code) reason=\(ns.localizedFailureReason ?? "?") userInfo=\(ns.userInfo)\n", stderr)
+                        fputs("restore failed: domain=\(ns.domain) code=\(ns.code) reason=\(ns.localizedFailureReason ?? "?")\n", stderr)
+                        // VZErrorRestore (code 12) is a generic wrapper — the real
+                        // cause hides in the underlying-error chain. Walk it.
+                        var underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+                        var depth = 0
+                        while let u = underlying, depth < 5 {
+                            fputs("  underlying[\(depth)]: domain=\(u.domain) code=\(u.code) desc=\(u.localizedDescription) userInfo=\(u.userInfo)\n", stderr)
+                            underlying = u.userInfo[NSUnderlyingErrorKey] as? NSError
+                            depth += 1
+                        }
                         startError = error
                         startSemaphore.signal()
                         return
