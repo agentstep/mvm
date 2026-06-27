@@ -6,10 +6,10 @@ Hardware-isolated Linux sandboxes for AI agents. **Native microVMs on Apple Sili
 
 ```bash
 # On your Mac — native Apple Silicon microVM, no nested layer:
-mvm start sandbox                      # ~0.7s cold boot to an agent-ready VM
-mvm exec sandbox -- npm test           # exec over vsock to the in-guest agent
-mvm snapshot create sandbox            # checkpoint memory + disk
-mvm stop sandbox && mvm start sandbox  # restore in ~0.3s, exactly where you left off
+mvm start sandbox                       # ~0.7s cold boot to an agent-ready VM
+mvm exec sandbox -- npm test            # exec over vsock to the in-guest agent
+mvm pause sandbox && mvm resume sandbox # freeze in memory at zero CPU, then resume
+# (memory+disk save/restore also exists — see Snapshots; note the macOS 26.2 caveat)
 
 # Or on a Linux server you own:
 curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
@@ -36,7 +36,8 @@ mvm has two macOS backends. Pick at `init`:
 
 ```bash
 # Build from source (Go + Swift toolchains required). Installs mvm and the
-# codesigned mvm-vz helper into $(go env GOPATH)/bin.
+# codesigned mvm-vz helper into $(go env GOPATH)/bin — make sure that's on PATH:
+#   export PATH="$(go env GOPATH)/bin:$PATH"
 git clone https://github.com/agentstep/mvm.git && cd mvm
 make install
 
@@ -139,7 +140,7 @@ Real measurements on GCP n2-standard-4, April 2026. See [`docs/benchmarks.md`](d
 
 ¹ UFFD lazy restore shipped and verified functional; clean timing benchmark pending.
 
-**For AI agents making many tool calls, mvm's 16ms local exec wins decisively** — a 50-call session saves 2-10 seconds vs any hosted provider.
+For agents making many tool calls, the 16ms local exec adds up: a 50-call session saves roughly 2–10s of exec overhead versus a network round-trip to a hosted provider. (Local-daemon number; your latency to a remote daemon is network-bound like anyone else's.)
 
 ## Network sandboxing
 
