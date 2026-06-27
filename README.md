@@ -12,7 +12,7 @@ mvm snapshot create sandbox            # checkpoint memory + disk
 mvm stop sandbox && mvm start sandbox  # restore in ~0.3s, exactly where you left off
 
 # Or on a Linux server you own:
-curl -sSL https://get.mvm.dev | sudo bash    # 95s: fresh box → working sandbox service
+curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
 export MVM_REMOTE=https://my-server:19876
 mvm exec sandbox -- npm test           # same CLI, same API
 ```
@@ -35,7 +35,10 @@ mvm is the only hardware-isolated sandbox that runs natively on your Mac **and**
 mvm has two macOS backends. Pick at `init`:
 
 ```bash
-brew install agentstep/tap/mvm
+# Build from source (Go + Swift toolchains required). Installs mvm and the
+# codesigned mvm-vz helper into $(go env GOPATH)/bin.
+git clone https://github.com/agentstep/mvm.git && cd mvm
+make install
 
 # Native Apple Virtualization.framework — fastest, runs on any Apple Silicon (M1+),
 # no nested layer. ~0.7s cold boot, ~0.3s save/restore.
@@ -53,7 +56,7 @@ mvm exec sandbox -- echo hello
 
 ```bash
 # Any Linux host with /dev/kvm — AWS .metal, GCP nested-virt, Hetzner dedicated, etc.
-curl -sSL https://get.mvm.dev | sudo bash
+curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
 
 # The install script:
 #  - Downloads mvm + Firecracker

@@ -129,7 +129,7 @@ mvm is the only Firecracker-grade sandbox with a turnkey self-host path:
 
 ```bash
 # On a fresh bare-metal Linux box with KVM:
-curl -sSL https://get.mvm.dev | sudo bash
+curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
 # 95 seconds later: working sandbox service on https://server:19876
 ```
 
@@ -162,7 +162,7 @@ gcloud compute instances create mvm-bench \
   --boot-disk-size=30GB
 
 gcloud compute ssh mvm-bench
-sudo bash -c "$(curl -sSL https://get.mvm.dev)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh)"
 
 # Wait for pool
 sudo mvm pool warm

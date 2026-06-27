@@ -113,16 +113,17 @@ It's the same binary in both places. The daemon is the single source of truth fo
 
 ## Get started
 
-**macOS (Apple Silicon, macOS 15+):**
+**macOS (Apple Silicon, macOS 14+):**
 ```bash
-brew install agentstep/tap/mvm     # or build from source
+git clone https://github.com/agentstep/mvm.git && cd mvm && make install
+mvm init --backend applevz
 mvm start sandbox
 mvm exec sandbox -- echo "hello from an isolated VM"
 ```
 
 **Self-host on a Linux box with `/dev/kvm`:**
 ```bash
-curl -sSL https://get.mvm.dev | sudo bash      # fresh box → working service in ~95s
+curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
 ```
 Then, from any laptop or CI:
 ```bash
