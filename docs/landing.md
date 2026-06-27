@@ -6,9 +6,10 @@ Give every AI agent its own real Linux machine — root, shell, network, the wor
 
 ```bash
 mvm start sandbox                          # ~0.7s to a booted, isolated Linux VM
+mvm exec sandbox -- npm i -g @anthropic-ai/claude-code   # install your agent CLI
 mvm exec sandbox -- claude --dangerously-skip-permissions
-mvm snapshot create sandbox                # checkpoint memory + disk
-mvm stop sandbox && mvm start sandbox      # restore in ~0.3s, exactly where you left off
+mvm pause sandbox && mvm resume sandbox    # freeze in memory at zero CPU, then resume
+# (memory+disk save/restore exists too — works on macOS ≤26.1; 26.2 regression, see Benchmarks)
 ```
 
 [Get started](#get-started) · [Benchmarks](#benchmarks) · [How it works](#how-it-works) · [GitHub](https://github.com/agentstep/mvm)
