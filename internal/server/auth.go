@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -17,7 +18,10 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 		}
 
 		header := r.Header.Get("Authorization")
-		if !strings.HasPrefix(header, "Bearer ") || strings.TrimPrefix(header, "Bearer ") != apiKey {
+		token := strings.TrimPrefix(header, "Bearer ")
+		// Constant-time compare so a network attacker can't byte-by-byte time
+		// the token. (The prefix check isn't secret-dependent.)
+		if !strings.HasPrefix(header, "Bearer ") || subtle.ConstantTimeCompare([]byte(token), []byte(apiKey)) != 1 {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
