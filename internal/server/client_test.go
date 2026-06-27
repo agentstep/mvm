@@ -184,8 +184,20 @@ N7NwKlMYdDkS
 
 	c := &Client{caCertPath: tmpFile.Name()}
 	conf := c.tlsConfig()
-	if conf.RootCAs == nil {
-		t.Error("RootCAs should not be nil when CA cert is provided")
+	// With a CA cert we pin via VerifyPeerCertificate (chain verified, hostname
+	// ignored) rather than RootCAs, so the daemon's CN=mvm-daemon self-signed
+	// cert works regardless of the IP/hostname the user connects by.
+	if conf.VerifyPeerCertificate == nil {
+		t.Error("VerifyPeerCertificate should be set when a CA cert is provided")
+	}
+	if !conf.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be true (hostname check is delegated to the CA-pinning verifier)")
+	}
+
+	// Without a CA cert: encryption only, no pinning.
+	noCA := (&Client{}).tlsConfig()
+	if !noCA.InsecureSkipVerify || noCA.VerifyPeerCertificate != nil {
+		t.Error("without a CA cert, expected InsecureSkipVerify=true and no pinning verifier")
 	}
 }
 

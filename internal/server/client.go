@@ -83,15 +83,34 @@ func (c *Client) url(path string) string {
 	return "http://mvm" + path
 }
 
-// tlsConfig returns a TLS configuration, optionally loading a custom CA cert.
+// tlsConfig returns a TLS configuration for talking to the daemon.
+//
+// The daemon ships a self-signed cert (CN=mvm-daemon, no SANs), and users
+// connect by arbitrary IP/hostname, so standard hostname verification can never
+// succeed. The API key is the authentication boundary; TLS is for encryption.
+//   - With a CA cert (MVM_CA_CERT): pin to it — chain is verified, hostname is
+//     not. This keeps MITM protection without requiring a hostname-matched cert.
+//   - Without one: encryption only (the documented quickstart), relying on the
+//     API key for auth.
 func (c *Client) tlsConfig() *tls.Config {
-	tlsConf := &tls.Config{}
+	tlsConf := &tls.Config{InsecureSkipVerify: true} // hostname check disabled; see below
 	if c.caCertPath != "" {
 		caCert, err := os.ReadFile(c.caCertPath)
 		if err == nil {
 			pool := x509.NewCertPool()
 			pool.AppendCertsFromPEM(caCert)
-			tlsConf.RootCAs = pool
+			// Verify the leaf chains to the pinned CA, ignoring hostname/SANs.
+			tlsConf.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				if len(rawCerts) == 0 {
+					return fmt.Errorf("no server certificate presented")
+				}
+				leaf, err := x509.ParseCertificate(rawCerts[0])
+				if err != nil {
+					return err
+				}
+				_, err = leaf.Verify(x509.VerifyOptions{Roots: pool})
+				return err
+			}
 		}
 	}
 	return tlsConf

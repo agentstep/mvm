@@ -52,9 +52,11 @@ for bin in mvm mvm-agent mvm-uffd; do
 done
 
 # Firecracker is AWS's binary — fetch it from its own upstream release rather
-# than redistributing it.
-FC_VER=$(curl -fsSL https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
-  | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+# than redistributing it. Resolve the version in two steps: piping curl straight
+# into `grep -m1` makes grep close the pipe early, so curl fails writing the
+# rest of the JSON (exit 23) and `set -o pipefail` would abort the install.
+FC_JSON=$(curl -fsSL https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest)
+FC_VER=$(printf '%s' "$FC_JSON" | grep '"tag_name"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
 curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-${ARCH}.tgz" \
   | tar -xz -C /tmp
 mv "/tmp/release-${FC_VER}-${ARCH}/firecracker-${FC_VER}-${ARCH}" /usr/local/bin/firecracker
