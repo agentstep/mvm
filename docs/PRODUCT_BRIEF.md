@@ -28,7 +28,7 @@ mvm exec sandbox -- claude --dangerously-skip-permissions
 
 **Cloud mode** (bare-metal Linux with KVM):
 ```bash
-curl -sSL https://get.mvm.dev | sudo bash    # 95s: fresh box → working service
+curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
 ```
 
 From any laptop or CI:
