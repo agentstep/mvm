@@ -28,6 +28,33 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  linux-binaries:
+    # GoReleaser only builds the macOS binary, but the self-hosted Linux install
+    # (scripts/install-cloud.sh) needs linux binaries published as raw release
+    # assets named <name>-linux-<x86_64|aarch64> (uname -m). Build + attach them.
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Build and upload linux binaries
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          LDFLAGS="-s -w -X main.version=${TAG#v} -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          for goarch in amd64 arm64; do
+            case "$goarch" in amd64) uarch=x86_64 ;; arm64) uarch=aarch64 ;; esac
+            CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -ldflags "$LDFLAGS" -o "mvm-linux-$uarch" ./cmd/mvm
+            CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -ldflags "-s -w" -o "mvm-uffd-linux-$uarch" ./cmd/mvm-uffd
+            ( cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=$goarch go build -ldflags "-s -w" -o "../mvm-agent-linux-$uarch" . )
+            gh release upload "$TAG" "mvm-linux-$uarch" "mvm-uffd-linux-$uarch" "mvm-agent-linux-$uarch" --clobber
+          done
+
   npm:
     runs-on: macos-latest
     needs: release

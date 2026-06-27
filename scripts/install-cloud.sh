@@ -43,17 +43,21 @@ apt-get install -y --no-install-recommends \
 
 echo "=== Downloading binaries ==="
 
-curl -fsSL -o /usr/local/bin/mvm \
-  "https://github.com/paulmeller/mvm/releases/latest/download/mvm-linux-${ARCH}"
+# mvm's own binaries come from the public release (agentstep/mvm). ARCH here is
+# uname -m (x86_64 / aarch64), matching the release asset names.
+MVM_REPO="${MVM_REPO:-agentstep/mvm}"
+for bin in mvm mvm-agent mvm-uffd; do
+  curl -fsSL -o "/usr/local/bin/$bin" \
+    "https://github.com/${MVM_REPO}/releases/latest/download/${bin}-linux-${ARCH}"
+done
 
-curl -fsSL -o /usr/local/bin/firecracker \
-  "https://github.com/paulmeller/mvm/releases/latest/download/firecracker-linux-${ARCH}"
-
-curl -fsSL -o /usr/local/bin/mvm-agent \
-  "https://github.com/paulmeller/mvm/releases/latest/download/mvm-agent-linux-${ARCH}"
-
-curl -fsSL -o /usr/local/bin/mvm-uffd \
-  "https://github.com/paulmeller/mvm/releases/latest/download/mvm-uffd-linux-${ARCH}"
+# Firecracker is AWS's binary — fetch it from its own upstream release rather
+# than redistributing it.
+FC_VER=$(curl -fsSL https://api.github.com/repos/firecracker-microvm/firecracker/releases/latest \
+  | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VER}/firecracker-${FC_VER}-${ARCH}.tgz" \
+  | tar -xz -C /tmp
+mv "/tmp/release-${FC_VER}-${ARCH}/firecracker-${FC_VER}-${ARCH}" /usr/local/bin/firecracker
 
 chmod +x /usr/local/bin/mvm /usr/local/bin/firecracker /usr/local/bin/mvm-agent /usr/local/bin/mvm-uffd
 
@@ -367,7 +371,7 @@ systemctl enable mvm-nat.service >/dev/null 2>&1
 cat > /etc/systemd/system/mvm-daemon.service <<'EOF'
 [Unit]
 Description=mvm sandbox daemon
-Documentation=https://github.com/paulmeller/mvm
+Documentation=https://github.com/agentstep/mvm
 After=network.target mvm-nat.service
 Wants=mvm-nat.service
 
