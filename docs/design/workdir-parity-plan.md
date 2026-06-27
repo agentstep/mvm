@@ -12,9 +12,10 @@ dependency. VZ-first (our differentiator), Firecracker following where cheap.
 - **Phase 4a — DONE (applevz), local tunnel.** Agent `tcp_forward` verb (dials
   the guest's own loopback, raw vsock relay) + `mvm preview <vm> <port>` binding
   127.0.0.1 (kubectl-port-forward style). Deny-by-default (only published ports;
-  5123 refused). Verified: relay unit tests, guards + listener bind against a
-  live VM. Live guest data round-trip pending a rootfs rebuild with the new
-  agent. Full design in [preview-proxy-design.md](preview-proxy-design.md).
+  5123 refused). **Verified end to end (2026-06-27):** relay unit tests, guards,
+  and a full host→tunnel→vsock→agent `tcp_forward`→in-guest HTTP server round-trip
+  (`curl 127.0.0.1:8000` returned a perl server running inside the VM).
+  Full design in [preview-proxy-design.md](preview-proxy-design.md).
   4b (public proxy) and 4c (FC parity) **not pursued** — owner declined public
   DNS/TLS (2026-06-27); the local tunnel is the final shape.
 - **Phase 3 — DONE (applevz).** Encrypted secrets: `mvm secret put/list/rm`
