@@ -296,7 +296,7 @@ func runInitAppleVZ(store *state.Store, cpus int, minimal bool) error {
 	// or reuse the Firecracker rootfs if they have Lima available.
 	rootfsPath := filepath.Join(cacheDir, "base.ext4")
 	if _, err := os.Stat(rootfsPath); os.IsNotExist(err) {
-		fmt.Println("Building Alpine rootfs...")
+		fmt.Println("Building Debian rootfs...")
 		if err := buildLocalRootfs(rootfsPath, minimal); err != nil {
 			return fmt.Errorf("build rootfs: %w\nNote: Apple VZ rootfs build requires Docker or a Linux host. Run 'mvm init --backend firecracker' on an M3+ Mac to build the rootfs, then copy ~/.mvm/cache/base.ext4 here.", err)
 		}
@@ -384,9 +384,18 @@ func buildLocalRootfs(dest string, minimal bool) error {
 }
 
 func buildRootfsViaDocker(dest string, minimal bool) error {
-	packages := "openrc openssh-server dropbear git curl wget python3 py3-pip nodejs npm iptables"
+	// Debian package names (the base image is debian:bookworm). The old list
+	// used Alpine names (py3-pip), so apt-get aborted under `set -e` and the
+	// rootfs shipped without python/node — hence the bare base.
+	packages := "openssh-server dropbear git curl wget ca-certificates python3 python3-pip nodejs npm iptables"
+	// Image size must hold the populated rootfs. The full set (node/npm/python)
+	// is ~640 MB, so size to 1536 MB with headroom; minimal stays small. Cold
+	// boot clones this via APFS copy-on-write (`cp -c`), so the larger size
+	// doesn't cost boot latency.
+	sizeMB := 1536
 	if minimal {
 		packages = "openrc openssh-server dropbear"
+		sizeMB = 256
 	}
 
 	script := fmt.Sprintf(`
@@ -417,9 +426,9 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /opt/mvm-agent
 MVMINIT
 chmod +x /rootfs/sbin/mvm-init
-dd if=/dev/zero of=/output/base.ext4 bs=1M count=0 seek=512
+dd if=/dev/zero of=/output/base.ext4 bs=1M count=0 seek=%d
 mkfs.ext4 -F -d /rootfs /output/base.ext4
-'`, dest, packages)
+'`, dest, packages, sizeMB)
 
 	return execLocal(script)
 }

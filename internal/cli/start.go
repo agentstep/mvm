@@ -266,9 +266,14 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 				}
 			}
 		}
-	} else if err := execLocal(fmt.Sprintf("cp %s %s", rootfsPath, vmRootfs)); err != nil {
-		store.RemoveVM(name)
-		return nil, fmt.Errorf("copy rootfs: %w", err)
+	} else if err := execLocal(fmt.Sprintf("cp -c %s %s", rootfsPath, vmRootfs)); err != nil {
+		// APFS copy-on-write clone — instant regardless of rootfs size, so a
+		// richer (Node/Python) base doesn't slow cold boot. Fall back to a plain
+		// copy on non-APFS / cross-device.
+		if err := execLocal(fmt.Sprintf("cp %s %s", rootfsPath, vmRootfs)); err != nil {
+			store.RemoveVM(name)
+			return nil, fmt.Errorf("copy rootfs: %w", err)
+		}
 	}
 	timer.mark("disk_prep")
 
