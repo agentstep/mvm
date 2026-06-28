@@ -73,6 +73,12 @@ mvm pool status
 mvm start sandbox
 ```
 
+> **Verifying the install on GCP?** Use `scripts/verify-cloud-gcp.sh` — it
+> provisions a throwaway nested-virt box, runs the install, checks the daemon,
+> and **always tears the box down** (on success, failure, or Ctrl-C) so a paid
+> instance can't be left running. `scripts/verify-cloud-gcp.sh --cleanup` sweeps
+> any orphaned `mvm-verify-*` boxes.
+
 ### From Python / TypeScript / Go
 
 ```python
