@@ -22,6 +22,12 @@ set -euo pipefail
 #   MACHINE_TYPE  (default: n2-standard-4 — must support nested virt)
 #   IMAGE_FAMILY  (default: debian-12)  IMAGE_PROJECT (default: debian-cloud)
 
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+# Check gcloud first — resolving the default PROJECT below shells out to it, so
+# a missing gcloud would otherwise surface as a misleading "no project set".
+command -v gcloud >/dev/null || die "gcloud not found on PATH"
+
 PROJECT="${PROJECT:-$(gcloud config get-value project 2>/dev/null)}"
 ZONE="${ZONE:-us-central1-a}"
 MACHINE_TYPE="${MACHINE_TYPE:-n2-standard-4}"
@@ -31,10 +37,7 @@ IMAGE_PROJECT="${IMAGE_PROJECT:-debian-cloud}"
 # Boxes are named with a shared prefix so orphans are easy to find and sweep.
 NAME_PREFIX="mvm-verify"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-
 [ -n "$PROJECT" ] || die "no GCP project set (pass PROJECT=... or run: gcloud config set project <id>)"
-command -v gcloud >/dev/null || die "gcloud not found on PATH"
 
 gc() { gcloud --project="$PROJECT" "$@"; }
 
@@ -42,15 +45,21 @@ gc() { gcloud --project="$PROJECT" "$@"; }
 
 if [ "${1:-}" = "--cleanup" ]; then
     echo "=== Sweeping leftover ${NAME_PREFIX}-* instances in $PROJECT ==="
-    # `while read` (not mapfile) so this runs on macOS's bundled bash 3.2.
+    # Capture the listing first and check it succeeded — otherwise an auth/API
+    # failure produces no rows and we'd falsely report "nothing to clean up"
+    # while real paid boxes leak. (Errors are left visible on stderr.)
+    if ! list=$(gc compute instances list \
+        --filter="name~^${NAME_PREFIX}-" --format="value(name,zone.basename())"); then
+        die "failed to list instances (check gcloud auth / project $PROJECT)"
+    fi
+    # `while read` over a here-string (not mapfile) for macOS's bundled bash 3.2.
     found=0
     while IFS=$'\t' read -r n z; do
         [ -n "$n" ] || continue
         found=1
         echo "Deleting $n ($z)..."
         gc compute instances delete "$n" --zone="$z" --quiet
-    done < <(gc compute instances list \
-        --filter="name~^${NAME_PREFIX}-" --format="value(name,zone.basename())" 2>/dev/null)
+    done <<< "$list"
     [ "$found" -eq 1 ] && echo "Done." || echo "None found. Nothing to clean up."
     exit 0
 fi
@@ -76,7 +85,10 @@ teardown() {
     gc compute instances delete "$NAME" --zone="$ZONE" --quiet 2>/dev/null || true
     [ "$rc" -eq 0 ] && echo "✅ Verified and torn down." || echo "❌ Failed (rc=$rc) — box torn down anyway."
 }
-trap teardown EXIT INT TERM
+# HUP included: a dropped SSH session / closed terminal sends SIGHUP, and an
+# untrapped fatal signal terminates bash WITHOUT running the EXIT trap — which
+# would leak the paid box during the multi-minute run. INT = Ctrl-C.
+trap teardown EXIT INT TERM HUP
 
 # --- Provision a nested-virt box ---------------------------------------------
 
