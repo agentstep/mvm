@@ -39,6 +39,10 @@ func runStop(store *state.Store, name string, force bool) error {
 		if err := vzBackend.StopVM(name, vm.PID); err != nil {
 			fmt.Printf("  Warning: %v\n", err)
 		}
+		// Port forwarders (-p) are a detached process independent of the VM
+		// helper — must be torn down explicitly or the host listener leaks
+		// past the VM's lifetime.
+		killForwarder(store, name, vm.ForwarderPID)
 		now := time.Now()
 		store.UpdateVM(name, func(v *state.VM) {
 			v.Status = "stopped"

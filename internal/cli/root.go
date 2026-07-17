@@ -84,6 +84,7 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newInstallCmd(limaClient, store),
 		newServeCmd(limaClient, store),
 		newMenuCmd(),
+		newForwardDaemonCmd(store),
 	)
 
 	return rootCmd

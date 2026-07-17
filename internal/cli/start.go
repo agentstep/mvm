@@ -229,6 +229,11 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 			return nil, fmt.Errorf("microVM %q already exists", name)
 		}
 		netIndex = existing.NetIndex
+		// A clean `mvm stop` always clears ForwarderPID; a nonzero value here
+		// means a previous run's forwarder process leaked (e.g. a crash).
+		// Kill it defensively before the new run spawns a fresh one, so we
+		// never end up with two processes fighting over the same host port.
+		killForwarder(store, name, existing.ForwarderPID)
 		store.UpdateVM(name, func(v *state.VM) { v.Status = "starting" })
 	} else {
 		vmEntry := &state.VM{
@@ -380,6 +385,22 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 			logf("  Warning: apply network policy: %v\n", err)
 		}
 		timer.mark("net_setup")
+
+		// Real host->guest TCP forwarding for -p. Spawned as a detached
+		// process so the listeners outlive this `mvm start` invocation; see
+		// forward_daemon.go. Runs over the same vsock tcp_forward channel
+		// `mvm preview` already uses — independent of guest IP networking
+		// (Bug 1), so this works even if DHCP discovery above failed.
+		if len(ports) > 0 {
+			if fpid, err := spawnPortForwarders(name); err != nil {
+				logf("  Warning: port forwarding: %v\n", err)
+				if fpid > 0 {
+					store.UpdateVM(name, func(v *state.VM) { v.ForwarderPID = fpid })
+				}
+			} else {
+				store.UpdateVM(name, func(v *state.VM) { v.ForwarderPID = fpid })
+			}
+		}
 	}
 
 	// Run the declarative startup recipe (git clone + commands + ready check)
