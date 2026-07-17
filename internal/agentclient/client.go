@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -60,6 +61,33 @@ func (c *Client) Ping(ctx context.Context) error {
 		return fmt.Errorf("unexpected ping response type: %q", resp.Type)
 	}
 	return nil
+}
+
+// NetInfo asks the guest to self-report its current network configuration
+// (its eth0 IPv4 address and default-route gateway), discovered in-guest via
+// the Go net package and /proc/net/route — no ip/ifconfig binary required.
+//
+// This is the applevz backend's answer to "what address did DHCP actually
+// hand out": the host has no other way to learn it, since Apple's
+// VZNATNetworkDeviceAttachment manages its own DHCP pool transparently (see
+// internal/cli/start.go's post-boot discovery step).
+func (c *Client) NetInfo(ctx context.Context) (*NetInfo, error) {
+	req := &request{Type: reqNetInfo, ID: newID()}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Type == respError {
+		return nil, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	if resp.Type != respOK {
+		return nil, fmt.Errorf("unexpected net_info response type: %q", resp.Type)
+	}
+	var info NetInfo
+	if err := json.Unmarshal(resp.Data, &info); err != nil {
+		return nil, fmt.Errorf("decode net_info response: %w", err)
+	}
+	return &info, nil
 }
 
 // Exec runs a shell command on the guest and returns its combined output

@@ -18,6 +18,7 @@ const (
 	ReqPoweroff   = "poweroff"
 	ReqSetupNet   = "setup_network"
 	ReqTCPForward = "tcp_forward"
+	ReqNetInfo    = "net_info"
 )
 
 // Response types
@@ -74,6 +75,18 @@ type FileRequest struct {
 type NetworkRequest struct {
 	DefaultGateway string `json:"default_gateway"`
 	DNS            string `json:"dns"`
+}
+
+// NetInfo is the guest's self-reported network configuration, returned as
+// JSON in a Response's Data field for a net_info request. It's discovered
+// entirely via the Go net package and /proc/net/route — no ip/ifconfig
+// binary is required in the guest image (the applevz base image ships
+// neither; see internal/cli/start.go for why this matters: the guest gets
+// its address via kernel-level DHCP against Apple's VZNAT device, and the
+// host has no other way to learn what address was actually assigned).
+type NetInfo struct {
+	IP      string `json:"ip"`      // eth0's IPv4 address, "" if unconfigured
+	Gateway string `json:"gateway"` // default route gateway, "" if none
 }
 
 type Response struct {

@@ -24,6 +24,7 @@ const (
 	reqExecPty    = "exec_pty"
 	reqPoweroff   = "poweroff"
 	reqTCPForward = "tcp_forward"
+	reqNetInfo    = "net_info"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
@@ -50,6 +51,14 @@ type request struct {
 // forwardPayload matches agent/internal/protocol.ForwardRequest.
 type forwardPayload struct {
 	Port int `json:"port"`
+}
+
+// NetInfo is the guest's self-reported network configuration — the JSON
+// payload carried in a net_info response's Data field. Matches
+// agent/internal/protocol.NetInfo.
+type NetInfo struct {
+	IP      string `json:"ip"`
+	Gateway string `json:"gateway"`
 }
 
 type execPayload struct {

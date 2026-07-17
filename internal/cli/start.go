@@ -277,8 +277,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	}
 	timer.mark("disk_prep")
 
-	bootArgs := fmt.Sprintf("console=hvc0 root=/dev/vda rw reboot=k panic=1 quiet random.trust_cpu=on rootfstype=ext4 init=/sbin/mvm-init ip=%s::%s:255.255.255.252::eth0:off",
-		alloc.GuestIP, alloc.TAPIP)
+	bootArgs := "console=hvc0 root=/dev/vda rw reboot=k panic=1 rootfstype=ext4 init=/sbin/mvm-init ip=dhcp"
 
 	vzBackend := vm.NewAppleVZBackend(filepath.Join(home, ".mvm"))
 
@@ -304,10 +303,13 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	pid := startResult.PID
 	timer.mark("vmm_spawn")
 
+	// GuestIP/TAPIP are not yet known: the guest gets its address via
+	// kernel-level DHCP against Apple's VZNAT device (see the bootArgs
+	// comment above), not the static internal/state.AllocateNet scheme, so
+	// there's nothing to record until the guest agent self-reports what it
+	// was actually handed (below, once agentReady).
 	if err := store.UpdateVM(name, func(v *state.VM) {
 		v.Status = "running"
-		v.GuestIP = alloc.GuestIP
-		v.TAPIP = alloc.TAPIP
 		v.TAPDevice = ""
 		v.GuestMAC = alloc.GuestMAC
 		v.PID = pid
@@ -322,8 +324,6 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	updatedVM := &state.VM{
 		Name:       name,
 		Status:     "running",
-		GuestIP:    alloc.GuestIP,
-		TAPIP:      alloc.TAPIP,
 		GuestMAC:   alloc.GuestMAC,
 		PID:        pid,
 		RootfsPath: vmRootfs,
@@ -344,13 +344,35 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
-		// Configure guest networking via the agent.
-		setupCmd := fmt.Sprintf(
-			"ip route add default via %s dev eth0 2>/dev/null; echo 'nameserver 8.8.8.8' > /etc/resolv.conf",
-			alloc.TAPIP,
-		)
-		if _, err := agent.Exec(ctx, setupCmd, ""); err != nil {
-			logf("  Warning: setup network: %v\n", err)
+		// DNS: point the guest at a real resolver. (The default route itself
+		// is already set — the kernel's own ip=dhcp autoconfig installs it
+		// from the DHCP-offered gateway before userspace even starts; no
+		// "ip route add" is needed or possible, since the guest image ships
+		// no ip/ifconfig binary at all.)
+		if _, err := agent.Exec(ctx, "echo 'nameserver 8.8.8.8' > /etc/resolv.conf", ""); err != nil {
+			logf("  Warning: configure DNS: %v\n", err)
+		}
+
+		// Discover what address DHCP actually handed out. Apple's
+		// VZNATNetworkDeviceAttachment runs its own DHCP pool (observed
+		// 192.168.65.0/24 on this host, gateway 192.168.65.1 — the subnet is
+		// Apple's to choose and may differ per machine); the host has no way
+		// to know the assigned address except asking the guest.
+		if info, err := agent.NetInfo(ctx); err != nil {
+			logf("  Warning: discover guest IP: %v\n", err)
+		} else {
+			// TAPIP is the Firecracker-backend name for "the address the
+			// guest reaches the host at" (the tap device's host-side IP);
+			// reused here for the applevz backend's NAT gateway, which
+			// plays the identical role — see the guest→host address note
+			// in the -p forwarding help text below.
+			guestIP, hostAddr := info.IP, info.Gateway
+			store.UpdateVM(name, func(v *state.VM) {
+				v.GuestIP = guestIP
+				v.TAPIP = hostAddr
+			})
+			updatedVM.GuestIP = guestIP
+			updatedVM.TAPIP = hostAddr
 		}
 
 		// Apply network policy via the agent.
@@ -389,7 +411,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		Name:       name,
 		Backend:    "applevz",
 		BootPath:   bootPath,
-		GuestIP:    alloc.GuestIP,
+		GuestIP:    updatedVM.GuestIP,
 		AgentReady: agentReady,
 		TotalMs:    timer.totalMs(),
 		Phases:     timer.phases,
@@ -405,7 +427,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 
 	if agentReady {
 		fmt.Printf("\n  %s is running! (Apple VZ)\n", name)
-		fmt.Printf("    IP:   %s\n", alloc.GuestIP)
+		fmt.Printf("    IP:   %s\n", updatedVM.GuestIP)
+		if updatedVM.TAPIP != "" {
+			fmt.Printf("    Host: %s (reach the host from inside the guest at this address)\n", updatedVM.TAPIP)
+		}
 		printPorts(updatedVM)
 		fmt.Printf("    Boot: %s in %.0fms\n", bootPath, result.TotalMs)
 		fmt.Printf("    Exec: mvm exec %s -- <command>\n", name)
