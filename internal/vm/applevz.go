@@ -111,6 +111,11 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 		return nil, fmt.Errorf("mkdir run dir: %w", err)
 	}
 
+	// The helper's own diagnostic stderr (distinct from --log-path, which
+	// captures the guest's serial console) — see the cmd.Stderr comment
+	// below for why this goes to a file rather than os.Stderr.
+	stderrLogPath := filepath.Join(filepath.Dir(logPath), "mvm-vz-stderr.log")
+
 	ipcSocket := b.IPCSocketPath(name)
 
 	args := []string{
@@ -154,11 +159,30 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	cmd.Stderr = os.Stderr
+	// mvm-vz --foreground stays alive for the VM's whole lifetime, detached
+	// from (but still a fork-child of) this process. cmd.Stderr used to be
+	// os.Stderr, which handed the helper a dup of *this process's own*
+	// stderr fd — if that fd is itself a pipe a caller of `mvm start` is
+	// reading to EOF (execFile, `$(...)`, a shell pipeline), the helper's
+	// long-lived copy of it keeps the pipe writable forever, hanging the
+	// caller even though `mvm start` itself has long since exited. Redirect
+	// to a per-VM log file instead: a regular file has no such EOF-blocking
+	// behavior, and a startup failure (the only case this stream matters
+	// for — see Create.swift's `throw error`/fputs paths) is still fully
+	// captured for helperStderrTail to surface below.
+	stderrFile, err := os.Create(stderrLogPath)
+	if err != nil {
+		return nil, fmt.Errorf("create helper stderr log: %w", err)
+	}
+	cmd.Stderr = stderrFile
 
 	if err := cmd.Start(); err != nil {
+		stderrFile.Close()
 		return nil, fmt.Errorf("start mvm-vz: %w", err)
 	}
+	// The child has its own dup of the fd from the fork/exec; our copy of
+	// the *os.File is no longer needed once cmd.Start() returns.
+	stderrFile.Close()
 
 	// Read the JSON status line the helper prints right after VM boot
 	// and IPC bind. We use a goroutine + timeout so a hung helper can't
@@ -182,11 +206,11 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 	case err := <-errCh:
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("read mvm-vz status: %w", err)
+		return nil, withHelperStderr(fmt.Errorf("read mvm-vz status: %w", err), stderrLogPath)
 	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("timeout waiting for mvm-vz status line")
+		return nil, withHelperStderr(fmt.Errorf("timeout waiting for mvm-vz status line"), stderrLogPath)
 	}
 
 	// Drain the rest of stdout in the background so the helper doesn't
@@ -199,7 +223,7 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 	if err := json.Unmarshal([]byte(jsonLine), &info); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("parse mvm-vz status %q: %w", jsonLine, err)
+		return nil, withHelperStderr(fmt.Errorf("parse mvm-vz status %q: %w", jsonLine, err), stderrLogPath)
 	}
 
 	// The helper-reported PID matches cmd.Process.Pid (it's
@@ -211,6 +235,37 @@ func (b *AppleVZBackend) StartVM(name, kernelPath, rootfsPath, bootArgs, mac str
 		socket = ipcSocket
 	}
 	return &StartResult{PID: info.PID, IPCSocket: socket}, nil
+}
+
+// maxHelperStderrTail bounds how much of the helper's captured stderr log
+// gets folded into a startup-failure error message.
+const maxHelperStderrTail = 4096
+
+// helperStderrTail returns the tail of the helper's captured stderr log
+// (see the cmd.Stderr comment in StartVM for why it's a file rather than an
+// inherited fd), trimmed to maxHelperStderrTail bytes. Best-effort: returns
+// "" on any read error, e.g. if the file was never created.
+func helperStderrTail(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := strings.TrimSpace(string(data))
+	if len(s) > maxHelperStderrTail {
+		s = s[len(s)-maxHelperStderrTail:]
+	}
+	return s
+}
+
+// withHelperStderr enriches a startup-failure error with the helper's
+// captured stderr output, if any was written — this is how error-surfacing
+// is preserved now that the helper's stderr no longer goes directly to this
+// process's own os.Stderr (see StartVM).
+func withHelperStderr(base error, stderrLogPath string) error {
+	if tail := helperStderrTail(stderrLogPath); tail != "" {
+		return fmt.Errorf("%w (mvm-vz stderr: %s)", base, tail)
+	}
+	return base
 }
 
 // StopVM asks the helper for a graceful shutdown via the IPC socket.

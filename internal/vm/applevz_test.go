@@ -2,6 +2,8 @@ package vm
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +101,99 @@ func TestAppleVZHelperClientNotNil(t *testing.T) {
 	c := b.HelperClient("foo")
 	if c == nil {
 		t.Fatal("HelperClient returned nil")
+	}
+}
+
+// === Bug 4 regression tests: mvm-vz stderr must not be inherited from this
+// process's own os.Stderr (which can be a caller's pipe that a fd-holding
+// detached helper would keep from ever reaching EOF) — see the cmd.Stderr
+// comment in StartVM. It's captured to a per-VM log file instead, and
+// startup failures fold that file's content back into the returned error so
+// error-surfacing isn't lost.
+
+func TestHelperStderrTailMissingFile(t *testing.T) {
+	if got := helperStderrTail(filepath.Join(t.TempDir(), "nope.log")); got != "" {
+		t.Errorf("helperStderrTail(missing) = %q, want \"\"", got)
+	}
+}
+
+func TestHelperStderrTailTrimsAndBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stderr.log")
+	if err := os.WriteFile(path, []byte("  hello world  \n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := helperStderrTail(path); got != "hello world" {
+		t.Errorf("helperStderrTail = %q, want %q", got, "hello world")
+	}
+
+	// Bound to the last maxHelperStderrTail bytes so a runaway diagnostic
+	// stream can't bloat every subsequent error message.
+	big := strings.Repeat("x", maxHelperStderrTail+100) + "TAIL-MARKER"
+	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
+		t.Fatalf("write big: %v", err)
+	}
+	got := helperStderrTail(path)
+	if len(got) != maxHelperStderrTail {
+		t.Fatalf("helperStderrTail len = %d, want %d", len(got), maxHelperStderrTail)
+	}
+	if !strings.HasSuffix(got, "TAIL-MARKER") {
+		t.Fatalf("helperStderrTail = %q, want it to end with TAIL-MARKER", got)
+	}
+}
+
+func TestWithHelperStderrAppendsWhenPresent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stderr.log")
+	if err := os.WriteFile(path, []byte("disk image not found"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	base := os.ErrNotExist
+	got := withHelperStderr(base, path)
+	if !strings.Contains(got.Error(), "disk image not found") {
+		t.Errorf("withHelperStderr = %q, want it to contain the captured stderr", got.Error())
+	}
+	if !strings.Contains(got.Error(), base.Error()) {
+		t.Errorf("withHelperStderr = %q, want it to still contain the base error", got.Error())
+	}
+}
+
+func TestWithHelperStderrPassesThroughWhenAbsent(t *testing.T) {
+	base := os.ErrNotExist
+	got := withHelperStderr(base, filepath.Join(t.TempDir(), "nope.log"))
+	if got != base {
+		t.Errorf("withHelperStderr with no captured stderr = %v, want the base error unchanged", got)
+	}
+}
+
+// TestStartVMSurfacesHelperStderrOnFailure exercises the real StartVM path
+// against a fake "mvm-vz" that fails before ever printing a status line
+// (mirroring Create.swift's `throw error` path, which fputs to stderr and
+// exits nonzero without printing JSON). Regression coverage for two things
+// at once: (1) the failure's stderr message must still reach the caller's
+// error even though it's no longer piped straight to os.Stderr, and (2) the
+// stderr must land in the per-VM log file rather than being lost.
+func TestStartVMSurfacesHelperStderrOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-mvm-vz")
+	const scriptBody = "#!/bin/sh\necho 'boom: kernel not found' >&2\nexit 1\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write fake helper: %v", err)
+	}
+
+	b := &AppleVZBackend{binary: script, dataDir: dir, cacheDir: filepath.Join(dir, "cache")}
+	_, err := b.StartVM("t1", "/kernel", "/rootfs", "console=ttyS0", "", 1, 128, nil, "")
+	if err == nil {
+		t.Fatal("StartVM: want error from a failing helper, got nil")
+	}
+	if !strings.Contains(err.Error(), "boom: kernel not found") {
+		t.Fatalf("StartVM error = %q, want it to include the helper's stderr message", err.Error())
+	}
+
+	stderrLog := filepath.Join(dir, "vms", "t1", "mvm-vz-stderr.log")
+	data, rerr := os.ReadFile(stderrLog)
+	if rerr != nil {
+		t.Fatalf("read captured stderr log: %v", rerr)
+	}
+	if !strings.Contains(string(data), "boom: kernel not found") {
+		t.Fatalf("stderr log content = %q, want it to contain the helper's message", data)
 	}
 }
