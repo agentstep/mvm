@@ -65,3 +65,17 @@ func (t *phaseTimer) totalMs() float64 { return msSince(t.start, time.Now()) }
 func msSince(from, to time.Time) float64 {
 	return float64(to.Sub(from).Microseconds()) / 1000.0
 }
+
+// resolveOutputMode picks the outputMode a start should use. quiet takes
+// precedence over jsonOut — a caller that wants no output at all (e.g.
+// mvm run's foreground path, which prints its own status) never wants a
+// JSON blob printed instead of the human banner it asked to suppress.
+func resolveOutputMode(jsonOut, quiet bool) outputMode {
+	if quiet {
+		return outQuiet
+	}
+	if jsonOut {
+		return outJSON
+	}
+	return outHuman
+}

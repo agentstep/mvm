@@ -1,12 +1,17 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 )
 
@@ -240,5 +245,99 @@ func TestValidateStartRMRejectsFlag(t *testing.T) {
 func TestValidateStartRMAllowsDefault(t *testing.T) {
 	if err := validateStartRM(false); err != nil {
 		t.Errorf("validateStartRM(false) = %v, want nil", err)
+	}
+}
+
+// === resolveOutputMode ===
+
+func TestResolveOutputModeDefaultHuman(t *testing.T) {
+	if got := resolveOutputMode(false, false); got != outHuman {
+		t.Errorf("resolveOutputMode(false, false) = %v, want outHuman", got)
+	}
+}
+
+func TestResolveOutputModeJSON(t *testing.T) {
+	if got := resolveOutputMode(true, false); got != outJSON {
+		t.Errorf("resolveOutputMode(true, false) = %v, want outJSON", got)
+	}
+}
+
+func TestResolveOutputModeQuietWinsOverJSON(t *testing.T) {
+	if got := resolveOutputMode(true, true); got != outQuiet {
+		t.Errorf("resolveOutputMode(true, true) = %v, want outQuiet (quiet takes precedence)", got)
+	}
+}
+
+// === runStart quiet mode (firecracker/daemon path) ===
+
+// captureStdout redirects os.Stdout for the duration of fn and returns
+// everything written to it.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+	defer func() { os.Stdout = orig }()
+
+	fn()
+
+	w.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+// fakeDaemonForCreate starts an httptest server implementing just enough
+// of the daemon's HTTP surface (GET /health, POST /vms) for
+// requireDaemon()+runStartViaDaemon to succeed against it.
+func fakeDaemonForCreate(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /vms", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.VMResponse{Name: "web", Status: "running", GuestIP: "10.0.0.2"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestRunStartQuietSuppressesDaemonBanner(t *testing.T) {
+	srv := fakeDaemonForCreate(t)
+	t.Setenv("MVM_REMOTE", srv.URL)
+	t.Setenv("MVM_API_KEY", "")
+
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+
+	out := captureStdout(t, func() {
+		if err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, nil, true); err != nil {
+			t.Fatalf("runStart: %v", err)
+		}
+	})
+	if strings.Contains(out, "is running!") {
+		t.Errorf("quiet runStart printed the boot banner: %q", out)
+	}
+}
+
+func TestRunStartNotQuietPrintsDaemonBanner(t *testing.T) {
+	srv := fakeDaemonForCreate(t)
+	t.Setenv("MVM_REMOTE", srv.URL)
+	t.Setenv("MVM_API_KEY", "")
+
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+
+	out := captureStdout(t, func() {
+		if err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, nil, false); err != nil {
+			t.Fatalf("runStart: %v", err)
+		}
+	})
+	if !strings.Contains(out, "is running!") {
+		t.Errorf("non-quiet runStart suppressed the boot banner (Gateway compat break): %q", out)
 	}
 }

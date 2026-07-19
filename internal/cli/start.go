@@ -70,7 +70,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 					return err
 				}
 			}
-			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec, secretsF)
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec, secretsF, false)
 		},
 	}
 
@@ -181,7 +181,7 @@ func validateStartRM(rm bool) error {
 	return nil
 }
 
-func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec, secretNames []string) error {
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec, secretNames []string, quiet bool) error {
 	// Merge secrets from the startup spec, then validate they all exist up front
 	// (a typo'd secret should fail the start, not silently inject nothing).
 	if startup != nil {
@@ -197,7 +197,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 		if startup != nil || len(secretNames) > 0 {
 			return fmt.Errorf("--startup/--secret are not yet supported on the daemon/firecracker path")
 		}
-		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image)
+		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, quiet)
 	}
 
 	initialized, err := store.IsInitialized()
@@ -212,10 +212,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 
 	// Apple VZ path — dispatch to separate function
 	if backend == "applevz" {
-		out := outHuman
-		if jsonOut {
-			out = outJSON
-		}
+		out := resolveOutputMode(jsonOut, quiet)
 		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup, secretNames)
 		return err
 	}
@@ -224,12 +221,18 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 	}
 
 	// Firecracker path: route through daemon
-	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image)
+	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, quiet)
 }
 
 // runStartViaDaemon creates a VM by calling the daemon's /vms endpoint.
-// Used for both local-mode (Unix socket) and cloud-mode (TCP+TLS).
-func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string) error {
+// Used for both local-mode (Unix socket) and cloud-mode (TCP+TLS). quiet
+// suppresses the boot banner entirely — used by mvm run's path, which
+// prints its own status instead (see run.go). There is no JSON output
+// mode on this path yet (a pre-existing, separate gap: `mvm start --json`
+// on the firecracker/daemon backend silently falls back to the human
+// banner, unlike the applevz path) — out of scope here; quiet only adds
+// "print nothing" alongside the existing "print the human banner".
+func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string, quiet bool) error {
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
@@ -248,6 +251,10 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 	})
 	if err != nil {
 		return err
+	}
+
+	if quiet {
+		return nil
 	}
 
 	fmt.Printf("\n  %s is running!\n", resp.Name)

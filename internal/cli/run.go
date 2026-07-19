@@ -185,7 +185,7 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 	// Always create detached — run manages its own foreground behavior
 	// (readiness wait + exec) rather than delegating to start's boot-log
 	// streaming.
-	if err := runStart(store, name, true, ports, netPolicy, volumes, "", "", cpus, memoryMB, resolvedImage, false, nil, nil); err != nil {
+	if err := runStart(store, name, true, ports, netPolicy, volumes, "", "", cpus, memoryMB, resolvedImage, false, nil, nil, true); err != nil {
 		return fmt.Errorf("start %q: %w", name, err)
 	}
 
