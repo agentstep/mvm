@@ -49,7 +49,7 @@ but is currently the only supported mode — omitting it behaves identically.`,
 }
 
 func runStats(store *state.Store, names []string, wantJSON bool) error {
-	var all []server.VMStats
+	all := []server.VMStats{}
 
 	// applevz: PID is the mvm-vz helper running natively on the macOS host
 	// (see runStartAppleVZ's startResult.PID) — query it directly, no daemon
@@ -117,7 +117,7 @@ func filterStatsByName(all []server.VMStats, names []string) []server.VMStats {
 	for _, n := range names {
 		want[n] = true
 	}
-	var filtered []server.VMStats
+	filtered := []server.VMStats{}
 	for _, row := range all {
 		if want[row.Name] {
 			filtered = append(filtered, row)

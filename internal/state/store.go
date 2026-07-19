@@ -245,12 +245,26 @@ func ValidateName(name string) error {
 	if name == "" {
 		return fmt.Errorf("VM name cannot be empty")
 	}
+	if reservedNames[name] {
+		return fmt.Errorf("VM name %q is reserved", name)
+	}
 	for _, c := range name {
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
 			return fmt.Errorf("VM name %q contains invalid character %q (use alphanumeric, hyphens, underscores, dots)", name, string(c))
 		}
 	}
 	return nil
+}
+
+// reservedNames are VM names that would collide with literal path segments
+// in the daemon's route table (e.g. "GET /vms/stats" takes precedence over
+// "GET /vms/{name}" in net/http's ServeMux), causing a VM's own name to
+// route to the wrong handler. "stats" collides with the real /vms/stats
+// route; "health" is reserved pre-emptively since a future /vms/health
+// route would have the identical failure mode.
+var reservedNames = map[string]bool{
+	"stats":  true,
+	"health": true,
 }
 
 // ReserveVM atomically checks name uniqueness, allocates a net index, and saves

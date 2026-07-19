@@ -524,6 +524,26 @@ func TestValidateNameRejectsEmpty(t *testing.T) {
 	}
 }
 
+func TestValidateNameRejectsReserved(t *testing.T) {
+	reserved := []string{"stats", "health"}
+	for _, name := range reserved {
+		if err := ValidateName(name); err == nil {
+			t.Errorf("ValidateName(%q) should reject reserved name", name)
+		}
+	}
+}
+
+func TestValidateNameAcceptsSubstringOfReserved(t *testing.T) {
+	// Names that merely CONTAIN a reserved word are fine — the collision is
+	// about exact route-path matching ("/vms/stats"), not substrings.
+	ok := []string{"my-stats-vm", "stats2", "health-check", "unhealthy"}
+	for _, name := range ok {
+		if err := ValidateName(name); err != nil {
+			t.Errorf("ValidateName(%q) should accept (only contains reserved word as substring), got: %v", name, err)
+		}
+	}
+}
+
 func TestValidateNameRejectsShellInjection(t *testing.T) {
 	malicious := []string{
 		"vm; rm -rf /",
