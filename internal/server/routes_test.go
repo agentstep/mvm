@@ -753,3 +753,19 @@ func TestCreateVMRequestOmitsZeroValues(t *testing.T) {
 		t.Error("memory_mb should be omitted when 0")
 	}
 }
+
+// === /v1 route aliases ===
+
+func TestRoutesServeUnversionedAndV1(t *testing.T) {
+	s, _ := testServer(t)
+	mux := s.buildMux()
+
+	for _, path := range []string{"/health", "/v1/health", "/vms", "/v1/vms"} {
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200", path, w.Code)
+		}
+	}
+}

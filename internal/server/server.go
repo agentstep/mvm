@@ -118,24 +118,7 @@ func New(cfg Config) (*Server, error) {
 		cfg:          cfg,
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /vms", s.handleListVMs)
-	mux.HandleFunc("POST /vms", s.handleCreateVM)
-	mux.HandleFunc("POST /vms/{name}/exec", s.handleExec)
-	mux.HandleFunc("DELETE /vms/{name}", s.handleDeleteVM)
-	mux.HandleFunc("POST /vms/{name}/stop", s.handleStopVM)
-	mux.HandleFunc("POST /vms/{name}/pause", s.handlePauseVM)
-	mux.HandleFunc("POST /vms/{name}/resume", s.handleResumeVM)
-	mux.HandleFunc("POST /vms/{name}/snapshot", s.handleSnapshotCreate)
-	mux.HandleFunc("POST /vms/{name}/restore", s.handleSnapshotRestore)
-	mux.HandleFunc("GET /snapshots", s.handleSnapshotList)
-	mux.HandleFunc("DELETE /snapshots/{name}", s.handleSnapshotDelete)
-	mux.HandleFunc("GET /pool", s.handlePoolStatus)
-	mux.HandleFunc("POST /pool/warm", s.handlePoolWarm)
-	mux.HandleFunc("POST /build", s.handleBuild)
-	mux.HandleFunc("GET /images", s.handleImageList)
-	mux.HandleFunc("DELETE /images/{name}", s.handleImageDelete)
+	mux := s.buildMux()
 
 	s.unixServer = &http.Server{Handler: mux}
 
@@ -166,6 +149,35 @@ func New(cfg Config) (*Server, error) {
 	}
 
 	return s, nil
+}
+
+// buildMux registers every API route twice: once at its legacy unversioned
+// path (kept for existing clients per the deprecation policy) and once under
+// /v1, the versioned surface new clients and SDKs target.
+func (s *Server) buildMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	register := func(method, path string, h http.HandlerFunc) {
+		mux.HandleFunc(method+" "+path, h)
+		mux.HandleFunc(method+" /v1"+path, h)
+	}
+	register("GET", "/health", s.handleHealth)
+	register("GET", "/vms", s.handleListVMs)
+	register("POST", "/vms", s.handleCreateVM)
+	register("POST", "/vms/{name}/exec", s.handleExec)
+	register("DELETE", "/vms/{name}", s.handleDeleteVM)
+	register("POST", "/vms/{name}/stop", s.handleStopVM)
+	register("POST", "/vms/{name}/pause", s.handlePauseVM)
+	register("POST", "/vms/{name}/resume", s.handleResumeVM)
+	register("POST", "/vms/{name}/snapshot", s.handleSnapshotCreate)
+	register("POST", "/vms/{name}/restore", s.handleSnapshotRestore)
+	register("GET", "/snapshots", s.handleSnapshotList)
+	register("DELETE", "/snapshots/{name}", s.handleSnapshotDelete)
+	register("GET", "/pool", s.handlePoolStatus)
+	register("POST", "/pool/warm", s.handlePoolWarm)
+	register("POST", "/build", s.handleBuild)
+	register("GET", "/images", s.handleImageList)
+	register("DELETE", "/images/{name}", s.handleImageDelete)
+	return mux
 }
 
 func (s *Server) Start(ctx context.Context) error {
