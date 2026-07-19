@@ -130,3 +130,15 @@ func TestExistingVMNamesIncludesLocalApplevzVMs(t *testing.T) {
 		t.Errorf("names = %v, want web and worker present", names)
 	}
 }
+
+// === runRun: applevz custom-image guard ===
+
+func TestRunRunRejectsCustomImageOnAppleVZ(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	store.MarkInitialized("v1.13.0", "applevz")
+
+	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "")
+	if err == nil {
+		t.Fatal("runRun() = nil, want an error for a non-base image on applevz")
+	}
+}

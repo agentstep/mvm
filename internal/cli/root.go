@@ -61,6 +61,7 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newVersionCmd(version, commit, date),
 		newInitCmd(limaClient, store),
 		newStartCmd(store),
+		newRunCmd(store),
 		newStopCmd(store),
 		newPauseCmd(store),
 		newResumeCmd(store),

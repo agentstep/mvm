@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/agentstep/mvm/internal/state"
+	"github.com/spf13/cobra"
 )
 
 // waitForReady polls probe until it returns nil or timeout elapses,
@@ -84,4 +86,122 @@ func existingVMNames(store *state.Store) (map[string]bool, error) {
 	}
 
 	return names, nil
+}
+
+func newRunCmd(store *state.Store) *cobra.Command {
+	var (
+		name        string
+		detach      bool
+		cpus        int
+		memoryMB    int
+		netPolicy   string
+		ports       []string
+		volumes     []string
+		interactive bool
+		tty         bool
+		envVars     []string
+		user        string
+		workdir     string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "run <image> [-- command [args...]]",
+		Short: "Boot a VM from an image and run a command, ephemeral by default",
+		Long: `Boot a VM from an image, image-first (Docker-style).
+
+Without --name, the VM is auto-named and deleted after the command exits
+(like docker run --rm). With --name, the VM persists. "base" is the
+default rootfs — there is no other catalogued image yet.
+
+  mvm run base -- ls /                  # ephemeral: boots, runs, deletes
+  mvm run base --name mybox -- bash     # persists as "mybox"
+  mvm run base -d                       # boot and detach, no command
+  mvm run base -p 8080:80 -- serve`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			image := args[0]
+			cmdArgs := args[1:]
+			portMaps, err := parsePorts(ports)
+			if err != nil {
+				return err
+			}
+			return runRun(store, image, cmdArgs, name, detach, cpus, memoryMB, netPolicy, portMaps, volumes, interactive || tty, workdir, envVars, user)
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "use this name and keep the VM after the command exits")
+	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "boot and return immediately; do not run a foreground command")
+	cmd.Flags().IntVar(&cpus, "cpus", 0, "vCPU count (default: 2)")
+	cmd.Flags().IntVar(&memoryMB, "memory", 0, "RAM in MiB (default: 1024)")
+	cmd.Flags().StringVar(&netPolicy, "net-policy", "open", "network policy: open, deny, or allow:domain1,domain2")
+	cmd.Flags().StringArrayVarP(&ports, "publish", "p", nil, "publish port (hostPort:guestPort[/proto])")
+	cmd.Flags().StringArrayVarP(&volumes, "volume", "V", nil, "bind mount (hostPath:guestPath)")
+	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open (foreground command only)")
+	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY (foreground command only)")
+	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "set environment variables (KEY=VALUE, foreground command only)")
+	cmd.Flags().StringVarP(&user, "user", "u", "", "run as user (foreground command only)")
+	cmd.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the VM (foreground command only)")
+
+	return cmd
+}
+
+func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string, detach bool, cpus, memoryMB int, netPolicy string, ports []state.PortMap, volumes []string, interactive bool, workdir string, envVars []string, user string) error {
+	resolvedImage := resolveImage(image)
+
+	// runStartAppleVZ doesn't accept an image parameter at all today — a
+	// pre-existing gap in `mvm start --image` on applevz. Fail clearly here
+	// rather than silently booting the default rootfs for a request that
+	// named something else.
+	if resolvedImage != "" && store.GetBackend() == "applevz" {
+		return fmt.Errorf("mvm run --image is not supported on the Apple VZ backend yet (only the default image); got %q", image)
+	}
+
+	existing, err := existingVMNames(store)
+	if err != nil {
+		return err
+	}
+	name, ephemeral := resolveRunName(nameFlag, existing)
+
+	// Always create detached — run manages its own foreground behavior
+	// (readiness wait + exec) rather than delegating to start's boot-log
+	// streaming.
+	if err := runStart(store, name, true, ports, netPolicy, volumes, "", "", cpus, memoryMB, resolvedImage, false, nil, nil); err != nil {
+		return fmt.Errorf("start %q: %w", name, err)
+	}
+
+	cleanup := func() {
+		if ephemeral {
+			if err := runDelete(store, name, true); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to clean up ephemeral VM %q: %v\n", name, err)
+			}
+		}
+	}
+
+	if detach {
+		if ephemeral {
+			fmt.Printf("%s (ephemeral — clean up with: mvm delete %s)\n", name, name)
+		} else {
+			fmt.Printf("%s\n", name)
+		}
+		return nil
+	}
+
+	// Neither backend's create path blocks until the guest agent is
+	// reachable, so a command run immediately after create can race a cold
+	// boot (~3s). Probe with a silent no-op exec until the VM responds.
+	if err := waitForReady(30*time.Second, func() error {
+		return runExec(store, name, []string{"true"}, false, "", nil, "")
+	}); err != nil {
+		cleanup()
+		return fmt.Errorf("VM %q never became ready: %w", name, err)
+	}
+
+	if len(cmdArgs) == 0 {
+		cmdArgs = []string{"/bin/bash"}
+		interactive = true
+	}
+
+	execErr := runExec(store, name, cmdArgs, interactive, workdir, envVars, user)
+	cleanup()
+	return execErr
 }
