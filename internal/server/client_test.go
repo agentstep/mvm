@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agentstep/mvm/internal/state"
 )
 
 // === NewClient ===
@@ -1006,5 +1009,38 @@ func TestBuild_Returns401AsError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unauthorized") {
 		t.Errorf("expected error containing 'unauthorized', got %q", err.Error())
+	}
+}
+
+// === InspectVM ===
+
+func TestClientInspectVM(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/vms/{name}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(VMInspectResponse{
+			VMResponse: VMResponse{Name: r.PathValue("name"), Status: "running"},
+			Spec:       &state.VMSpec{Cpus: 4},
+		})
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	c := NewClient(sock)
+	got, err := c.InspectVM(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("InspectVM: %v", err)
+	}
+	if got.Name != "web" || got.Status != "running" {
+		t.Errorf("got = %+v, want name=web status=running", got)
+	}
+	if got.Spec == nil || got.Spec.Cpus != 4 {
+		t.Errorf("got.Spec = %+v, want Cpus=4", got.Spec)
 	}
 }

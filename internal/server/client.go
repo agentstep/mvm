@@ -317,6 +317,27 @@ func (c *Client) ListVMs(ctx context.Context) ([]VMResponse, error) {
 	return result, nil
 }
 
+// InspectVM returns full details for one VM, including its declarative spec.
+// New method, so it targets the versioned /v1 surface directly.
+func (c *Client) InspectVM(ctx context.Context, name string) (*VMInspectResponse, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/v1/vms/"+name), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+
+	var result VMInspectResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // PoolStatusResponse holds warm pool counts.
 type PoolStatusResponse struct {
 	Ready int `json:"ready"`
