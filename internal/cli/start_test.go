@@ -173,3 +173,44 @@ func TestVirtiofsMountCommandsInvalidFormat(t *testing.T) {
 		t.Error("want error for a volume missing the guest-path colon")
 	}
 }
+
+// === resolveApplevzKernel ===
+
+func TestResolveApplevzKernelPrefersCustomKernel(t *testing.T) {
+	cacheDir := t.TempDir()
+	custom := filepath.Join(cacheDir, "vmlinux-applevz")
+	if err := os.WriteFile(custom, []byte("fake kernel"), 0o644); err != nil {
+		t.Fatalf("write fake custom kernel: %v", err)
+	}
+	// Shared kernel present too, to confirm the custom one still wins.
+	if err := os.WriteFile(filepath.Join(cacheDir, "vmlinux"), []byte("fake shared kernel"), 0o644); err != nil {
+		t.Fatalf("write fake shared kernel: %v", err)
+	}
+
+	kernelPath, warning := resolveApplevzKernel(cacheDir)
+	if kernelPath != custom {
+		t.Errorf("kernelPath = %q, want %q", kernelPath, custom)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want empty when custom kernel exists", warning)
+	}
+}
+
+func TestResolveApplevzKernelFallsBackWhenCustomKernelMissing(t *testing.T) {
+	cacheDir := t.TempDir()
+	shared := filepath.Join(cacheDir, "vmlinux")
+	if err := os.WriteFile(shared, []byte("fake shared kernel"), 0o644); err != nil {
+		t.Fatalf("write fake shared kernel: %v", err)
+	}
+
+	kernelPath, warning := resolveApplevzKernel(cacheDir)
+	if kernelPath != shared {
+		t.Errorf("kernelPath = %q, want %q (fallback to shared vmlinux)", kernelPath, shared)
+	}
+	if warning == "" {
+		t.Error("warning = \"\", want a non-empty warning when falling back")
+	}
+	if !strings.Contains(warning, "vmlinux-applevz") {
+		t.Errorf("warning = %q, want it to mention the missing custom kernel path", warning)
+	}
+}

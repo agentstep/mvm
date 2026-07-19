@@ -276,6 +276,34 @@ func virtiofsMountCommands(volumes []string) ([]string, error) {
 	return cmds, nil
 }
 
+// resolveApplevzKernel picks the kernel to boot the applevz backend with.
+//
+// Preferred: cacheDir/vmlinux-applevz, a custom-built kernel with virtio-fs
+// support (see build-applevz-kernel.sh) required for -V volume mounts.
+//
+// That kernel is NOT part of a fresh `mvm init --backend applevz` install —
+// runInitAppleVZ only ever downloads the shared cacheDir/vmlinux — so on any
+// machine where nobody has manually run build-applevz-kernel.sh, the custom
+// kernel won't exist. Falling back to the shared vmlinux there keeps the
+// backend bootable; -V volume mounts still degrade gracefully afterward via
+// virtiofsMountCommands' own per-mount warning, since the shared kernel has
+// no virtio-fs driver.
+//
+// Returns the kernel path to boot with, and — only when falling back — a
+// warning message for the caller to log.
+func resolveApplevzKernel(cacheDir string) (kernelPath string, warning string) {
+	custom := filepath.Join(cacheDir, "vmlinux-applevz")
+	if _, err := os.Stat(custom); err == nil {
+		return custom, ""
+	}
+	shared := filepath.Join(cacheDir, "vmlinux")
+	return shared, fmt.Sprintf(
+		"custom applevz kernel not found at %s; falling back to the shared vmlinux. "+
+			"Volume mounts (-V) will not work until you build it: internal/firecracker/scripts/build-applevz-kernel.sh",
+		custom,
+	)
+}
+
 // runStartAppleVZ starts a VM using the Apple Virtualization.framework backend.
 //
 // As of PR #2 this path drives the in-guest agent over vsock via the
@@ -296,10 +324,15 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".mvm", "cache")
-	// applevz uses its own kernel (vmlinux-applevz) built with virtio-fs
-	// support for `-V` volume mounts. The Firecracker backend keeps the shared
-	// vmlinux, which has no virtio-fs driver. See build-applevz-kernel.sh.
-	kernelPath := filepath.Join(cacheDir, "vmlinux-applevz")
+	// applevz prefers its own kernel (vmlinux-applevz) built with virtio-fs
+	// support for `-V` volume mounts, falling back to the shared vmlinux (no
+	// virtio-fs driver) when the custom kernel hasn't been built. The
+	// Firecracker backend always uses the shared vmlinux. See
+	// resolveApplevzKernel and build-applevz-kernel.sh.
+	kernelPath, kernelWarning := resolveApplevzKernel(cacheDir)
+	if kernelWarning != "" {
+		logf("  Warning: %s\n", kernelWarning)
+	}
 	rootfsPath := filepath.Join(cacheDir, "base.ext4")
 
 	vmDir := filepath.Join(home, ".mvm", "vms", name)
