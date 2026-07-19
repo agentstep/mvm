@@ -194,10 +194,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 	// Cloud/remote mode: the local state doesn't matter — the daemon is
 	// the source of truth. Skip the local init check entirely.
 	if os.Getenv("MVM_REMOTE") != "" {
-		if startup != nil || len(secretNames) > 0 {
-			return fmt.Errorf("--startup/--secret are not yet supported on the daemon/firecracker path")
-		}
-		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, quiet)
+		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, startup, secretNames, quiet)
 	}
 
 	initialized, err := store.IsInitialized()
@@ -216,12 +213,8 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup, secretNames)
 		return err
 	}
-	if startup != nil || len(secretNames) > 0 {
-		return fmt.Errorf("--startup/--secret are not yet supported on the daemon/firecracker path")
-	}
-
 	// Firecracker path: route through daemon
-	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, quiet)
+	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, startup, secretNames, quiet)
 }
 
 // runStartViaDaemon creates a VM by calling the daemon's /vms endpoint.
@@ -232,7 +225,13 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 // on the firecracker/daemon backend silently falls back to the human
 // banner, unlike the applevz path) — out of scope here; quiet only adds
 // "print nothing" alongside the existing "print the human banner".
-func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string, quiet bool) error {
+//
+// Note: quiet gates BEFORE the startup-recipe logic below — today, mvm run
+// (the only quiet=true caller) has no --startup flag, so quiet and startup
+// never co-occur in practice, but if they ever did the recipe would be
+// skipped along with the banner. This preserves quiet's pre-existing,
+// already-reviewed behavior unchanged rather than special-casing it.
+func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string, startup *StartupSpec, secretNames []string, quiet bool) error {
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
@@ -248,6 +247,11 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 		Volumes:   volumes,
 		Seccomp:   seccomp,
 		Image:     image,
+		// Only secret NAMES cross this boundary — see the package-level
+		// security invariant in this plan's Global Constraints. Values are
+		// decrypted client-side, per-exec, exactly like runExecAppleVZ does
+		// for applevz (internal/cli/exec.go).
+		Secrets: secretNames,
 	})
 	if err != nil {
 		return err
@@ -268,6 +272,39 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 	}
 	fmt.Printf("    Exec: mvm exec %s -- <command>\n", resp.Name)
 
+	if startup == nil {
+		return nil
+	}
+
+	// Merge attached secrets into the recipe's env, decrypted from host
+	// memory here — mirrors the identical block in runStartAppleVZ below.
+	if env, err := secretEnvVars(secretNames); err != nil {
+		return fmt.Errorf("load secrets for startup recipe: %w", err)
+	} else if len(env) > 0 {
+		if startup.Env == nil {
+			startup.Env = map[string]string{}
+		}
+		for _, kv := range env {
+			if i := strings.IndexByte(kv, '='); i > 0 {
+				startup.Env[kv[:i]] = kv[i+1:]
+			}
+		}
+	}
+
+	fmt.Printf("  Waiting for guest agent before running startup recipe...\n")
+	if err := waitForReady(60*time.Second, func() error {
+		_, _, err := sc.Exec(ctx, name, "true")
+		return err
+	}); err != nil {
+		return fmt.Errorf("VM %q never became ready for the startup recipe: %w", name, err)
+	}
+
+	timer := newPhaseTimer()
+	logf := func(format string, a ...any) { fmt.Printf(format, a...) }
+	if err := runStartupRecipe(ctx, daemonRecipeAgent{sc: sc, vmName: name}, startup, timer, logf); err != nil {
+		fmt.Printf("    Startup recipe failed: %v\n", err)
+		return err
+	}
 	return nil
 }
 

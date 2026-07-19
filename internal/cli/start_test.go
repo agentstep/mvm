@@ -341,3 +341,62 @@ func TestRunStartNotQuietPrintsDaemonBanner(t *testing.T) {
 		t.Errorf("non-quiet runStart suppressed the boot banner (Gateway compat break): %q", out)
 	}
 }
+
+// === runStartViaDaemon: secrets + the removed guards ===
+
+func TestRunStartViaDaemonSendsSecretNamesNotValues(t *testing.T) {
+	var captured server.CreateVMRequest
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/health":
+			w.WriteHeader(200)
+		case r.Method == "POST" && r.URL.Path == "/vms":
+			json.NewDecoder(r.Body).Decode(&captured)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(server.VMResponse{Name: captured.Name, Status: "running", GuestIP: "10.0.0.2"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+	t.Setenv("MVM_REMOTE", ts.URL)
+
+	err := runStartViaDaemon("web", nil, "open", nil, "", 0, 0, "", nil, []string{"OPENAI_API_KEY"}, false)
+	if err != nil {
+		t.Fatalf("runStartViaDaemon: %v", err)
+	}
+	if len(captured.Secrets) != 1 || captured.Secrets[0] != "OPENAI_API_KEY" {
+		t.Errorf("captured.Secrets = %v, want [OPENAI_API_KEY]", captured.Secrets)
+	}
+}
+
+func TestRunStartNoLongerRejectsStartupOrSecretsOnDaemonPath(t *testing.T) {
+	dir := t.TempDir()
+	store := state.NewStore(filepath.Join(dir, "state.json"))
+	store.MarkInitialized("v1.13.0", "firecracker")
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(200)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+	t.Setenv("MVM_REMOTE", ts.URL)
+
+	// "OPENAI_API_KEY" isn't a real stored secret in this test's environment
+	// (no MVM_SECRET_KEY, no secret store), so validateSecretsExist rejects
+	// it — but critically, it must fail with a secret-not-found error, not
+	// the old "not yet supported on the daemon/firecracker path" message.
+	err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, []string{"OPENAI_API_KEY"}, false)
+	if err == nil || strings.Contains(err.Error(), "not yet supported") {
+		t.Fatalf("runStart() = %v, want a secret-not-found error, not the old unsupported-path rejection", err)
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("err = %v, want it to mention the missing secret", err)
+	}
+}
