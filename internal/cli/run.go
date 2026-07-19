@@ -200,7 +200,7 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 	// reachable, so a command run immediately after create can race a cold
 	// boot (~3s). Probe with a silent no-op exec until the VM responds.
 	if err := waitForReady(30*time.Second, func() error {
-		return runExec(store, name, []string{"true"}, false, "", nil, "")
+		return runExec(store, name, []string{"true"}, false, false, "", nil, "")
 	}); err != nil {
 		cleanup()
 		return fmt.Errorf("VM %q never became ready: %w", name, err)
@@ -211,7 +211,7 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 		interactive = true
 	}
 
-	execErr := runExec(store, name, cmdArgs, interactive, workdir, envVars, user)
+	execErr := runExec(store, name, cmdArgs, interactive, false, workdir, envVars, user)
 	cleanup()
 	return execErr
 }

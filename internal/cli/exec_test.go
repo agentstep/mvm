@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -113,5 +114,56 @@ func TestShellJoinPreservesArgBoundaries(t *testing.T) {
 	got := shellJoin(args)
 	if got != "'echo' 'hello' 'world'" {
 		t.Errorf("shellJoin should preserve arg boundaries: %q", got)
+	}
+}
+
+// === buildDetachedExecScript ===
+
+func TestBuildDetachedExecScriptWrapsWithSetsid(t *testing.T) {
+	got := buildDetachedExecScript([]string{"sleep", "100"}, "", nil, "")
+	if !strings.HasPrefix(got, "setsid sh -c ") {
+		t.Errorf("buildDetachedExecScript() = %q, want prefix %q", got, "setsid sh -c ")
+	}
+	if !strings.HasSuffix(got, "</dev/null >/dev/null 2>&1 &") {
+		t.Errorf("buildDetachedExecScript() = %q, want a fully-detached background suffix", got)
+	}
+}
+
+func TestBuildDetachedExecScriptEmbedsInnerCommand(t *testing.T) {
+	inner := buildExecScript([]string{"echo", "hi"}, "", nil, "")
+	got := buildDetachedExecScript([]string{"echo", "hi"}, "", nil, "")
+	if !strings.Contains(got, shellQuote(inner)) {
+		t.Errorf("buildDetachedExecScript() = %q, want it to shell-quote and embed %q", got, inner)
+	}
+}
+
+func TestBuildDetachedExecScriptRespectsWorkdirEnvUser(t *testing.T) {
+	inner := buildExecScript([]string{"env"}, "/app", []string{"FOO=bar"}, "nobody")
+	got := buildDetachedExecScript([]string{"env"}, "/app", []string{"FOO=bar"}, "nobody")
+	if !strings.Contains(got, shellQuote(inner)) {
+		t.Errorf("buildDetachedExecScript() = %q, want the same inner construction as buildExecScript, just wrapped", got)
+	}
+}
+
+// === validateExecFlags ===
+
+func TestValidateExecFlagsRejectsDetachWithInteractive(t *testing.T) {
+	if err := validateExecFlags(true, true, false); err == nil {
+		t.Fatal("want error combining --detach and --interactive")
+	}
+	if err := validateExecFlags(true, false, true); err == nil {
+		t.Fatal("want error combining --detach and --tty")
+	}
+}
+
+func TestValidateExecFlagsAllowsDetachAlone(t *testing.T) {
+	if err := validateExecFlags(true, false, false); err != nil {
+		t.Errorf("validateExecFlags(true, false, false) = %v, want nil", err)
+	}
+}
+
+func TestValidateExecFlagsAllowsInteractiveWithoutDetach(t *testing.T) {
+	if err := validateExecFlags(false, true, true); err != nil {
+		t.Errorf("validateExecFlags(false, true, true) = %v, want nil", err)
 	}
 }

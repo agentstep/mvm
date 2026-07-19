@@ -20,6 +20,7 @@ func newExecCmd(store *state.Store) *cobra.Command {
 	var (
 		interactive bool
 		tty         bool
+		detach      bool
 		workdir     string
 		envVars     []string
 		envFile     string
@@ -35,21 +36,26 @@ func newExecCmd(store *state.Store) *cobra.Command {
   mvm exec my-vm -it -- bash
   mvm exec my-vm -e FOO=bar -- env
   mvm exec my-vm --env-file .env -- env
+  mvm exec my-vm -d -- long-running-task    # detach: don't wait, no output
   echo "data" | mvm exec my-vm -- cat`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateExecFlags(detach, interactive, tty); err != nil {
+				return err
+			}
 			name := args[0]
 			remoteArgs := args[1:]
 			allEnv, err := mergeEnvFile(envFile, envVars)
 			if err != nil {
 				return err
 			}
-			return runExec(store, name, remoteArgs, interactive || tty, workdir, allEnv, user)
+			return runExec(store, name, remoteArgs, interactive || tty, detach, workdir, allEnv, user)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY")
+	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "run the command in the background; don't wait, output is discarded")
 	cmd.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the VM")
 	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "set environment variables (KEY=VALUE)")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "read environment variables from a file (KEY=VALUE per line, # comments and blank lines skipped)")
@@ -58,16 +64,29 @@ func newExecCmd(store *state.Store) *cobra.Command {
 	return cmd
 }
 
-func runExec(store *state.Store, name string, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
+func runExec(store *state.Store, name string, remoteArgs []string, interactive, detach bool, workdir string, envVars []string, user string) error {
 	// Apple VZ VMs aren't managed by the daemon — exec directly against the
 	// per-VM mvm-vz helper's vsock-bridged agent.
 	if vm, _ := store.GetVM(name); vm != nil && vm.Backend == "applevz" {
-		return runExecAppleVZ(store, vm, remoteArgs, interactive, workdir, envVars, user)
+		return runExecAppleVZ(store, vm, remoteArgs, interactive, detach, workdir, envVars, user)
 	}
 
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
+	}
+
+	if detach {
+		script := buildDetachedExecScript(remoteArgs, workdir, envVars, user)
+		ctx := context.Background()
+		_, exitCode, err := sc.Exec(ctx, name, script)
+		if err != nil {
+			return err
+		}
+		if exitCode != 0 {
+			return fmt.Errorf("failed to launch detached command (exit code %d)", exitCode)
+		}
+		return nil
 	}
 
 	script := buildExecScript(remoteArgs, workdir, envVars, user)
@@ -108,7 +127,7 @@ func runExec(store *state.Store, name string, remoteArgs []string, interactive b
 
 // runExecAppleVZ runs a command on an Apple VZ VM via the per-VM mvm-vz
 // helper's vsock-bridged agent (no daemon). MVP: non-interactive only.
-func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, interactive bool, workdir string, envVars []string, user string) error {
+func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, interactive, detach bool, workdir string, envVars []string, user string) error {
 	if vm.Status != "running" && vm.Status != "paused" {
 		return fmt.Errorf("microVM %q is not running (status: %s)", vm.Name, vm.Status)
 	}
@@ -121,15 +140,6 @@ func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, inter
 	AutoResumeIfPaused(nil, store, vm)
 	TouchActivity(store, vm.Name)
 
-	// Forward piped/redirected stdin (echo data | mvm exec vm -- cat, or
-	// mvm exec vm -- cat < file). Only attempt this when stdin is not an
-	// interactive tty, and bound the read: an inherited fd that never reaches
-	// EOF (a held-open pipe under CI/cron, or /dev/null variants) must not be
-	// able to hang exec. A real pipe/file delivers its data + EOF promptly, so
-	// the select returns as soon as the data is in — the timeout only fires for
-	// a source that is never going to send anything.
-	stdin := readStdinNonBlocking()
-
 	// Inject the VM's attached secrets, decrypted from host memory at call time.
 	// They go in as env exports and are never written to a guest file.
 	if len(vm.Secrets) > 0 {
@@ -139,6 +149,29 @@ func runExecAppleVZ(store *state.Store, vm *state.VM, remoteArgs []string, inter
 		}
 		envVars = append(envVars, secretEnv...)
 	}
+
+	if detach {
+		script := buildDetachedExecScript(remoteArgs, workdir, envVars, user)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		res, err := vm_pkg.NewAppleVZBackend(mvmDir).AgentClient(vm.Name).Exec(ctx, script, "")
+		if err != nil {
+			return fmt.Errorf("exec on %q: %w", vm.Name, err)
+		}
+		if res.ExitCode != 0 {
+			return fmt.Errorf("failed to launch detached command (exit code %d)", res.ExitCode)
+		}
+		return nil
+	}
+
+	// Forward piped/redirected stdin (echo data | mvm exec vm -- cat, or
+	// mvm exec vm -- cat < file). Only attempt this when stdin is not an
+	// interactive tty, and bound the read: an inherited fd that never reaches
+	// EOF (a held-open pipe under CI/cron, or /dev/null variants) must not be
+	// able to hang exec. A real pipe/file delivers its data + EOF promptly, so
+	// the select returns as soon as the data is in — the timeout only fires for
+	// a source that is never going to send anything.
+	stdin := readStdinNonBlocking()
 
 	script := buildExecScript(remoteArgs, workdir, envVars, user)
 
@@ -227,6 +260,41 @@ func readStdinNonBlocking() string {
 	case <-time.After(500 * time.Millisecond):
 		return ""
 	}
+}
+
+// validateExecFlags rejects combining --detach with --interactive/--tty:
+// a detached job never gets a terminal or a stdin stream wired to it (see
+// buildDetachedExecScript), so those flags would silently do nothing —
+// better to fail fast than pretend they're honored.
+func validateExecFlags(detach, interactive, tty bool) error {
+	if detach && (interactive || tty) {
+		return fmt.Errorf("--detach cannot be combined with --interactive/--tty")
+	}
+	return nil
+}
+
+// buildDetachedExecScript wraps the same command construction as
+// buildExecScript but runs it fully backgrounded and detached inside the
+// guest, for -d/--detach.
+//
+// This is the cheap, honest v1: the guest agent's wire protocol
+// (agent/internal/protocol, internal/agentclient) has no notion of a
+// background job — HandleExec (agent/internal/handler/exec.go) always runs
+// "sh -c <command>" synchronously via cmd.Run() and returns combined
+// stdout+stderr plus an exit code only once the whole thing finishes. There
+// is no way today to report a PID back to the host, or to later fetch a
+// backgrounded job's output/exit code — that needs an agent protocol change
+// (a new request type, or an Exec.Background field plus a follow-up
+// "collect" verb) and is out of scope here.
+//
+// setsid detaches the job into its own session so it survives the wrapping
+// "sh -c" process exiting once it backgrounds the real work; </dev/null and
+// >/dev/null 2>&1 close off stdio so nothing blocks HandleExec's cmd.Run()
+// waiting on a pipe, and so no output is ever captured — matching `docker
+// exec -d`'s own documented behavior of discarding output.
+func buildDetachedExecScript(remoteArgs []string, workdir string, envVars []string, user string) string {
+	inner := buildExecScript(remoteArgs, workdir, envVars, user)
+	return fmt.Sprintf("setsid sh -c %s </dev/null >/dev/null 2>&1 &", shellQuote(inner))
 }
 
 func buildExecScript(remoteArgs []string, workdir string, envVars []string, user string) string {

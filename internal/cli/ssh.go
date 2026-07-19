@@ -25,7 +25,7 @@ func newSSHCmd(store *state.Store) *cobra.Command {
 				}
 			}
 			// Delegate to exec with interactive flag
-			return runExec(store, name, remoteArgs, true, "", nil, "")
+			return runExec(store, name, remoteArgs, true, false, "", nil, "")
 		},
 	}
 }
