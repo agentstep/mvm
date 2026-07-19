@@ -100,6 +100,7 @@ func newRunCmd(store *state.Store) *cobra.Command {
 		interactive bool
 		tty         bool
 		envVars     []string
+		envFile     string
 		user        string
 		workdir     string
 	)
@@ -129,7 +130,11 @@ default rootfs — there is no other catalogued image yet.
 			if err != nil {
 				return err
 			}
-			return runRun(store, image, cmdArgs, name, detach, cpus, memoryMB, netPolicy, portMaps, volumes, interactive || tty, workdir, envVars, user)
+			allEnv, err := mergeEnvFile(envFile, envVars)
+			if err != nil {
+				return err
+			}
+			return runRun(store, image, cmdArgs, name, detach, cpus, memoryMB, netPolicy, portMaps, volumes, interactive || tty, workdir, allEnv, user)
 		},
 	}
 
@@ -143,6 +148,7 @@ default rootfs — there is no other catalogued image yet.
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open (foreground command only)")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY (foreground command only)")
 	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "set environment variables (KEY=VALUE, foreground command only)")
+	cmd.Flags().StringVar(&envFile, "env-file", "", "read environment variables from a file (KEY=VALUE per line, foreground command only)")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "run as user (foreground command only)")
 	cmd.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the VM (foreground command only)")
 

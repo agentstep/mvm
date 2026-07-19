@@ -22,6 +22,7 @@ func newExecCmd(store *state.Store) *cobra.Command {
 		tty         bool
 		workdir     string
 		envVars     []string
+		envFile     string
 		user        string
 	)
 
@@ -33,12 +34,17 @@ func newExecCmd(store *state.Store) *cobra.Command {
   mvm exec my-vm -- ls /
   mvm exec my-vm -it -- bash
   mvm exec my-vm -e FOO=bar -- env
+  mvm exec my-vm --env-file .env -- env
   echo "data" | mvm exec my-vm -- cat`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
 			remoteArgs := args[1:]
-			return runExec(store, name, remoteArgs, interactive || tty, workdir, envVars, user)
+			allEnv, err := mergeEnvFile(envFile, envVars)
+			if err != nil {
+				return err
+			}
+			return runExec(store, name, remoteArgs, interactive || tty, workdir, allEnv, user)
 		},
 	}
 
@@ -46,6 +52,7 @@ func newExecCmd(store *state.Store) *cobra.Command {
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY")
 	cmd.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the VM")
 	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "set environment variables (KEY=VALUE)")
+	cmd.Flags().StringVar(&envFile, "env-file", "", "read environment variables from a file (KEY=VALUE per line, # comments and blank lines skipped)")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "run as user")
 
 	return cmd
