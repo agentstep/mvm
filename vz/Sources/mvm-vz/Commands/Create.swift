@@ -51,17 +51,22 @@ struct Create: ParsableCommand {
     var foreground: Bool = false
 
     func run() throws {
-        // Parse share options into (tag, hostPath) tuples.
-        // NOTE: the existing semantics (parts[0]=hostPath, parts[1]=tag)
-        // match what internal/vm/applevz.go passes today. The volume-mount
-        // feature is not yet end-to-end functional on either backend; see
-        // the bonus-bug note in PR #1's commit message and the follow-up
-        // issue for fixing virtiofs guest-side mount plumbing.
+        // Parse share options into (tag, hostPath) tuples. --share is
+        // "hostPath:guestPath" (see internal/vm/applevz.go's StartVM, which
+        // passes -V volumes through unmodified). guestPath is NOT used as the
+        // virtio-fs tag: VZVirtioFileSystemDeviceConfiguration's tag is meant
+        // to be a short opaque identifier, not a filesystem path, and nothing
+        // here needs the guest path at all — the guest side (Go, over the
+        // agent, after boot) does its own mkdir+mount using the guest path it
+        // already has from the same -V flag. What the guest DOES need is the
+        // tag, and it derives it the same deterministic way: "vol<index>" by
+        // position in this list. Both sides must stay in lockstep on this
+        // scheme — see internal/cli/start.go's virtiofsMountCommands.
         var shares: [(tag: String, hostPath: String)] = []
-        for s in share {
+        for (index, s) in share.enumerated() {
             let parts = s.split(separator: ":", maxSplits: 1)
             if parts.count == 2 {
-                shares.append((tag: String(parts[1]), hostPath: String(parts[0])))
+                shares.append((tag: "vol\(index)", hostPath: String(parts[0])))
             }
         }
 
