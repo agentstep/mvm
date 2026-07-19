@@ -275,7 +275,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 
 	home, _ := os.UserHomeDir()
 	cacheDir := filepath.Join(home, ".mvm", "cache")
-	kernelPath := filepath.Join(cacheDir, "vmlinux")
+	// applevz uses its own kernel (vmlinux-applevz) built with virtio-fs
+	// support for `-V` volume mounts. The Firecracker backend keeps the shared
+	// vmlinux, which has no virtio-fs driver. See build-applevz-kernel.sh.
+	kernelPath := filepath.Join(cacheDir, "vmlinux-applevz")
 	rootfsPath := filepath.Join(cacheDir, "base.ext4")
 
 	vmDir := filepath.Join(home, ".mvm", "vms", name)
