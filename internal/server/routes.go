@@ -69,6 +69,26 @@ type VMResponse struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+// VMInspectResponse is VMResponse plus the persisted declarative spec.
+type VMInspectResponse struct {
+	VMResponse
+	Spec *state.VMSpec `json:"spec,omitempty"`
+}
+
+// specFromCreateRequest records the create request as a declarative spec,
+// persisted on the VM and returned by inspect.
+func specFromCreateRequest(req CreateVMRequest) *state.VMSpec {
+	return &state.VMSpec{
+		Image:     req.Image,
+		Cpus:      req.Cpus,
+		MemoryMB:  req.MemoryMB,
+		Ports:     req.Ports,
+		Volumes:   req.Volumes,
+		NetPolicy: req.NetPolicy,
+		Seccomp:   req.Seccomp,
+	}
+}
+
 // SnapshotCreateRequest is the optional body for POST /vms/{name}/snapshot.
 type SnapshotCreateRequest struct {
 	Name string `json:"name,omitempty"`
@@ -139,6 +159,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		Cpus:      req.Cpus,
 		MemoryMB:  req.MemoryMB,
 		CreatedAt: now,
+		Spec:      specFromCreateRequest(req),
 	}
 	netIndex, err := s.store.ReserveVM(vm)
 	if err != nil {
@@ -792,6 +813,30 @@ func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleInspectVM(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	vm, err := s.store.GetVM(name)
+	if err != nil {
+		httpError(w, err, http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(VMInspectResponse{
+		VMResponse: VMResponse{
+			Name:      vm.Name,
+			Status:    vm.Status,
+			GuestIP:   vm.GuestIP,
+			PID:       vm.PID,
+			Backend:   vm.Backend,
+			Ports:     vm.Ports,
+			CreatedAt: vm.CreatedAt,
+		},
+		Spec: vm.Spec,
+	})
 }
 
 func httpError(w http.ResponseWriter, err error, code int) {

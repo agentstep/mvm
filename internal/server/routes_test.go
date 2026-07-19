@@ -769,3 +769,71 @@ func TestRoutesServeUnversionedAndV1(t *testing.T) {
 		}
 	}
 }
+
+// === spec persistence + GET /vms/{name} ===
+
+func TestSpecFromCreateRequest(t *testing.T) {
+	req := CreateVMRequest{
+		Name:      "web",
+		Cpus:      4,
+		MemoryMB:  2048,
+		Ports:     []state.PortMap{{HostPort: 8080, GuestPort: 80, Proto: "tcp"}},
+		NetPolicy: "deny",
+		Volumes:   []string{"/h:/g"},
+		Seccomp:   "strict",
+		Image:     "custom",
+	}
+	spec := specFromCreateRequest(req)
+	if spec.Image != "custom" || spec.Cpus != 4 || spec.MemoryMB != 2048 ||
+		spec.NetPolicy != "deny" || spec.Seccomp != "strict" {
+		t.Errorf("spec = %+v, want fields copied from request", spec)
+	}
+	if len(spec.Ports) != 1 || spec.Ports[0].HostPort != 8080 {
+		t.Errorf("spec.Ports = %+v, want request ports", spec.Ports)
+	}
+	if len(spec.Volumes) != 1 || spec.Volumes[0] != "/h:/g" {
+		t.Errorf("spec.Volumes = %+v, want request volumes", spec.Volumes)
+	}
+}
+
+func TestHandleInspectVM(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{
+		Name:      "web",
+		Status:    "running",
+		GuestIP:   "10.99.0.2",
+		Backend:   "firecracker",
+		CreatedAt: time.Now(),
+		Spec:      &state.VMSpec{Cpus: 4, NetPolicy: "deny"},
+	})
+
+	req := httptest.NewRequest("GET", "/v1/vms/web", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var resp VMInspectResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Name != "web" || resp.Status != "running" {
+		t.Errorf("resp = %+v, want name/status from store", resp)
+	}
+	if resp.Spec == nil || resp.Spec.Cpus != 4 || resp.Spec.NetPolicy != "deny" {
+		t.Errorf("resp.Spec = %+v, want persisted spec", resp.Spec)
+	}
+}
+
+func TestHandleInspectVMNotFound(t *testing.T) {
+	s, _ := testServer(t)
+
+	req := httptest.NewRequest("GET", "/vms/nope", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
