@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
+	"github.com/agentstep/mvm/internal/server"
 )
 
 // StartupSpec is a declarative recipe run after a VM boots and its agent is
@@ -70,14 +71,50 @@ func (s *StartupSpec) envPrefix() string {
 	return b.String()
 }
 
+// recipeAgent is the minimal exec surface runStartupRecipe needs. Two
+// backends satisfy it: applevzRecipeAgent wraps the vsock-based
+// *agentclient.Client (Apple VZ, no daemon in the loop) and
+// daemonRecipeAgent wraps *server.Client (Firecracker, via the daemon's
+// /vms/{name}/exec endpoint) — see internal/cli/exec.go's runExec for the
+// same backend split on the exec path. Depending on this interface instead
+// of *agentclient.Client directly is what lets `mvm start --startup` work
+// on both backends from one recipe runner.
+type recipeAgent interface {
+	Exec(ctx context.Context, command, stdin string) (output string, exitCode int, err error)
+}
+
+// applevzRecipeAgent adapts *agentclient.Client's (*ExecResult, error) shape
+// to recipeAgent.
+type applevzRecipeAgent struct{ c *agentclient.Client }
+
+func (a applevzRecipeAgent) Exec(ctx context.Context, command, stdin string) (string, int, error) {
+	res, err := a.c.Exec(ctx, command, stdin)
+	if err != nil {
+		return "", -1, err
+	}
+	return res.Output, res.ExitCode, nil
+}
+
+// daemonRecipeAgent adapts *server.Client's per-VM Exec to recipeAgent.
+// server.Client.Exec has no stdin parameter — every runStartupRecipe call
+// site below passes "" anyway, so the adapter just ignores it.
+type daemonRecipeAgent struct {
+	sc     *server.Client
+	vmName string
+}
+
+func (d daemonRecipeAgent) Exec(ctx context.Context, command, _ string) (string, int, error) {
+	return d.sc.Exec(ctx, d.vmName, command)
+}
+
 // runStartupRecipe executes the recipe over the guest agent, timing each phase
 // into the supplied phaseTimer. logf receives human progress. Returns the first
 // error (a failing foreground command aborts the recipe).
-func runStartupRecipe(ctx context.Context, agent *agentclient.Client, spec *StartupSpec, timer *phaseTimer, logf func(string, ...any)) error {
+func runStartupRecipe(ctx context.Context, agent recipeAgent, spec *StartupSpec, timer *phaseTimer, logf func(string, ...any)) error {
 	envp := spec.envPrefix()
 	wd := shellQuote(spec.Workdir)
 
-	if _, err := agent.Exec(ctx, "mkdir -p "+wd, ""); err != nil {
+	if _, _, err := agent.Exec(ctx, "mkdir -p "+wd, ""); err != nil {
 		return fmt.Errorf("create workdir: %w", err)
 	}
 
@@ -88,10 +125,10 @@ func runStartupRecipe(ctx context.Context, agent *agentclient.Client, spec *Star
 			branch = "--branch " + shellQuote(spec.Git.Ref) + " "
 		}
 		clone := fmt.Sprintf("git clone --depth 1 %s%s %s", branch, shellQuote(spec.Git.URL), wd)
-		if res, err := agent.Exec(ctx, clone, ""); err != nil {
+		if _, exitCode, err := agent.Exec(ctx, clone, ""); err != nil {
 			return fmt.Errorf("git clone: %w", err)
-		} else if res.ExitCode != 0 {
-			return fmt.Errorf("git clone failed (exit %d): %s", res.ExitCode, strings.TrimSpace(res.Output))
+		} else if exitCode != 0 {
+			return fmt.Errorf("git clone failed (exit %d)", exitCode)
 		}
 		timer.mark("startup_git")
 	}
@@ -107,17 +144,17 @@ func runStartupRecipe(ctx context.Context, agent *agentclient.Client, spec *Star
 			logf("  Startup: %s (background)...\n", label)
 			full = fmt.Sprintf("cd %s; %ssetsid sh -c %s >/tmp/%s.log 2>&1 < /dev/null &",
 				wd, envp, shellQuote(c.Run), shellQuote(label))
-			if _, err := agent.Exec(ctx, full, ""); err != nil {
+			if _, _, err := agent.Exec(ctx, full, ""); err != nil {
 				return fmt.Errorf("startup %q: %w", label, err)
 			}
 		} else {
 			logf("  Startup: %s...\n", label)
-			res, err := agent.Exec(ctx, full, "")
+			output, exitCode, err := agent.Exec(ctx, full, "")
 			if err != nil {
 				return fmt.Errorf("startup %q: %w", label, err)
 			}
-			if res.ExitCode != 0 {
-				return fmt.Errorf("startup %q failed (exit %d): %s", label, res.ExitCode, strings.TrimSpace(res.Output))
+			if exitCode != 0 {
+				return fmt.Errorf("startup %q failed (exit %d): %s", label, exitCode, strings.TrimSpace(output))
 			}
 		}
 		timer.mark("startup_" + label)
@@ -136,11 +173,11 @@ func runStartupRecipe(ctx context.Context, agent *agentclient.Client, spec *Star
 			timeout, shellQuote(spec.Ready.HTTP), shellQuote(spec.Ready.HTTP))
 		rctx, cancel := context.WithTimeout(ctx, time.Duration(timeout+5)*time.Second)
 		defer cancel()
-		res, err := agent.Exec(rctx, poll, "")
+		_, exitCode, err := agent.Exec(rctx, poll, "")
 		if err != nil {
 			return fmt.Errorf("ready check: %w", err)
 		}
-		if res.ExitCode != 0 {
+		if exitCode != 0 {
 			return fmt.Errorf("ready check timed out after %ds (%s never answered)", timeout, spec.Ready.HTTP)
 		}
 		timer.mark("startup_ready")

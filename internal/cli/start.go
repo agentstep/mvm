@@ -604,7 +604,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 			}
 		}
 		if startupErr == nil {
-			startupErr = runStartupRecipe(context.Background(), agent, startup, timer, logf)
+			startupErr = runStartupRecipe(context.Background(), applevzRecipeAgent{agent}, startup, timer, logf)
 		}
 	}
 
