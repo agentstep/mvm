@@ -23,13 +23,24 @@ type Tunnel struct {
 	GuestPort int
 	Dial      GuestDial
 
+	// BindIP is the host address to bind. Empty defaults to "127.0.0.1" —
+	// this package's documented safe, local-only default (see the package
+	// doc comment). Set explicitly (e.g. "0.0.0.0") to opt into a wider
+	// bind; this plan never changes the default itself.
+	BindIP string
+
 	ln net.Listener
 }
 
-// Listen binds 127.0.0.1:localPort (localPort 0 picks a free port) and returns
-// the bound address. It does not accept connections until Serve is called.
+// Listen binds BindIP:localPort (BindIP empty = "127.0.0.1"; localPort 0
+// picks a free port) and returns the bound address. It does not accept
+// connections until Serve is called.
 func (t *Tunnel) Listen(localPort int) (string, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", localPort))
+	bindIP := t.BindIP
+	if bindIP == "" {
+		bindIP = "127.0.0.1"
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", bindIP, localPort))
 	if err != nil {
 		return "", err
 	}

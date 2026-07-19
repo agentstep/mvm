@@ -99,19 +99,30 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 			proto = p[idx+1:]
 			p = p[:idx]
 		}
-		parts := strings.SplitN(p, ":", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid port format %q (expected hostPort:guestPort)", p)
+		parts := strings.Split(p, ":")
+
+		var hostIP, hostPortStr, guestPortStr string
+		switch len(parts) {
+		case 2:
+			hostPortStr, guestPortStr = parts[0], parts[1]
+		case 3:
+			hostIP, hostPortStr, guestPortStr = parts[0], parts[1], parts[2]
+			if hostIP == "" {
+				return nil, fmt.Errorf("invalid port format %q (empty host-ip; use hostPort:guestPort to bind the backend's default address)", p)
+			}
+		default:
+			return nil, fmt.Errorf("invalid port format %q (expected [host-ip:]hostPort:guestPort)", p)
 		}
-		host, err := strconv.Atoi(parts[0])
+
+		host, err := strconv.Atoi(hostPortStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid host port %q: %w", parts[0], err)
+			return nil, fmt.Errorf("invalid host port %q: %w", hostPortStr, err)
 		}
-		guest, err := strconv.Atoi(parts[1])
+		guest, err := strconv.Atoi(guestPortStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid guest port %q: %w", parts[1], err)
+			return nil, fmt.Errorf("invalid guest port %q: %w", guestPortStr, err)
 		}
-		result = append(result, state.PortMap{HostPort: host, GuestPort: guest, Proto: proto})
+		result = append(result, state.PortMap{HostIP: hostIP, HostPort: host, GuestPort: guest, Proto: proto})
 	}
 	return result, nil
 }
@@ -242,7 +253,11 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 	fmt.Printf("\n  %s is running!\n", resp.Name)
 	fmt.Printf("    IP:   %s\n", resp.GuestIP)
 	for _, p := range resp.Ports {
-		fmt.Printf("    Port: localhost:%d -> %s:%d/%s\n", p.HostPort, resp.GuestIP, p.GuestPort, p.Proto)
+		host := p.HostIP
+		if host == "" {
+			host = "localhost"
+		}
+		fmt.Printf("    Port: %s:%d -> %s:%d/%s\n", host, p.HostPort, resp.GuestIP, p.GuestPort, p.Proto)
 	}
 	fmt.Printf("    Exec: mvm exec %s -- <command>\n", resp.Name)
 
@@ -251,7 +266,11 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 
 func printPorts(vm *state.VM) {
 	for _, p := range vm.Ports {
-		fmt.Printf("    Port: localhost:%d -> %s:%d/%s\n", p.HostPort, vm.GuestIP, p.GuestPort, p.Proto)
+		host := p.HostIP
+		if host == "" {
+			host = "localhost"
+		}
+		fmt.Printf("    Port: %s:%d -> %s:%d/%s\n", host, p.HostPort, vm.GuestIP, p.GuestPort, p.Proto)
 	}
 }
 

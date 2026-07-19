@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,5 +97,29 @@ func TestTunnelDialFailureClosesConn(t *testing.T) {
 	buf := make([]byte, 1)
 	if _, err := conn.Read(buf); err != io.EOF {
 		t.Fatalf("read = %v, want EOF after dial failure", err)
+	}
+}
+
+func TestTunnelListenDefaultsToLoopback(t *testing.T) {
+	tun := &Tunnel{GuestPort: 80}
+	addr, err := tun.Listen(0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer tun.ln.Close()
+	if !strings.HasPrefix(addr, "127.0.0.1:") {
+		t.Errorf("Listen() addr = %q, want a 127.0.0.1 default (unchanged from before BindIP existed)", addr)
+	}
+}
+
+func TestTunnelListenHonorsExplicitBindIP(t *testing.T) {
+	tun := &Tunnel{GuestPort: 80, BindIP: "127.0.0.1"}
+	addr, err := tun.Listen(0)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer tun.ln.Close()
+	if !strings.HasPrefix(addr, "127.0.0.1:") {
+		t.Errorf("Listen() addr = %q, want 127.0.0.1", addr)
 	}
 }

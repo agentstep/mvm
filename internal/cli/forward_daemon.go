@@ -89,6 +89,7 @@ func runForwardDaemon(store *state.Store, name string) error {
 		guestPort := p.GuestPort
 		tun := &preview.Tunnel{
 			GuestPort: guestPort,
+			BindIP:    p.HostIP,
 			Dial: func(ctx context.Context, port int) (net.Conn, error) {
 				return agent.Forward(ctx, port)
 			},

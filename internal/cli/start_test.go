@@ -12,22 +12,29 @@ import (
 
 func TestParsePorts(t *testing.T) {
 	tests := []struct {
-		input     []string
-		wantLen   int
-		wantErr   bool
-		wantHost  int
-		wantGuest int
-		wantProto string
+		input      []string
+		wantLen    int
+		wantErr    bool
+		wantHostIP string
+		wantHost   int
+		wantGuest  int
+		wantProto  string
 	}{
-		{[]string{"8080:80"}, 1, false, 8080, 80, "tcp"},
-		{[]string{"3000:3000"}, 1, false, 3000, 3000, "tcp"},
-		{[]string{"53:53/udp"}, 1, false, 53, 53, "udp"},
-		{[]string{"8080:80", "3000:3000"}, 2, false, 8080, 80, "tcp"},
-		{nil, 0, false, 0, 0, ""},
-		{[]string{}, 0, false, 0, 0, ""},
-		{[]string{"invalid"}, 0, true, 0, 0, ""},
-		{[]string{"abc:80"}, 0, true, 0, 0, ""},
-		{[]string{"8080:abc"}, 0, true, 0, 0, ""},
+		{[]string{"8080:80"}, 1, false, "", 8080, 80, "tcp"},
+		{[]string{"3000:3000"}, 1, false, "", 3000, 3000, "tcp"},
+		{[]string{"53:53/udp"}, 1, false, "", 53, 53, "udp"},
+		{[]string{"8080:80", "3000:3000"}, 2, false, "", 8080, 80, "tcp"},
+		{nil, 0, false, "", 0, 0, ""},
+		{[]string{}, 0, false, "", 0, 0, ""},
+		{[]string{"invalid"}, 0, true, "", 0, 0, ""},
+		{[]string{"abc:80"}, 0, true, "", 0, 0, ""},
+		{[]string{"8080:abc"}, 0, true, "", 0, 0, ""},
+		{[]string{"127.0.0.1:8080:80"}, 1, false, "127.0.0.1", 8080, 80, "tcp"},
+		{[]string{"0.0.0.0:8080:80/udp"}, 1, false, "0.0.0.0", 8080, 80, "udp"},
+		{[]string{"192.168.1.5:53:53"}, 1, false, "192.168.1.5", 53, 53, "tcp"},
+		{[]string{":8080:80"}, 0, true, "", 0, 0, ""},         // empty host-ip
+		{[]string{"1:2:3:4"}, 0, true, "", 0, 0, ""},          // too many segments
+		{[]string{"127.0.0.1:abc:80"}, 0, true, "", 0, 0, ""}, // bad host port with host-ip present
 	}
 
 	for _, tt := range tests {
@@ -44,6 +51,9 @@ func TestParsePorts(t *testing.T) {
 			continue
 		}
 		if tt.wantLen > 0 {
+			if ports[0].HostIP != tt.wantHostIP {
+				t.Errorf("HostIP = %q, want %q", ports[0].HostIP, tt.wantHostIP)
+			}
 			if ports[0].HostPort != tt.wantHost {
 				t.Errorf("HostPort = %d, want %d", ports[0].HostPort, tt.wantHost)
 			}

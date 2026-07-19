@@ -83,7 +83,11 @@ func printInspectTable(resp server.VMInspectResponse) error {
 		fmt.Fprintf(w, "Error:\t%s\n", resp.Error)
 	}
 	for _, p := range resp.Ports {
-		fmt.Fprintf(w, "Port:\t%d -> %d/%s\n", p.HostPort, p.GuestPort, p.Proto)
+		host := p.HostIP
+		if host == "" {
+			host = "localhost"
+		}
+		fmt.Fprintf(w, "Port:\t%s:%d -> %d/%s\n", host, p.HostPort, p.GuestPort, p.Proto)
 	}
 	if resp.Spec != nil {
 		fmt.Fprintf(w, "Cpus:\t%d\n", resp.Spec.Cpus)
