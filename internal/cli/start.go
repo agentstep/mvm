@@ -255,6 +255,27 @@ func applevzSpec(ports []state.PortMap, netPolicy string, cpus, memoryMB int, vo
 	return spec
 }
 
+// virtiofsMountCommands returns, in order, the shell command that mounts
+// each already-validated "hostPath:guestPath" volume inside the guest via
+// virtio-fs. Tags are assigned "vol0", "vol1", ... by position — this must
+// match vz/Sources/mvm-vz/Commands/Create.swift's share-parsing loop exactly,
+// since the tag is never threaded back through the mvm-vz status line; both
+// sides derive it independently from the same ordering.
+func virtiofsMountCommands(volumes []string) ([]string, error) {
+	var cmds []string
+	for i, v := range volumes {
+		parts := strings.SplitN(v, ":", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid volume format %q (expected hostPath:guestPath)", v)
+		}
+		guestPath := parts[1]
+		tag := fmt.Sprintf("vol%d", i)
+		cmds = append(cmds, fmt.Sprintf("mkdir -p %s && mount -t virtiofs %s %s",
+			shellQuote(guestPath), tag, shellQuote(guestPath)))
+	}
+	return cmds, nil
+}
+
 // runStartAppleVZ starts a VM using the Apple Virtualization.framework backend.
 //
 // As of PR #2 this path drives the in-guest agent over vsock via the
@@ -450,6 +471,19 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		// Apply network policy via the agent.
 		if err := applyVZNetworkPolicy(ctx, agent, netPolicy); err != nil {
 			logf("  Warning: apply network policy: %v\n", err)
+		}
+
+		// Mount each -V share via virtio-fs. Depends on the tags assigned
+		// in vz/Sources/mvm-vz/Commands/Create.swift's share-parsing loop
+		// matching this exact order — see virtiofsMountCommands's comment.
+		if mountCmds, err := virtiofsMountCommands(volumes); err != nil {
+			logf("  Warning: invalid volume spec: %v\n", err)
+		} else {
+			for _, mc := range mountCmds {
+				if _, err := agent.Exec(ctx, mc, ""); err != nil {
+					logf("  Warning: mount volume: %v\n", err)
+				}
+			}
 		}
 		timer.mark("net_setup")
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/agentstep/mvm/internal/state"
@@ -136,5 +137,39 @@ func TestParseVolumes(t *testing.T) {
 				tt.check(t, got)
 			}
 		})
+	}
+}
+
+// === virtiofsMountCommands ===
+
+func TestVirtiofsMountCommands(t *testing.T) {
+	cmds, err := virtiofsMountCommands([]string{"/host/a:/data", "/host/b:/app/lib"})
+	if err != nil {
+		t.Fatalf("virtiofsMountCommands: %v", err)
+	}
+	if len(cmds) != 2 {
+		t.Fatalf("got %d commands, want 2", len(cmds))
+	}
+	// Tag order (vol0, vol1, ...) must match Create.swift's share-parsing
+	// loop exactly — see the comment there.
+	if !strings.Contains(cmds[0], "vol0") || !strings.Contains(cmds[0], "/data") {
+		t.Errorf("cmds[0] = %q, want references to vol0 and /data", cmds[0])
+	}
+	if !strings.Contains(cmds[1], "vol1") || !strings.Contains(cmds[1], "/app/lib") {
+		t.Errorf("cmds[1] = %q, want references to vol1 and /app/lib", cmds[1])
+	}
+}
+
+func TestVirtiofsMountCommandsEmpty(t *testing.T) {
+	cmds, err := virtiofsMountCommands(nil)
+	if err != nil || len(cmds) != 0 {
+		t.Errorf("virtiofsMountCommands(nil) = %v, %v; want no commands, no error", cmds, err)
+	}
+}
+
+func TestVirtiofsMountCommandsInvalidFormat(t *testing.T) {
+	_, err := virtiofsMountCommands([]string{"no-colon-here"})
+	if err == nil {
+		t.Error("want error for a volume missing the guest-path colon")
 	}
 }
