@@ -18,6 +18,7 @@ func newListCmd(store *state.Store) *cobra.Command {
 	var (
 		jsonOutput bool
 		quiet      bool
+		format     string
 	)
 
 	cmd := &cobra.Command{
@@ -25,11 +26,16 @@ func newListCmd(store *state.Store) *cobra.Command {
 		Short:   "List all microVMs",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runList(store, jsonOutput, quiet)
+			wantJSON, err := resolveFormat(format, jsonOutput)
+			if err != nil {
+				return err
+			}
+			return runList(store, wantJSON, quiet)
 		},
 	}
 
-	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON (alias for --format json)")
+	cmd.Flags().StringVar(&format, "format", "", "output format: table (default) or json")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "only print VM names")
 
 	return cmd

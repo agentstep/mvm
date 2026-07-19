@@ -22,7 +22,7 @@ func TestRunInspectAppleVZDoesNotRequireDaemon(t *testing.T) {
 		Spec:      &state.VMSpec{Cpus: 4},
 	})
 
-	if err := runInspect(store, "web"); err != nil {
+	if err := runInspect(store, "web", "json"); err != nil {
 		t.Errorf("runInspect() = %v, want nil (applevz VMs must not require a daemon)", err)
 	}
 }
