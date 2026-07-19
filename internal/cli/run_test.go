@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,7 +179,7 @@ func TestRunRunRejectsCustomImageOnAppleVZ(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 	store.MarkInitialized("v1.13.0", "applevz")
 
-	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "")
+	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "", false)
 	if err == nil {
 		t.Fatal("runRun() = nil, want an error for a non-base image on applevz")
 	}
@@ -190,8 +193,90 @@ func TestRunRunSurfacesBackendLoadError(t *testing.T) {
 		t.Fatalf("write corrupt state: %v", err)
 	}
 
-	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "")
+	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "", false)
 	if err == nil {
 		t.Fatal("runRun() = nil, want the corrupt-state load error surfaced (not silently defaulting to firecracker and booting the wrong rootfs)")
+	}
+}
+
+// === resolveRmFlag ===
+
+func TestResolveRmFlagDetachErrors(t *testing.T) {
+	_, err := resolveRmFlag(true, true)
+	if err == nil {
+		t.Fatal("resolveRmFlag(true, true) = nil error, want an error for --rm with --detach")
+	}
+	if !strings.Contains(err.Error(), "--rm requires a foreground command") {
+		t.Errorf("error = %q, want mention of the foreground requirement", err)
+	}
+}
+
+func TestResolveRmFlagForegroundWarns(t *testing.T) {
+	warn, err := resolveRmFlag(true, false)
+	if err != nil {
+		t.Fatalf("resolveRmFlag(true, false) = %v, want nil error", err)
+	}
+	if !warn {
+		t.Error("warn = false, want true for --rm in foreground mode")
+	}
+}
+
+func TestResolveRmFlagNoRmNoWarning(t *testing.T) {
+	if warn, err := resolveRmFlag(false, false); err != nil || warn {
+		t.Errorf("resolveRmFlag(false, false) = (%v, %v), want (false, nil)", warn, err)
+	}
+	if warn, err := resolveRmFlag(false, true); err != nil || warn {
+		t.Errorf("resolveRmFlag(false, true) = (%v, %v), want (false, nil)", warn, err)
+	}
+}
+
+// === runRun: --rm / -d interaction ===
+
+func TestRunRunRejectsRmWithDetach(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+
+	err := runRun(store, "base", nil, "", true, 0, 0, "open", nil, nil, false, "", nil, "", true)
+	if err == nil {
+		t.Fatal("runRun() = nil, want an error for --rm with --detach")
+	}
+	if !strings.Contains(err.Error(), "--rm requires a foreground command") {
+		t.Errorf("error = %q, want mention of the foreground requirement", err)
+	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// everything written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	w.Close()
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
+
+func TestRunRunRmForegroundWarnsThenContinues(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	store.MarkInitialized("v1.13.0", "firecracker")
+	// Force requireDaemon() to fail fast and deterministically, rather than
+	// depending on whether this machine happens to have a real mvm daemon
+	// running on the default socket (see Global Constraints).
+	t.Setenv("MVM_REMOTE", "http://127.0.0.1:1")
+	t.Setenv("MVM_API_KEY", "")
+
+	stderr := captureStderr(t, func() {
+		_ = runRun(store, "base", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "", true)
+	})
+	if !strings.Contains(stderr, "--rm has no effect in foreground mode") {
+		t.Errorf("stderr = %q, want the --rm no-op warning", stderr)
 	}
 }

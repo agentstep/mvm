@@ -88,6 +88,20 @@ func existingVMNames(store *state.Store) (map[string]bool, error) {
 	return names, nil
 }
 
+// resolveRmFlag validates --rm against --detach. Detached VMs can't be
+// auto-reaped yet — mvm run returns and there is no background process
+// watching them — so --rm -d is a clear error rather than a silent no-op.
+// --rm in foreground mode is accepted (docker users reach for it out of
+// muscle memory) but is genuinely redundant there: foreground mvm run is
+// already ephemeral by default unless --name opts into durability. warn
+// reports whether that redundancy note should be printed.
+func resolveRmFlag(rm, detach bool) (warn bool, err error) {
+	if rm && detach {
+		return false, fmt.Errorf("--rm requires a foreground command; detached VMs can't be reaped on exit yet (clean up with: mvm delete <name>)")
+	}
+	return rm, nil
+}
+
 func newRunCmd(store *state.Store) *cobra.Command {
 	var (
 		name        string
@@ -103,6 +117,7 @@ func newRunCmd(store *state.Store) *cobra.Command {
 		envFile     string
 		user        string
 		workdir     string
+		rm          bool
 	)
 
 	cmd := &cobra.Command{
@@ -134,7 +149,7 @@ default rootfs — there is no other catalogued image yet.
 			if err != nil {
 				return err
 			}
-			return runRun(store, image, cmdArgs, name, detach, cpus, memoryMB, netPolicy, portMaps, volumes, interactive || tty, workdir, allEnv, user)
+			return runRun(store, image, cmdArgs, name, detach, cpus, memoryMB, netPolicy, portMaps, volumes, interactive || tty, workdir, allEnv, user, rm)
 		},
 	}
 
@@ -151,11 +166,20 @@ default rootfs — there is no other catalogued image yet.
 	cmd.Flags().StringVar(&envFile, "env-file", "", "read environment variables from a file (KEY=VALUE per line, foreground command only)")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "run as user (foreground command only)")
 	cmd.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the VM (foreground command only)")
+	cmd.Flags().BoolVar(&rm, "rm", false, "detached: error, since a detached VM can't be reaped yet; foreground: no-op (mvm run is already ephemeral by default unless --name is given)")
 
 	return cmd
 }
 
-func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string, detach bool, cpus, memoryMB int, netPolicy string, ports []state.PortMap, volumes []string, interactive bool, workdir string, envVars []string, user string) error {
+func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string, detach bool, cpus, memoryMB int, netPolicy string, ports []state.PortMap, volumes []string, interactive bool, workdir string, envVars []string, user string, rm bool) error {
+	warnRm, err := resolveRmFlag(rm, detach)
+	if err != nil {
+		return err
+	}
+	if warnRm {
+		fmt.Fprintln(os.Stderr, "note: --rm has no effect in foreground mode — mvm run is already ephemeral by default unless --name is given")
+	}
+
 	resolvedImage := resolveImage(image)
 
 	// runStartAppleVZ doesn't accept an image parameter at all today — a
