@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -251,6 +252,54 @@ func TestBuildTarArchiveTooLarge(t *testing.T) {
 	_, err := buildTarArchive(dir)
 	if err == nil {
 		t.Error("buildTarArchive over the size cap should error")
+	}
+}
+
+// TestBuildTarArchiveRejectsOversizedFileWithoutBuffering proves the size
+// check on a single oversized file fires BEFORE the file is opened and
+// copied, not just after. It uses a sparse file (created via Truncate, so
+// creating it costs no real disk I/O) whose declared size is several times
+// maxVolumeCopyBytes, then measures cumulative heap allocation across the
+// buildTarArchive call via runtime.MemStats.TotalAlloc (a monotonic counter,
+// immune to GC timing). If the size check only runs after io.Copy has
+// already streamed the whole file into the in-memory buffer, allocation
+// would balloon to multiples of the file's size; if the pre-copy check
+// (comparing buf.Len()+fi.Size() against the cap) rejects the file before
+// os.Open/io.Copy ever run, allocation stays negligible. Wall-clock timing
+// is deliberately avoided here as a flaky, environment-dependent signal.
+func TestBuildTarArchiveRejectsOversizedFileWithoutBuffering(t *testing.T) {
+	dir := t.TempDir()
+	const oversized = maxVolumeCopyBytes * 4
+
+	f, err := os.Create(filepath.Join(dir, "huge.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(oversized); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+
+	_, err = buildTarArchive(dir)
+
+	runtime.ReadMemStats(&after)
+
+	if err == nil {
+		t.Fatal("buildTarArchive over the size cap should error")
+	}
+
+	allocated := after.TotalAlloc - before.TotalAlloc
+	if allocated > maxVolumeCopyBytes {
+		t.Errorf("buildTarArchive allocated %d bytes rejecting a %d-byte oversized file — "+
+			"the pre-copy size check should reject it before ever opening/reading its contents "+
+			"(want allocation well under maxVolumeCopyBytes=%d)", allocated, oversized, maxVolumeCopyBytes)
 	}
 }
 

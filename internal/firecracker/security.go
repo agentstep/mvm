@@ -140,6 +140,9 @@ func buildTarArchive(hostDir string) ([]byte, error) {
 		if d.IsDir() {
 			return nil
 		}
+		if buf.Len()+int(fi.Size()) > maxVolumeCopyBytes {
+			return fmt.Errorf("host directory %q exceeds the %d-byte Firecracker copy-in limit (use applevz for larger shares)", hostDir, maxVolumeCopyBytes)
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			return err
