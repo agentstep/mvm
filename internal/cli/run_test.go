@@ -2,8 +2,11 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/agentstep/mvm/internal/state"
 )
 
 // === waitForReady ===
@@ -109,5 +112,21 @@ func TestResolveRunNameGeneratesWhenEmpty(t *testing.T) {
 	}
 	if !ephemeral {
 		t.Error("ephemeral = false, want true when no --name given")
+	}
+}
+
+// === existingVMNames ===
+
+func TestExistingVMNamesIncludesLocalApplevzVMs(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	store.AddVM(&state.VM{Name: "web", Backend: "applevz", Status: "running", CreatedAt: time.Now()})
+	store.AddVM(&state.VM{Name: "worker", Backend: "applevz", Status: "stopped", CreatedAt: time.Now()})
+
+	names, err := existingVMNames(store)
+	if err != nil {
+		t.Fatalf("existingVMNames: %v", err)
+	}
+	if !names["web"] || !names["worker"] {
+		t.Errorf("names = %v, want web and worker present", names)
 	}
 }

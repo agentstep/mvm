@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"time"
+
+	"github.com/agentstep/mvm/internal/state"
 )
 
 // waitForReady polls probe until it returns nil or timeout elapses,
@@ -53,4 +56,32 @@ func resolveRunName(nameFlag string, existing map[string]bool) (name string, eph
 		return nameFlag, false
 	}
 	return GenerateVMName(existing), true
+}
+
+// existingVMNames returns every VM name currently known, merging local
+// applevz state (the daemon never sees these — see list.go's
+// localApplevzVMs) with the daemon's own list of Firecracker VMs.
+// Best-effort on the daemon side: an applevz-only host with no daemon
+// running is not an error here, matching runDeleteAll's daemon-merge
+// pattern in delete.go.
+func existingVMNames(store *state.Store) (map[string]bool, error) {
+	names := map[string]bool{}
+
+	localVMs, err := localApplevzVMs(store)
+	if err != nil {
+		return nil, err
+	}
+	for _, vm := range localVMs {
+		names[vm.Name] = true
+	}
+
+	if sc, err := requireDaemon(); err == nil {
+		if vms, err := sc.ListVMs(context.Background()); err == nil {
+			for _, vm := range vms {
+				names[vm.Name] = true
+			}
+		}
+	}
+
+	return names, nil
 }
