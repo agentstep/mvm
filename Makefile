@@ -31,6 +31,16 @@ all: build agent vz menu uffd
 install: build vz
 	go install -ldflags "$(LDFLAGS)" ./cmd/mvm
 	cp bin/mvm-vz $(shell go env GOPATH)/bin/mvm-vz
+	@GOBIN="$$(go env GOPATH)/bin"; \
+	ACTIVE_MVM="$$(command -v mvm 2>/dev/null || true)"; \
+	if [ -n "$$ACTIVE_MVM" ] && [ "$$ACTIVE_MVM" != "$$GOBIN/mvm" ]; then \
+		echo ""; \
+		echo "WARNING: just installed the fresh build to $$GOBIN/mvm, but the \`mvm\`"; \
+		echo "         on your PATH resolves to $$ACTIVE_MVM instead — a DIFFERENT,"; \
+		echo "         stale binary. Your code changes will NOT take effect until you"; \
+		echo "         either put $$GOBIN first on PATH, or replace $$ACTIVE_MVM."; \
+		echo ""; \
+	fi
 
 test:
 	go test ./internal/... -v -race
