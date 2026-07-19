@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
 )
 
@@ -965,5 +966,40 @@ func TestHandleCreateVMPersistsSecretNamesOnly(t *testing.T) {
 	}
 	if vm.Spec == nil || len(vm.Spec.Secrets) != 2 {
 		t.Errorf("vm.Spec.Secrets = %v, want the same names surfaced via inspect", vm.Spec.Secrets)
+	}
+}
+
+func TestHandleImageDownload(t *testing.T) {
+	s, _ := testServer(t)
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+	if err := os.MkdirAll(firecracker.CacheDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(firecracker.CacheDir(), "my-image.ext4"), []byte("fake-ext4-bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/images/my-image/download", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	if w.Body.String() != "fake-ext4-bytes" {
+		t.Errorf("body = %q, want the image file's raw bytes", w.Body.String())
+	}
+}
+
+func TestHandleImageDownloadNotFound(t *testing.T) {
+	s, _ := testServer(t)
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+
+	req := httptest.NewRequest("GET", "/v1/images/nope/download", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
 	}
 }

@@ -1044,3 +1044,47 @@ func TestClientInspectVM(t *testing.T) {
 		t.Errorf("got.Spec = %+v, want Cpus=4", got.Spec)
 	}
 }
+
+func TestClientDownloadImage(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/images/my-image/download" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Write([]byte("fake-ext4-bytes"))
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	dest := filepath.Join(t.TempDir(), "cache", "my-image.ext4")
+	if err := c.DownloadImage(context.Background(), "my-image", dest); err != nil {
+		t.Fatalf("DownloadImage: %v", err)
+	}
+	data, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(data) != "fake-ext4-bytes" {
+		t.Errorf("downloaded content = %q, want fake-ext4-bytes", data)
+	}
+}
+
+func TestClientDownloadImageNotFoundLeavesNoPartialFile(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": `image "nope" not found`})
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	dest := filepath.Join(t.TempDir(), "nope.ext4")
+	err := c.DownloadImage(context.Background(), "nope", dest)
+	if err == nil {
+		t.Fatal("DownloadImage() = nil, want an error for a missing image")
+	}
+	if _, statErr := os.Stat(dest); statErr == nil {
+		t.Errorf("dest %s should not exist after a failed download", dest)
+	}
+}

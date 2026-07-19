@@ -872,6 +872,34 @@ func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(images)
 }
 
+// handleImageDownload streams a built custom-image file to the caller. This
+// is how a custom image built via `mvm build` — which always runs on the
+// daemon's own Linux host (firecracker.CacheDir(), never shared with macOS,
+// see the Phase 2 finding in the backend-parity plan) — reaches an applevz
+// host, which runs directly on macOS with no daemon and no shared
+// filesystem with that Linux host at all.
+func (s *Server) handleImageDownload(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	imagePath := filepath.Join(firecracker.CacheDir(), name+".ext4")
+
+	f, err := os.Open(imagePath)
+	if err != nil {
+		httpError(w, fmt.Errorf("image %q not found (expected %s)", name, imagePath), http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
+	io.Copy(w, f)
+}
+
 func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 

@@ -179,6 +179,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	register("POST", "/build", s.handleBuild)
 	register("GET", "/images", s.handleImageList)
 	register("DELETE", "/images/{name}", s.handleImageDelete)
+	register("GET", "/images/{name}/download", s.handleImageDownload)
 	return mux
 }
 

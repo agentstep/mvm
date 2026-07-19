@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -556,6 +557,44 @@ func (c *Client) ImageDelete(ctx context.Context, name string) error {
 		return fmt.Errorf("image delete failed: %s", err)
 	}
 	return nil
+}
+
+// DownloadImage streams a custom image built via mvm build down to destPath.
+// Writes to a temp file alongside destPath first and renames into place, so
+// a failed/interrupted download never leaves a half-written image where a
+// later start could pick it up.
+func (c *Client) DownloadImage(ctx context.Context, name, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/images/%s/download", name)), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("download image %q: %w", name, err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		return err
+	}
+	tmp := destPath + ".downloading"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write %s: %w", destPath, err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, destPath)
 }
 
 // PoolWarm triggers pool warming. Returns immediately; warming happens async.
