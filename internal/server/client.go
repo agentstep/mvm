@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -777,7 +778,7 @@ func (c *Client) StreamLogs(ctx context.Context, vmName string, tail int, follow
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), streamLogsMaxLine)
 	for scanner.Scan() {
 		var frame struct {
 			Type  string `json:"type"`
@@ -794,5 +795,23 @@ func (c *Client) StreamLogs(ctx context.Context, vmName string, tail int, follow
 			w.Write([]byte(frame.Data))
 		}
 	}
-	return scanner.Err()
+	return wrapScanErr(scanner.Err())
+}
+
+// streamLogsMaxLine bounds a single NDJSON frame from the boot-log endpoint.
+// When `tail` isn't set, the daemon sends the entire (never-rotated)
+// firecracker.log as one frame, so this needs real headroom — 64 MiB is a
+// reasonable ceiling for a console log.
+const streamLogsMaxLine = 64 * 1024 * 1024
+
+// wrapScanErr turns bufio.ErrTooLong into an actionable message pointing the
+// user at --tail, instead of letting the opaque bufio internal error surface.
+func wrapScanErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, bufio.ErrTooLong) {
+		return fmt.Errorf("boot log is too large to display in full (%w) — try `mvm logs --boot --tail N`", err)
+	}
+	return err
 }

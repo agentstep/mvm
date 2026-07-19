@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1126,6 +1127,49 @@ func TestClientStreamLogsQueryParams(t *testing.T) {
 	c.StreamLogs(context.Background(), "web", 50, true, &buf)
 	if !strings.Contains(gotQuery, "tail=50") || !strings.Contains(gotQuery, "follow=true") {
 		t.Errorf("query = %q, want tail=50 and follow=true", gotQuery)
+	}
+}
+
+// TestStreamLogsMaxLineConstant guards the size of the buffer StreamLogs
+// hands to bufio.Scanner. Since firecracker.log is never rotated and (absent
+// --tail) the daemon ships the whole file as a single NDJSON frame, this
+// needs real headroom — regressing it back down to the old 4 MiB default
+// would silently reintroduce the truncation bug for long-lived, chatty VMs.
+func TestStreamLogsMaxLineConstant(t *testing.T) {
+	if streamLogsMaxLine != 64*1024*1024 {
+		t.Errorf("streamLogsMaxLine = %d, want 64 MiB (%d)", streamLogsMaxLine, 64*1024*1024)
+	}
+}
+
+// TestWrapScanErrTooLong proves the graceful-error path: when the scanner
+// buffer is exceeded, wrapScanErr turns the opaque bufio.ErrTooLong into an
+// actionable message pointing the user at --tail. Exercised in isolation
+// (against the sentinel error, not an actual oversized HTTP response) so the
+// test doesn't need to allocate tens of megabytes to drive the real 64 MiB
+// buffer through the full HTTP stack.
+func TestWrapScanErrTooLong(t *testing.T) {
+	err := wrapScanErr(bufio.ErrTooLong)
+	if err == nil {
+		t.Fatal("wrapScanErr(bufio.ErrTooLong) = nil, want a wrapped error")
+	}
+	if !strings.Contains(err.Error(), "too large") || !strings.Contains(err.Error(), "--tail") {
+		t.Errorf("err = %q, want it to mention the log being too large and suggest --tail", err.Error())
+	}
+	if !errors.Is(err, bufio.ErrTooLong) {
+		t.Errorf("wrapScanErr(bufio.ErrTooLong) should still unwrap to bufio.ErrTooLong via errors.Is")
+	}
+}
+
+// TestWrapScanErrOtherErrorsPassThrough ensures wrapScanErr doesn't mangle
+// unrelated scan errors (e.g. a network read failure) — only ErrTooLong gets
+// the friendlier message.
+func TestWrapScanErrOtherErrorsPassThrough(t *testing.T) {
+	sentinel := errors.New("boom")
+	if err := wrapScanErr(sentinel); err != sentinel {
+		t.Errorf("wrapScanErr(sentinel) = %v, want the original error unchanged", err)
+	}
+	if wrapScanErr(nil) != nil {
+		t.Error("wrapScanErr(nil) should return nil")
 	}
 }
 
