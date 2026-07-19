@@ -850,7 +850,7 @@ func TestInspectResponseFromVM(t *testing.T) {
 		Backend:   "applevz",
 		Ports:     []state.PortMap{{HostPort: 3000, GuestPort: 3000, Proto: "tcp"}},
 		CreatedAt: now,
-		Spec:      &state.VMSpec{Cpus: 4, NetPolicy: "deny"},
+		Spec:      &state.VMSpec{Cpus: 4, NetPolicy: "deny", Volumes: []string{"/host:/guest"}},
 		// internal runtime fields that must NOT leak into inspect output:
 		SocketPath: "/run/mvm/web.sock",
 		TAPIP:      "172.16.0.1",
@@ -863,6 +863,9 @@ func TestInspectResponseFromVM(t *testing.T) {
 	}
 	if resp.Spec == nil || resp.Spec.Cpus != 4 {
 		t.Errorf("resp.Spec = %+v, want the VM's spec", resp.Spec)
+	}
+	if len(resp.Spec.Volumes) != 1 || resp.Spec.Volumes[0] != "/host:/guest" {
+		t.Errorf("resp.Spec.Volumes = %v, want [/host:/guest]", resp.Spec.Volumes)
 	}
 
 	data, _ := json.Marshal(resp)
