@@ -751,3 +751,48 @@ type readWriter struct {
 	io.Reader
 	io.Writer
 }
+
+// StreamLogs fetches a VM's boot log from the daemon and writes it to w. If
+// follow is true, it keeps streaming appended data until the daemon closes
+// the connection or ctx is canceled (mirrors `docker logs -f`).
+func (c *Client) StreamLogs(ctx context.Context, vmName string, tail int, follow bool, w io.Writer) error {
+	q := "?boot=true"
+	if tail > 0 {
+		q += fmt.Sprintf("&tail=%d", tail)
+	}
+	if follow {
+		q += "&follow=true"
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/vms/%s/logs%s", vmName, q)), nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return fmt.Errorf("logs: %w", err)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var frame struct {
+			Type  string `json:"type"`
+			Data  string `json:"data"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &frame) != nil {
+			continue
+		}
+		if frame.Error != "" {
+			return fmt.Errorf("%s", frame.Error)
+		}
+		if frame.Type == "data" {
+			w.Write([]byte(frame.Data))
+		}
+	}
+	return scanner.Err()
+}

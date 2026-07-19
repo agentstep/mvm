@@ -1088,3 +1088,61 @@ func TestClientDownloadImageNotFoundLeavesNoPartialFile(t *testing.T) {
 		t.Errorf("dest %s should not exist after a failed download", dest)
 	}
 }
+
+func TestClientStreamLogsNonFollow(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("boot") != "true" {
+			t.Errorf("query = %s, want boot=true", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		frame, _ := json.Marshal(map[string]string{"type": "data", "data": "hello boot log\n"})
+		w.Write(frame)
+		w.Write([]byte("\n"))
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	var buf bytes.Buffer
+	if err := c.StreamLogs(context.Background(), "web", 0, false, &buf); err != nil {
+		t.Fatalf("StreamLogs: %v", err)
+	}
+	if buf.String() != "hello boot log\n" {
+		t.Errorf("buf = %q, want %q", buf.String(), "hello boot log\n")
+	}
+}
+
+func TestClientStreamLogsQueryParams(t *testing.T) {
+	var gotQuery string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/x-ndjson")
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	var buf bytes.Buffer
+	c.StreamLogs(context.Background(), "web", 50, true, &buf)
+	if !strings.Contains(gotQuery, "tail=50") || !strings.Contains(gotQuery, "follow=true") {
+		t.Errorf("query = %q, want tail=50 and follow=true", gotQuery)
+	}
+}
+
+func TestClientStreamLogsPropagatesErrorFrame(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		frame, _ := json.Marshal(map[string]string{"type": "error", "error": "boom"})
+		w.Write(frame)
+		w.Write([]byte("\n"))
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+
+	c := NewRemoteClient(ts.URL, "", "")
+	var buf bytes.Buffer
+	err := c.StreamLogs(context.Background(), "web", 0, false, &buf)
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("err = %v, want it to surface the error frame", err)
+	}
+}
