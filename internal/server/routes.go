@@ -260,7 +260,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 			log.Printf("VM %s: network policy setup failed: %v", req.Name, err)
 		}
 		if len(req.Volumes) > 0 {
-			if err := firecracker.SetupVolumeMounts(s.executor, postVM, req.Volumes); err != nil {
+			if err := firecracker.SetupVolumeMounts(postVM, req.Volumes); err != nil {
 				log.Printf("VM %s: volume mount setup failed: %v", req.Name, err)
 			}
 		}

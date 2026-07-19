@@ -1,9 +1,13 @@
 package firecracker
 
 import (
+	"archive/tar"
+	"bytes"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/agentstep/mvm/internal/state"
 )
@@ -93,23 +97,6 @@ func TestApplyNetworkPolicyUnknown(t *testing.T) {
 	_ = "allow:github.com"
 	// The function would return an error for unknown policies
 	// This is tested indirectly through the existence check
-}
-
-// === NEW TEST: Volume mount format validation ===
-
-func TestSetupVolumeMountsFormatValidation(t *testing.T) {
-	// Verify the function requires "hostPath:guestPath" format
-	// Can't test without Lima but validate the expected format
-	validFormats := []string{
-		"/home/user/code:/workspace",
-		"/tmp/data:/data",
-	}
-	invalidFormats := []string{
-		"/just/one/path",
-		"nocolon",
-	}
-	_ = validFormats
-	_ = invalidFormats
 }
 
 // === NEW TEST: shellQuoteForSSH edge cases ===
@@ -204,37 +191,93 @@ func TestSeccompProfilesAreValidShellSyntax(t *testing.T) {
 	}
 }
 
-// === NEW TEST: SetupVolumeMounts validates format ===
+// === buildTarArchive ===
+
+func TestBuildTarArchiveIncludesNestedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "top.txt"), []byte("top-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "nested.txt"), []byte("nested-content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := buildTarArchive(dir)
+	if err != nil {
+		t.Fatalf("buildTarArchive: %v", err)
+	}
+
+	found := map[string]string{}
+	tr := tar.NewReader(bytes.NewReader(data))
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read tar: %v", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		content, _ := io.ReadAll(tr)
+		found[hdr.Name] = string(content)
+	}
+
+	if found["top.txt"] != "top-content" {
+		t.Errorf("top.txt = %q, want top-content", found["top.txt"])
+	}
+	if found[filepath.Join("sub", "nested.txt")] != "nested-content" {
+		t.Errorf("sub/nested.txt = %q, want nested-content", found[filepath.Join("sub", "nested.txt")])
+	}
+}
+
+func TestBuildTarArchiveMissingDir(t *testing.T) {
+	_, err := buildTarArchive(filepath.Join(t.TempDir(), "does-not-exist"))
+	if err == nil {
+		t.Error("buildTarArchive on a missing dir should error")
+	}
+}
+
+func TestBuildTarArchiveTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	big := make([]byte, maxVolumeCopyBytes+1)
+	if err := os.WriteFile(filepath.Join(dir, "big.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildTarArchive(dir)
+	if err == nil {
+		t.Error("buildTarArchive over the size cap should error")
+	}
+}
+
+// === SetupVolumeMounts: format validation still happens before any I/O ===
 
 func TestSetupVolumeMountsInvalidFormat(t *testing.T) {
-	ex := &mockTestExecutor{}
-	vm := &state.VM{GuestIP: "172.16.0.2"}
-
-	err := SetupVolumeMounts(ex, vm, []string{"/just/one/path"})
+	vm := &state.VM{Name: "doesnotexist"}
+	err := SetupVolumeMounts(vm, []string{"/just/one/path"})
 	if err == nil {
 		t.Error("should error on invalid volume format (missing colon)")
 	}
 }
 
 func TestSetupVolumeMountsEmptyList(t *testing.T) {
-	ex := &mockTestExecutor{}
-	vm := &state.VM{GuestIP: "172.16.0.2"}
-
-	err := SetupVolumeMounts(ex, vm, nil)
-	if err != nil {
+	vm := &state.VM{Name: "doesnotexist"}
+	if err := SetupVolumeMounts(vm, nil); err != nil {
 		t.Errorf("empty volume list should not error: %v", err)
 	}
-
-	err = SetupVolumeMounts(ex, vm, []string{})
-	if err != nil {
+	if err := SetupVolumeMounts(vm, []string{}); err != nil {
 		t.Errorf("empty volume slice should not error: %v", err)
 	}
 }
 
-// mockTestExecutor for security tests
-type mockTestExecutor struct{}
-
-func (m *mockTestExecutor) Run(command string) (string, error)                         { return "", nil }
-func (m *mockTestExecutor) RunWithTimeout(command string, timeout time.Duration) (string, error) {
-	return "", nil
+func TestSetupVolumeMountsMissingHostDir(t *testing.T) {
+	vm := &state.VM{Name: "doesnotexist"}
+	err := SetupVolumeMounts(vm, []string{"/definitely/does/not/exist:/data"})
+	if err == nil {
+		t.Error("should error when the host directory doesn't exist, before ever dialing the guest")
+	}
 }
