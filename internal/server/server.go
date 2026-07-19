@@ -162,6 +162,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	}
 	register("GET", "/health", s.handleHealth)
 	register("GET", "/vms", s.handleListVMs)
+	register("GET", "/vms/stats", s.handleStatsVMs)
 	register("GET", "/vms/{name}", s.handleInspectVM)
 	register("POST", "/vms", s.handleCreateVM)
 	register("POST", "/vms/{name}/exec", s.handleExec)

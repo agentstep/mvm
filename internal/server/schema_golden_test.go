@@ -79,3 +79,19 @@ func TestVMInspectResponseSchemaGolden(t *testing.T) {
 		t.Errorf("VMSpec keys = %v, want %v", got, specWant)
 	}
 }
+
+func TestVMStatsSchemaGolden(t *testing.T) {
+	full := VMStats{
+		Name:    "vm",
+		Backend: "firecracker",
+		PID:     1,
+		CPUPct:  1.5,
+		MemMB:   256,
+		Status:  "running",
+		Error:   "e",
+	}
+	want := []string{"backend", "cpu_pct", "error", "mem_mb", "name", "pid", "status"}
+	if got := jsonKeys(t, full); !reflect.DeepEqual(got, want) {
+		t.Errorf("VMStats keys = %v, want %v (additive-only: update want when adding; never remove/rename)", got, want)
+	}
+}

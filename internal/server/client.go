@@ -317,6 +317,27 @@ func (c *Client) ListVMs(ctx context.Context) ([]VMResponse, error) {
 	return result, nil
 }
 
+// StatsVMs returns point-in-time CPU/memory stats for every Firecracker VM
+// the daemon manages (v1: no streaming).
+func (c *Client) StatsVMs(ctx context.Context) ([]VMStats, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/vms/stats"), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+
+	var result []VMStats
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // InspectVM returns full details for one VM, including its declarative spec.
 // New method, so it targets the versioned /v1 surface directly.
 func (c *Client) InspectVM(ctx context.Context, name string) (*VMInspectResponse, error) {

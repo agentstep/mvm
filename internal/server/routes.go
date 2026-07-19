@@ -69,6 +69,21 @@ type VMResponse struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+// VMStats is a point-in-time resource-usage snapshot for one VM (v1: no
+// streaming — see handleStatsVMs). Backend split mirrors VMResponse: the
+// daemon only ever reports Firecracker VMs (Error is set, not omitted-and-
+// silent, when a running VM's stats couldn't be read, e.g. between "marked
+// running" and the process actually being observable).
+type VMStats struct {
+	Name    string  `json:"name"`
+	Backend string  `json:"backend,omitempty"`
+	PID     int     `json:"pid,omitempty"`
+	CPUPct  float64 `json:"cpu_pct"`
+	MemMB   float64 `json:"mem_mb"`
+	Status  string  `json:"status"`
+	Error   string  `json:"error,omitempty"`
+}
+
 // VMInspectResponse is VMResponse plus the persisted declarative spec.
 type VMInspectResponse struct {
 	VMResponse
@@ -152,6 +167,40 @@ func (s *Server) handleListVMs(w http.ResponseWriter, r *http.Request) {
 			Ports:     vm.Ports,
 			CreatedAt: vm.CreatedAt,
 		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleStatsVMs reports point-in-time CPU/memory for every Firecracker VM
+// the daemon knows about. applevz VMs are never included here — the daemon
+// has never heard of them (same split as handleListVMs's CLI-side caller,
+// internal/cli/list.go's localApplevzVMs); the CLI's own mvm stats command
+// merges those in separately via a direct host-local ps call, since the
+// applevz mvm-vz helper's PID lives on the macOS host, not inside Lima.
+func (s *Server) handleStatsVMs(w http.ResponseWriter, r *http.Request) {
+	vms, err := s.store.ListVMs()
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	result := make([]VMStats, 0, len(vms))
+	for _, vm := range vms {
+		if vm.Backend == "applevz" {
+			continue
+		}
+		st := VMStats{Name: vm.Name, Backend: vm.Backend, PID: vm.PID, Status: vm.Status}
+		if vm.Status == "running" && vm.PID > 0 {
+			cpu, memMB, err := firecracker.ProcessStats(s.executor, vm.PID)
+			if err != nil {
+				st.Error = err.Error()
+			} else {
+				st.CPUPct, st.MemMB = cpu, memMB
+			}
+		}
+		result = append(result, st)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
