@@ -28,7 +28,7 @@ func newVMCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 		newResumeCmd(store),
 		newSSHCmd(store),
 		newExecCmd(store),
-		newLogsCmd(limaClient, store),
+		newLogsCmd(store),
 		newListCmd(store),
 		newInspectCmd(store),
 		newDeleteCmd(store),

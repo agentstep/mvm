@@ -1,18 +1,18 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 
-	"github.com/agentstep/mvm/internal/firecracker"
-	"github.com/agentstep/mvm/internal/lima"
+	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 	"github.com/spf13/cobra"
 )
 
-func newLogsCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
+func newLogsCmd(store *state.Store) *cobra.Command {
 	var (
 		follow bool
 		boot   bool
@@ -31,7 +31,7 @@ func newLogsCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
   mvm logs my-vm -n 50        # last 50 lines`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLogs(limaClient, store, args[0], follow, boot, tail)
+			return runLogs(store, args[0], follow, boot, tail)
 		},
 	}
 
@@ -42,7 +42,7 @@ func newLogsCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
 	return cmd
 }
 
-func runLogs(limaClient *lima.Client, store *state.Store, name string, follow, boot bool, tail int) error {
+func runLogs(store *state.Store, name string, follow, boot bool, tail int) error {
 	vm, err := store.GetVM(name)
 	if err != nil {
 		return err
@@ -52,7 +52,11 @@ func runLogs(limaClient *lima.Client, store *state.Store, name string, follow, b
 		if vm.Backend == "applevz" {
 			return showLocalLog(filepath.Join(mvmDir, "vms", vm.Name, "console.log"), follow, tail)
 		}
-		return showBootLog(limaClient, vm, follow, tail)
+		sc, err := requireDaemon()
+		if err != nil {
+			return err
+		}
+		return showBootLog(sc, vm, follow, tail)
 	}
 
 	// Guest journal — run via exec (agent), not SSH
@@ -79,34 +83,12 @@ func runLogs(limaClient *lima.Client, store *state.Store, name string, follow, b
 	return runExec(store, name, []string{"sh", "-c", logCmd}, false, false, "", nil, "")
 }
 
-func showBootLog(limaClient *lima.Client, vm *state.VM, follow bool, tail int) error {
-	if err := limaClient.EnsureRunning(); err != nil {
-		return err
-	}
-
-	logPath := filepath.Join(firecracker.VMDir(vm.Name), "firecracker.log")
-
-	var cmd string
-	if follow {
-		if tail > 0 {
-			cmd = fmt.Sprintf("sudo tail -n %d -f %s", tail, logPath)
-		} else {
-			cmd = fmt.Sprintf("sudo tail -f %s", logPath)
-		}
-		return limaClient.ShellInteractive(cmd)
-	}
-
-	if tail > 0 {
-		cmd = fmt.Sprintf("sudo tail -n %d %s", tail, logPath)
-	} else {
-		cmd = fmt.Sprintf("sudo cat %s", logPath)
-	}
-	out, err := limaClient.ShellWithTimeout(cmd, lima.LongTimeout)
-	if err != nil {
-		return fmt.Errorf("read boot log: %w", err)
-	}
-	fmt.Print(out)
-	return nil
+// showBootLog streams a Firecracker VM's boot/console log from the daemon
+// (GET /vms/{name}/logs?boot=true — internal/server/routes.go's
+// handleVMLogs). The daemon runs on the same Linux host as the log file, so
+// this is a plain HTTP round trip; no Lima shell-out needed.
+func showBootLog(sc *server.Client, vm *state.VM, follow bool, tail int) error {
+	return sc.StreamLogs(context.Background(), vm.Name, tail, follow, os.Stdout)
 }
 
 func showLocalLog(logPath string, follow bool, tail int) error {

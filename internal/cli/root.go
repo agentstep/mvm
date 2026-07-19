@@ -68,7 +68,7 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newResumeCmd(store),
 		newSSHCmd(store),
 		newExecCmd(store),
-		newLogsCmd(limaClient, store),
+		newLogsCmd(store),
 		newListCmd(store),
 		newStatsCmd(store),
 		newInspectCmd(store),
