@@ -153,7 +153,7 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 	// rather than silently booting the default rootfs for a request that
 	// named something else.
 	if resolvedImage != "" && store.GetBackend() == "applevz" {
-		return fmt.Errorf("mvm run --image is not supported on the Apple VZ backend yet (only the default image); got %q", image)
+		return fmt.Errorf("custom images are not supported on the Apple VZ backend yet (only the default \"base\" image); got %q", image)
 	}
 
 	existing, err := existingVMNames(store)
