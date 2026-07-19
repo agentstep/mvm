@@ -321,11 +321,37 @@ func (s *Store) MarkInitialized(fcVersion, backend string) error {
 	})
 }
 
-// GetBackend returns the configured backend ("firecracker" or "applevz").
+// GetBackend returns the configured backend ("firecracker" or "applevz"),
+// defaulting to "firecracker" both when unset AND when the state file
+// fails to load (e.g. a transient I/O error). Safe for call sites where a
+// wrong guess has no real consequence — a self-healing periodic check
+// (idle.go), a dev-only harness gate (bench.go), or a diagnostic printout
+// (doctor.go). For any call site that gates a decision with real
+// consequences — skipping a validation, or dispatching to a different
+// code path entirely — use GetBackendE instead, so a load error surfaces
+// rather than silently resolving to "firecracker". See
+// internal/cli/run.go's applevz custom-image guard for the migrated
+// example, and this file's package-level notes in the hardening plan
+// (docs/superpowers/plans/2026-07-19-hardening-polish.md) for why the
+// other GetBackend() call sites were deliberately left as-is.
 func (s *Store) GetBackend() string {
-	st, err := s.Load()
-	if err != nil || st.Backend == "" {
+	backend, err := s.GetBackendE()
+	if err != nil {
 		return "firecracker" // default
 	}
-	return st.Backend
+	return backend
+}
+
+// GetBackendE is GetBackend's error-returning counterpart: it returns the
+// configured backend, or propagates the underlying Load error instead of
+// papering over it with the "firecracker" default.
+func (s *Store) GetBackendE() (string, error) {
+	st, err := s.Load()
+	if err != nil {
+		return "", err
+	}
+	if st.Backend == "" {
+		return "firecracker", nil
+	}
+	return st.Backend, nil
 }

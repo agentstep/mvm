@@ -412,6 +412,56 @@ func TestGetBackendSet(t *testing.T) {
 	}
 }
 
+func TestGetBackendEDefault(t *testing.T) {
+	s := tempStore(t)
+	s.Save(newState())
+
+	b, err := s.GetBackendE()
+	if err != nil {
+		t.Fatalf("GetBackendE: %v", err)
+	}
+	if b != "firecracker" {
+		t.Errorf("default backend = %q, want firecracker", b)
+	}
+}
+
+func TestGetBackendESet(t *testing.T) {
+	s := tempStore(t)
+	s.MarkInitialized("v1.13.0", "applevz")
+
+	b, err := s.GetBackendE()
+	if err != nil {
+		t.Fatalf("GetBackendE: %v", err)
+	}
+	if b != "applevz" {
+		t.Errorf("backend = %q, want applevz", b)
+	}
+}
+
+func TestGetBackendEPropagatesLoadError(t *testing.T) {
+	s := tempStore(t)
+	if err := os.WriteFile(s.Path(), []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	_, err := s.GetBackendE()
+	if err == nil {
+		t.Fatal("GetBackendE() = nil error, want the underlying Load error surfaced")
+	}
+}
+
+func TestGetBackendStillDefaultsOnLoadError(t *testing.T) {
+	s := tempStore(t)
+	if err := os.WriteFile(s.Path(), []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	b := s.GetBackend()
+	if b != "firecracker" {
+		t.Errorf("GetBackend() = %q, want firecracker default even on a load error (documented behavior for low-stakes call sites)", b)
+	}
+}
+
 func TestMarkInitializedWithBackend(t *testing.T) {
 	s := tempStore(t)
 	s.MarkInitialized("v1.13.0", "firecracker")

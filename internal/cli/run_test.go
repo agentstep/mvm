@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -140,5 +141,19 @@ func TestRunRunRejectsCustomImageOnAppleVZ(t *testing.T) {
 	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "")
 	if err == nil {
 		t.Fatal("runRun() = nil, want an error for a non-base image on applevz")
+	}
+}
+
+// === runRun: backend-load-error must surface, not silently default ===
+
+func TestRunRunSurfacesBackendLoadError(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err := os.WriteFile(store.Path(), []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+
+	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "")
+	if err == nil {
+		t.Fatal("runRun() = nil, want the corrupt-state load error surfaced (not silently defaulting to firecracker and booting the wrong rootfs)")
 	}
 }

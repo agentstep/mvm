@@ -161,9 +161,19 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 	// runStartAppleVZ doesn't accept an image parameter at all today — a
 	// pre-existing gap in `mvm start --image` on applevz. Fail clearly here
 	// rather than silently booting the default rootfs for a request that
-	// named something else.
-	if resolvedImage != "" && store.GetBackend() == "applevz" {
-		return fmt.Errorf("custom images are not supported on the Apple VZ backend yet (only the default \"base\" image); got %q", image)
+	// named something else. A backend-load error must surface here rather
+	// than default-guessing "firecracker" (GetBackend's behavior): guessing
+	// wrong would skip this guard entirely and let a custom-image request
+	// silently boot the default rootfs on applevz instead. Hence
+	// GetBackendE, not GetBackend — see store.go's GetBackend doc comment.
+	if resolvedImage != "" {
+		backend, err := store.GetBackendE()
+		if err != nil {
+			return fmt.Errorf("read backend: %w", err)
+		}
+		if backend == "applevz" {
+			return fmt.Errorf("custom images are not supported on the Apple VZ backend yet (only the default \"base\" image); got %q", image)
+		}
 	}
 
 	existing, err := existingVMNames(store)
