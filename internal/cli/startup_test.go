@@ -63,6 +63,23 @@ func TestRunStartupRecipeFailsFastOnNonZeroExit(t *testing.T) {
 	}
 }
 
+func TestRunStartupRecipeGitCloneFailureIncludesOutput(t *testing.T) {
+	agent := &fakeRecipeAgent{execFn: func(command string) (string, int, error) {
+		if strings.Contains(command, "git clone") {
+			return "fatal: repository not found", 128, nil
+		}
+		return "", 0, nil
+	}}
+	spec := &StartupSpec{Git: &GitSpec{URL: "https://example.com/nope.git"}}
+	err := runStartupRecipe(context.Background(), agent, spec, newPhaseTimer(), func(string, ...any) {})
+	if err == nil {
+		t.Fatal("runStartupRecipe() = nil, want an error from the failing git clone")
+	}
+	if !strings.Contains(err.Error(), "repository not found") {
+		t.Errorf("error = %q, want the git clone's captured output included", err)
+	}
+}
+
 func TestRecipeAgentAdaptersSatisfyInterface(t *testing.T) {
 	var _ recipeAgent = applevzRecipeAgent{}
 	var _ recipeAgent = daemonRecipeAgent{}

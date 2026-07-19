@@ -125,10 +125,10 @@ func runStartupRecipe(ctx context.Context, agent recipeAgent, spec *StartupSpec,
 			branch = "--branch " + shellQuote(spec.Git.Ref) + " "
 		}
 		clone := fmt.Sprintf("git clone --depth 1 %s%s %s", branch, shellQuote(spec.Git.URL), wd)
-		if _, exitCode, err := agent.Exec(ctx, clone, ""); err != nil {
+		if output, exitCode, err := agent.Exec(ctx, clone, ""); err != nil {
 			return fmt.Errorf("git clone: %w", err)
 		} else if exitCode != 0 {
-			return fmt.Errorf("git clone failed (exit %d)", exitCode)
+			return fmt.Errorf("git clone failed (exit %d): %s", exitCode, strings.TrimSpace(output))
 		}
 		timer.mark("startup_git")
 	}
