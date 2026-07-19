@@ -33,6 +33,7 @@ type VM struct {
 	CreatedAt    time.Time      `json:"created_at"`
 	StoppedAt    *time.Time     `json:"stopped_at,omitempty"`
 	ForwarderPID int            `json:"forwarder_pid,omitempty"` // applevz: PID of the detached -p port-forwarder process, 0 if none
+	Spec         *VMSpec        `json:"spec,omitempty"` // declarative create request, returned by inspect
 }
 
 // PortMap represents a host:guest port forwarding rule.
