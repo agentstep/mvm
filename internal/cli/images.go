@@ -11,7 +11,7 @@ func newImagesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "images",
 		Short:   "Manage custom rootfs images",
-		Aliases: []string{"image"},
+		Aliases: []string{"image", "i"},
 	}
 
 	cmd.AddCommand(
