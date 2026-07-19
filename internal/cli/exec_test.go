@@ -1,8 +1,17 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/agentstep/mvm/internal/server"
+	"github.com/agentstep/mvm/internal/state"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -165,5 +174,92 @@ func TestValidateExecFlagsAllowsDetachAlone(t *testing.T) {
 func TestValidateExecFlagsAllowsInteractiveWithoutDetach(t *testing.T) {
 	if err := validateExecFlags(false, true, true); err != nil {
 		t.Errorf("validateExecFlags(false, true, true) = %v, want nil", err)
+	}
+}
+
+// === daemonSecretEnv ===
+
+func TestDaemonSecretEnvUsesLocalStoreWhenAvailable(t *testing.T) {
+	// withTestMvmDir points the package-level mvmDir (which secretEnvVars'
+	// secretStore() reads) at a scratch dir so the underlying secrets.Store
+	// can actually create its key file — otherwise Get() would fail with a
+	// mkdir error instead of the "not found" this test is asserting on.
+	dir := withTestMvmDir(t)
+	store := state.NewStore(filepath.Join(dir, "state.json"))
+	store.AddVM(&state.VM{Name: "web", Backend: "firecracker", Secrets: []string{"MISSING_SECRET"}, CreatedAt: time.Now()})
+
+	// Point sc at a socket that doesn't exist — if this test passes,
+	// daemonSecretEnv resolved secrets from the local store and never
+	// dialed sc at all.
+	sc := server.NewClient(filepath.Join(dir, "no-such.sock"))
+
+	_, err := daemonSecretEnv(context.Background(), store, sc, "web")
+	// secretEnvVars fails because MISSING_SECRET was never `mvm secret put`
+	// in this test — the ONLY way this can fail here is via the local-store
+	// path; an InspectVM round trip against a nonexistent socket would fail
+	// with a dial/connection error instead, not "not found".
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("err = %v, want a secret-not-found error from the local-store path", err)
+	}
+}
+
+func TestDaemonSecretEnvUsesLocalStoreEvenWithNoSecrets(t *testing.T) {
+	dir := t.TempDir()
+	store := state.NewStore(filepath.Join(dir, "state.json"))
+	store.AddVM(&state.VM{Name: "web", Backend: "firecracker", CreatedAt: time.Now()})
+	sc := server.NewClient(filepath.Join(dir, "no-such.sock")) // unreachable — proves no round trip happened
+
+	env, err := daemonSecretEnv(context.Background(), store, sc, "web")
+	if err != nil {
+		t.Fatalf("daemonSecretEnv: %v", err)
+	}
+	if env != nil {
+		t.Errorf("env = %v, want nil (no secrets attached, no daemon round trip needed)", env)
+	}
+}
+
+func TestDaemonSecretEnvFallsBackToInspectVM(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.VMInspectResponse{
+			VMResponse: server.VMResponse{Name: "web"},
+			Spec:       &state.VMSpec{Secrets: []string{"MISSING_SECRET"}},
+		})
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+	sc := server.NewRemoteClient(ts.URL, "", "")
+
+	// Same reasoning as the local-store test above: point mvmDir at a
+	// scratch dir so secretEnvVars' underlying secrets.Store can create its
+	// key file and return a genuine "not found" rather than a mkdir error.
+	dir := withTestMvmDir(t)
+
+	// Empty store — this VM is unknown locally, the way a cloud/remote VM
+	// always is (no shared filesystem with a genuinely remote daemon host).
+	store := state.NewStore(filepath.Join(dir, "state.json"))
+
+	_, err := daemonSecretEnv(context.Background(), store, sc, "web")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("err = %v, want the InspectVM fallback to still surface a secret-not-found error", err)
+	}
+}
+
+func TestDaemonSecretEnvNoSecretsViaInspectVM(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.VMInspectResponse{VMResponse: server.VMResponse{Name: "web"}})
+	})
+	ts := httptest.NewServer(handler)
+	defer ts.Close()
+	sc := server.NewRemoteClient(ts.URL, "", "")
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+
+	env, err := daemonSecretEnv(context.Background(), store, sc, "web")
+	if err != nil {
+		t.Fatalf("daemonSecretEnv: %v", err)
+	}
+	if env != nil {
+		t.Errorf("env = %v, want nil for a VM with no secrets attached", env)
 	}
 }

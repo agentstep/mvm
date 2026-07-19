@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
@@ -64,6 +65,26 @@ func newExecCmd(store *state.Store) *cobra.Command {
 	return cmd
 }
 
+// daemonSecretEnv resolves the VM's attached secret NAMES and decrypts them
+// from host memory, returning KEY=VALUE entries for buildExecScript — the
+// daemon-path equivalent of the inline block in runExecAppleVZ below. Local
+// mode resolves for free from the shared state store (see the Task 2 doc
+// comment in the backend-parity plan); cloud/remote mode falls back to
+// asking the daemon for the names via InspectVM (never values).
+func daemonSecretEnv(ctx context.Context, store *state.Store, sc *server.Client, name string) ([]string, error) {
+	if vm, err := store.GetVM(name); err == nil && vm != nil {
+		return secretEnvVars(vm.Secrets)
+	}
+	info, err := sc.InspectVM(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("look up secrets for %q: %w", name, err)
+	}
+	if info.Spec == nil || len(info.Spec.Secrets) == 0 {
+		return nil, nil
+	}
+	return secretEnvVars(info.Spec.Secrets)
+}
+
 func runExec(store *state.Store, name string, remoteArgs []string, interactive, detach bool, workdir string, envVars []string, user string) error {
 	// Apple VZ VMs aren't managed by the daemon — exec directly against the
 	// per-VM mvm-vz helper's vsock-bridged agent.
@@ -75,6 +96,18 @@ func runExec(store *state.Store, name string, remoteArgs []string, interactive, 
 	if err != nil {
 		return err
 	}
+
+	// Inject the VM's attached secrets, decrypted from host memory at call
+	// time — mirrors runExecAppleVZ above. Only secret NAMES ever left this
+	// process to reach the daemon (at `mvm start --secret`); values are
+	// decrypted here and never travel further than the exec script sent to
+	// the daemon. Placed before the detach/foreground split below so both
+	// paths see the augmented envVars.
+	secretEnv, err := daemonSecretEnv(context.Background(), store, sc, name)
+	if err != nil {
+		return err
+	}
+	envVars = append(envVars, secretEnv...)
 
 	if detach {
 		script := buildDetachedExecScript(remoteArgs, workdir, envVars, user)
