@@ -214,3 +214,21 @@ func TestResolveApplevzKernelFallsBackWhenCustomKernelMissing(t *testing.T) {
 		t.Errorf("warning = %q, want it to mention the missing custom kernel path", warning)
 	}
 }
+
+// === validateStartRM ===
+
+func TestValidateStartRMRejectsFlag(t *testing.T) {
+	err := validateStartRM(true)
+	if err == nil {
+		t.Fatal("validateStartRM(true) = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "mvm run") {
+		t.Errorf("error should point at mvm run, got: %v", err)
+	}
+}
+
+func TestValidateStartRMAllowsDefault(t *testing.T) {
+	if err := validateStartRM(false); err != nil {
+		t.Errorf("validateStartRM(false) = %v, want nil", err)
+	}
+}

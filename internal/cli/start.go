@@ -32,6 +32,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 		jsonOut   bool
 		startup   string
 		secretsF  []string
+		rm        bool
 	)
 
 	cmd := &cobra.Command{
@@ -51,6 +52,9 @@ func newStartCmd(store *state.Store) *cobra.Command {
   mvm start my-app --image my-image       # use custom rootfs`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateStartRM(rm); err != nil {
+				return err
+			}
 			portMaps, err := parsePorts(ports)
 			if err != nil {
 				return err
@@ -82,6 +86,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 	cmd.Flags().IntVar(&cpus, "cpus", 0, "vCPU count (default: 2)")
 	cmd.Flags().IntVar(&memoryMB, "memory", 0, "RAM in MiB (default: 1024)")
 	cmd.Flags().StringVar(&image, "image", "", "custom rootfs image name (built with mvm build)")
+	cmd.Flags().BoolVar(&rm, "rm", false, "not supported on start — use mvm run instead")
 
 	return cmd
 }
@@ -148,6 +153,21 @@ func parseVolumes(volumes []string) ([]string, error) {
 		result = append(result, hostPath+":"+guestPath)
 	}
 	return result, nil
+}
+
+// validateStartRM rejects --rm on `mvm start`. start has no foreground
+// lifetime to key cleanup on (it returns right after boot, with no
+// "the command that was running" to wait for) — silently reinterpreting
+// --rm as "delete on `mvm stop`" would bolt an undocumented lifecycle rule
+// onto a command whose whole contract is idempotent, durable upsert (see
+// the design spec's decision #5: "start is upsert, forever"). mvm run
+// already has the correct ephemeral-unless---name semantics, so this
+// points there instead of inventing a second meaning for --rm.
+func validateStartRM(rm bool) error {
+	if rm {
+		return fmt.Errorf("mvm start does not support --rm: start has no foreground command to key cleanup on. Use `mvm run <image>` instead — it deletes the VM automatically unless you pass --name")
+	}
+	return nil
 }
 
 func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec, secretNames []string) error {
