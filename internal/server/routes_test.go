@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -929,5 +930,40 @@ func TestCreateThenInspectRoundTrip(t *testing.T) {
 	}
 	if len(resp.Spec.Ports) != 1 || resp.Spec.Ports[0].HostPort != 8080 {
 		t.Errorf("resp.Spec.Ports = %+v, want the create request's ports", resp.Spec.Ports)
+	}
+}
+
+func TestHandleCreateVMPersistsSecretNamesOnly(t *testing.T) {
+	s, store := testServer(t)
+
+	body, _ := json.Marshal(CreateVMRequest{
+		Name:    "web",
+		Secrets: []string{"OPENAI_API_KEY", "DB_PASSWORD"},
+	})
+	req := httptest.NewRequest("POST", "/vms", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body: %s", w.Code, w.Body.String())
+	}
+	// The response body must never carry secret values — only names ever
+	// reach the daemon in the first place (the security invariant this
+	// whole phase exists to uphold), but assert the wire shape directly too:
+	// a name showing up in a response is one accidental rename away from a
+	// value showing up there.
+	if strings.Contains(w.Body.String(), "OPENAI_API_KEY") {
+		t.Errorf("response body echoes a secret name back over the wire: %s", w.Body.String())
+	}
+
+	vm, err := store.GetVM("web")
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if len(vm.Secrets) != 2 || vm.Secrets[0] != "OPENAI_API_KEY" || vm.Secrets[1] != "DB_PASSWORD" {
+		t.Errorf("vm.Secrets = %v, want [OPENAI_API_KEY DB_PASSWORD] persisted from the request", vm.Secrets)
+	}
+	if vm.Spec == nil || len(vm.Spec.Secrets) != 2 {
+		t.Errorf("vm.Spec.Secrets = %v, want the same names surfaced via inspect", vm.Spec.Secrets)
 	}
 }

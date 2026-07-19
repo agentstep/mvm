@@ -30,6 +30,9 @@ type CreateVMRequest struct {
 	Volumes   []string        `json:"volumes,omitempty"`
 	Seccomp   string          `json:"seccomp,omitempty"`
 	Image     string          `json:"image,omitempty"`
+	// Secrets holds attached secret NAMES ONLY — never values. See the
+	// package-level security invariant in this plan's Global Constraints.
+	Secrets []string `json:"secrets,omitempty"`
 }
 
 // BuildRequest is the body for POST /build.
@@ -121,6 +124,7 @@ func specFromCreateRequest(req CreateVMRequest) *state.VMSpec {
 		Volumes:   req.Volumes,
 		NetPolicy: req.NetPolicy,
 		Seccomp:   req.Seccomp,
+		Secrets:   req.Secrets,
 	}
 }
 
@@ -227,6 +231,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		NetPolicy: req.NetPolicy,
 		Cpus:      req.Cpus,
 		MemoryMB:  req.MemoryMB,
+		Secrets:   req.Secrets,
 		CreatedAt: now,
 		Spec:      specFromCreateRequest(req),
 	}
