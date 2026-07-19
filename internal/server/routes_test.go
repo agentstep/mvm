@@ -1003,3 +1003,116 @@ func TestHandleImageDownloadNotFound(t *testing.T) {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
+
+// === GET /vms/{name}/logs ===
+
+func TestTailLines(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("l1\nl2\nl3\nl4\nl5\n")
+	f.Seek(0, 0)
+
+	got, err := tailLines(f, 2)
+	if err != nil {
+		t.Fatalf("tailLines: %v", err)
+	}
+	if got != "l4\nl5\n" {
+		t.Errorf("tailLines = %q, want %q", got, "l4\nl5\n")
+	}
+}
+
+func TestTailLinesNoTrailingNewline(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("l1\nl2\nl3")
+	f.Seek(0, 0)
+
+	got, err := tailLines(f, 2)
+	if err != nil {
+		t.Fatalf("tailLines: %v", err)
+	}
+	if got != "l2\nl3" {
+		t.Errorf("tailLines = %q, want %q", got, "l2\nl3")
+	}
+}
+
+func TestHandleVMLogsRequiresBootParam(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", CreatedAt: time.Now()})
+
+	req := httptest.NewRequest("GET", "/v1/vms/web/logs", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 without ?boot=true", w.Code)
+	}
+}
+
+func TestHandleVMLogsReturnsFileContents(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", CreatedAt: time.Now()})
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+
+	vmDir := firecracker.VMDir("web")
+	if err := os.MkdirAll(vmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vmDir, "firecracker.log"), []byte("line1\nline2\nline3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/vms/web/logs?boot=true", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var frame struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(w.Body.Bytes()), &frame); err != nil {
+		t.Fatalf("decode NDJSON frame: %v; body: %s", err, w.Body.String())
+	}
+	if frame.Type != "data" || frame.Data != "line1\nline2\nline3\n" {
+		t.Errorf("frame = %+v, want the full log contents", frame)
+	}
+}
+
+func TestHandleVMLogsTail(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", CreatedAt: time.Now()})
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+
+	vmDir := firecracker.VMDir("web")
+	os.MkdirAll(vmDir, 0o755)
+	os.WriteFile(filepath.Join(vmDir, "firecracker.log"), []byte("l1\nl2\nl3\nl4\nl5\n"), 0o644)
+
+	req := httptest.NewRequest("GET", "/v1/vms/web/logs?boot=true&tail=2", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+
+	var frame struct {
+		Data string `json:"data"`
+	}
+	json.Unmarshal(bytes.TrimSpace(w.Body.Bytes()), &frame)
+	if frame.Data != "l4\nl5\n" {
+		t.Errorf("tail data = %q, want the last 2 lines", frame.Data)
+	}
+}
+
+func TestHandleVMLogsNotFoundVM(t *testing.T) {
+	s, _ := testServer(t)
+	req := httptest.NewRequest("GET", "/v1/vms/nope/logs?boot=true", nil)
+	w := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}

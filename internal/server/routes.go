@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -928,6 +929,127 @@ func (s *Server) handleInspectVM(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(InspectResponseFromVM(vm))
+}
+
+// tailLines returns the last n lines of f (already positioned at the
+// start), consuming the file. Loads the whole file into memory — boot logs
+// are one VM's console output, small enough that this is simpler than a
+// seek-from-end scan.
+func tailLines(f *os.File, n int) (string, error) {
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return "", err
+	}
+	text := string(data)
+	trailingNewline := strings.HasSuffix(text, "\n")
+	lines := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	out := strings.Join(lines, "\n")
+	if trailingNewline {
+		out += "\n"
+	}
+	return out, nil
+}
+
+// handleVMLogs serves a VM's Firecracker boot/console log — the file
+// showBootLog (internal/cli/logs.go) used to read over limaClient.Shell().
+// The daemon runs natively on the same Linux host as this file (Lima's
+// guest OS locally, or a cloud server remotely — see firecracker.VMDir), so
+// it opens it directly; no shell-out needed. Guest journal logs (the
+// non-boot path) already go through the existing exec endpoint and are out
+// of scope — this endpoint only ever serves ?boot=true.
+func (s *Server) handleVMLogs(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	if r.URL.Query().Get("boot") != "true" {
+		httpError(w, fmt.Errorf("this endpoint only serves boot logs (?boot=true) — guest logs go through exec"), http.StatusBadRequest)
+		return
+	}
+
+	if _, err := s.store.GetVM(name); err != nil {
+		httpError(w, err, http.StatusNotFound)
+		return
+	}
+
+	tail := 0
+	if t := r.URL.Query().Get("tail"); t != "" {
+		if n, err := strconv.Atoi(t); err == nil {
+			tail = n
+		}
+	}
+	follow := r.URL.Query().Get("follow") == "true"
+
+	logPath := filepath.Join(firecracker.VMDir(name), "firecracker.log")
+	f, err := os.Open(logPath)
+	if err != nil {
+		httpError(w, fmt.Errorf("open boot log: %w", err), http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	flusher, _ := w.(http.Flusher)
+	writeFrame := func(data string) bool {
+		frame, _ := json.Marshal(map[string]string{"type": "data", "data": data})
+		if _, err := w.Write(append(frame, '\n')); err != nil {
+			return false
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return true
+	}
+
+	if tail > 0 {
+		lines, err := tailLines(f, tail)
+		if err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if !writeFrame(lines) {
+			return
+		}
+	} else {
+		data, err := io.ReadAll(f)
+		if err != nil {
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if !writeFrame(string(data)) {
+			return
+		}
+	}
+
+	if !follow {
+		return
+	}
+
+	// Poll for appended bytes until the client disconnects. There's no
+	// inotify in the stdlib and this file has a single appending writer
+	// (Firecracker's own redirected stdout — config.go's
+	// `>"$VM_DIR/firecracker.log"`), so a short poll loop makes the same
+	// trade-off `tail -f` itself makes.
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			buf := make([]byte, 4096)
+			n, err := f.Read(buf)
+			if n > 0 {
+				if !writeFrame(string(buf[:n])) {
+					return
+				}
+			}
+			if err != nil && err != io.EOF {
+				return
+			}
+		}
+	}
 }
 
 func httpError(w http.ResponseWriter, err error, code int) {

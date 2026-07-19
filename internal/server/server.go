@@ -164,6 +164,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	register("GET", "/vms", s.handleListVMs)
 	register("GET", "/vms/stats", s.handleStatsVMs)
 	register("GET", "/vms/{name}", s.handleInspectVM)
+	register("GET", "/vms/{name}/logs", s.handleVMLogs)
 	register("POST", "/vms", s.handleCreateVM)
 	register("POST", "/vms/{name}/exec", s.handleExec)
 	register("DELETE", "/vms/{name}", s.handleDeleteVM)
