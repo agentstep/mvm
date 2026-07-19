@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/agentstep/mvm/internal/state"
 )
 
 func TestParsePorts(t *testing.T) {
@@ -48,5 +51,38 @@ func TestParsePorts(t *testing.T) {
 				t.Errorf("Proto = %q, want %q", ports[0].Proto, tt.wantProto)
 			}
 		}
+	}
+}
+
+// === applevzSpec ===
+
+func TestApplevzSpecCapturesRequest(t *testing.T) {
+	ports := []state.PortMap{{HostPort: 3000, GuestPort: 3000, Proto: "tcp"}}
+	startup := &StartupSpec{Commands: []StartupCommand{{Name: "dev", Run: "make dev"}}}
+
+	spec := applevzSpec(ports, "deny", 4, 2048, []string{"/h:/g"}, startup, []string{"KEY"})
+
+	if spec.Cpus != 4 || spec.MemoryMB != 2048 || spec.NetPolicy != "deny" {
+		t.Errorf("spec = %+v, want cpus=4 mem=2048 policy=deny", spec)
+	}
+	if len(spec.Ports) != 1 || spec.Ports[0].HostPort != 3000 {
+		t.Errorf("spec.Ports = %+v, want the request ports", spec.Ports)
+	}
+	if len(spec.Secrets) != 1 || spec.Secrets[0] != "KEY" {
+		t.Errorf("spec.Secrets = %+v, want [KEY]", spec.Secrets)
+	}
+	var round StartupSpec
+	if err := json.Unmarshal(spec.Startup, &round); err != nil {
+		t.Fatalf("Startup should be valid JSON: %v", err)
+	}
+	if len(round.Commands) != 1 || round.Commands[0].Run != "make dev" {
+		t.Errorf("Startup round-trip = %+v, want the recipe", round)
+	}
+}
+
+func TestApplevzSpecNilStartup(t *testing.T) {
+	spec := applevzSpec(nil, "open", 0, 0, nil, nil, nil)
+	if spec.Startup != nil {
+		t.Errorf("Startup = %s, want nil when no recipe given", spec.Startup)
 	}
 }

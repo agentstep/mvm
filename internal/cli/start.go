@@ -192,6 +192,26 @@ func printPorts(vm *state.VM) {
 	}
 }
 
+// applevzSpec records the applevz create request as a declarative spec
+// (design spec §4: persisted verbatim, returned by inspect). Image and
+// Seccomp stay empty — the applevz path supports neither yet.
+func applevzSpec(ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, startup *StartupSpec, secretNames []string) *state.VMSpec {
+	spec := &state.VMSpec{
+		Cpus:      cpus,
+		MemoryMB:  memoryMB,
+		Ports:     ports,
+		Volumes:   volumes,
+		NetPolicy: netPolicy,
+		Secrets:   secretNames,
+	}
+	if startup != nil {
+		if raw, err := json.Marshal(startup); err == nil {
+			spec.Startup = raw
+		}
+	}
+	return spec
+}
+
 // runStartAppleVZ starts a VM using the Apple Virtualization.framework backend.
 //
 // As of PR #2 this path drives the in-guest agent over vsock via the
@@ -321,6 +341,7 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		v.RootfsPath = vmRootfs
 		v.Backend = "applevz"
 		v.Secrets = secretNames
+		v.Spec = applevzSpec(ports, netPolicy, cpus, memoryMB, volumes, startup, secretNames)
 	}); err != nil {
 		store.RemoveVM(name)
 		return nil, err
