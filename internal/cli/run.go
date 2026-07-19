@@ -125,6 +125,10 @@ default rootfs — there is no other catalogued image yet.
 			if err != nil {
 				return err
 			}
+			volumes, err = parseVolumes(volumes)
+			if err != nil {
+				return err
+			}
 			return runRun(store, image, cmdArgs, name, detach, cpus, memoryMB, netPolicy, portMaps, volumes, interactive || tty, workdir, envVars, user)
 		},
 	}

@@ -55,6 +55,10 @@ func newStartCmd(store *state.Store) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			volumes, err = parseVolumes(volumes)
+			if err != nil {
+				return err
+			}
 			var spec *StartupSpec
 			if startup != "" {
 				spec, err = loadStartupSpec(startup)
@@ -103,6 +107,45 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 			return nil, fmt.Errorf("invalid guest port %q: %w", parts[1], err)
 		}
 		result = append(result, state.PortMap{HostPort: host, GuestPort: guest, Proto: proto})
+	}
+	return result, nil
+}
+
+// parseVolumes validates each "hostPath:guestPath" entry and resolves a
+// relative hostPath to an absolute one against the CLI process's own cwd.
+//
+// Absolutizing here (not deeper in the stack) matters because both backends
+// eventually need an unambiguous path: on Firecracker, the daemon that reads
+// hostPath runs inside the Lima VM, which only sees paths under $HOME (Lima's
+// own mount config — see internal/lima/lima.go's ".mounts" setting); on
+// applevz, the Swift helper's VZSharedDirectory resolves a relative hostPath
+// against its own process cwd, not the user's, which is never what's wanted.
+// This does NOT resolve the "remote daemon" case (CLI and daemon on
+// different machines) — see the plan's Global Constraints.
+//
+// guestPath must be absolute: it becomes a mount target (applevz) or a tar
+// extraction directory (Firecracker), and a relative guest path is ambiguous
+// once the guest's cwd for that operation isn't guaranteed (root's home
+// varies; no shell profile has run yet at mount time).
+func parseVolumes(volumes []string) ([]string, error) {
+	var result []string
+	for _, v := range volumes {
+		parts := strings.SplitN(v, ":", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			return nil, fmt.Errorf("invalid volume format %q (expected hostPath:guestPath)", v)
+		}
+		hostPath, guestPath := parts[0], parts[1]
+		if !filepath.IsAbs(guestPath) {
+			return nil, fmt.Errorf("invalid volume %q: guest path %q must be absolute", v, guestPath)
+		}
+		if !filepath.IsAbs(hostPath) {
+			abs, err := filepath.Abs(hostPath)
+			if err != nil {
+				return nil, fmt.Errorf("resolve host path %q: %w", hostPath, err)
+			}
+			hostPath = abs
+		}
+		result = append(result, hostPath+":"+guestPath)
 	}
 	return result, nil
 }

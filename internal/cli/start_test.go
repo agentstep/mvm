@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/agentstep/mvm/internal/state"
@@ -84,5 +86,55 @@ func TestApplevzSpecNilStartup(t *testing.T) {
 	spec := applevzSpec(nil, "open", 0, 0, nil, nil, nil)
 	if spec.Startup != nil {
 		t.Errorf("Startup = %s, want nil when no recipe given", spec.Startup)
+	}
+}
+
+// === parseVolumes ===
+
+func TestParseVolumes(t *testing.T) {
+	cwd, _ := os.Getwd()
+
+	tests := []struct {
+		name    string
+		input   []string
+		wantErr bool
+		check   func(t *testing.T, got []string)
+	}{
+		{
+			name:  "absolute host path passes through",
+			input: []string{"/tmp/src:/app"},
+			check: func(t *testing.T, got []string) {
+				if len(got) != 1 || got[0] != "/tmp/src:/app" {
+					t.Errorf("got %v, want [/tmp/src:/app]", got)
+				}
+			},
+		},
+		{
+			name:  "relative host path resolves against cwd",
+			input: []string{"./src:/app"},
+			check: func(t *testing.T, got []string) {
+				want := filepath.Join(cwd, "src") + ":/app"
+				if len(got) != 1 || got[0] != want {
+					t.Errorf("got %v, want [%s]", got, want)
+				}
+			},
+		},
+		{name: "missing colon", input: []string{"/tmp/src"}, wantErr: true},
+		{name: "empty host path", input: []string{":/app"}, wantErr: true},
+		{name: "relative guest path rejected", input: []string{"/tmp/src:app"}, wantErr: true},
+		{name: "nil input ok", input: nil},
+		{name: "empty slice ok", input: []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseVolumes(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("parseVolumes(%v) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+			if err == nil && tt.check != nil {
+				tt.check(t, got)
+			}
+		})
 	}
 }
