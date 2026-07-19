@@ -25,8 +25,9 @@ func waitForReady(timeout time.Duration, probe func() error) error {
 			return fmt.Errorf("timed out waiting for VM to become ready: %w", lastErr)
 		}
 		time.Sleep(backoff)
-		if backoff < 2*time.Second {
-			backoff *= 2
+		backoff *= 2
+		if backoff > 2*time.Second {
+			backoff = 2 * time.Second
 		}
 	}
 }

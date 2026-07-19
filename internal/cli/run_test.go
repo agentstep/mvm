@@ -53,6 +53,29 @@ func TestWaitForReadyTimesOut(t *testing.T) {
 	}
 }
 
+func TestWaitForReadyBackoffCapsAt2s(t *testing.T) {
+	var gaps []time.Duration
+	last := time.Now()
+	calls := 0
+	waitForReady(9*time.Second, func() error {
+		now := time.Now()
+		if calls > 0 {
+			gaps = append(gaps, now.Sub(last))
+		}
+		last = now
+		calls++
+		if calls >= 6 {
+			return nil
+		}
+		return fmt.Errorf("not ready yet")
+	})
+	for i, gap := range gaps {
+		if gap > 2500*time.Millisecond {
+			t.Errorf("gap[%d] = %v, want capped at ~2s (with scheduling slack)", i, gap)
+		}
+	}
+}
+
 // === resolveImage ===
 
 func TestResolveImageMapsBaseToDefault(t *testing.T) {
