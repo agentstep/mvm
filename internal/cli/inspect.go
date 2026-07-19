@@ -25,7 +25,7 @@ func runInspect(store *state.Store, name string) error {
 	// applevz VMs live purely in local state — the daemon has never heard
 	// of them (same backend split as `mvm list`).
 	if vm, err := store.GetVM(name); err == nil && vm.Backend == "applevz" {
-		return printInspect(inspectResponseFromLocalVM(vm))
+		return printInspect(server.InspectResponseFromVM(vm))
 	}
 
 	sc, err := requireDaemon()
@@ -37,24 +37,6 @@ func runInspect(store *state.Store, name string) error {
 		return err
 	}
 	return printInspect(*resp)
-}
-
-// inspectResponseFromLocalVM shapes a local state.VM into the same
-// VMInspectResponse the daemon returns, so both backends emit one schema
-// and internal runtime fields never leak into inspect output.
-func inspectResponseFromLocalVM(vm *state.VM) server.VMInspectResponse {
-	return server.VMInspectResponse{
-		VMResponse: server.VMResponse{
-			Name:      vm.Name,
-			Status:    vm.Status,
-			GuestIP:   vm.GuestIP,
-			PID:       vm.PID,
-			Backend:   vm.Backend,
-			Ports:     vm.Ports,
-			CreatedAt: vm.CreatedAt,
-		},
-		Spec: vm.Spec,
-	}
 }
 
 func printInspect(resp server.VMInspectResponse) error {

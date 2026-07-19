@@ -837,3 +837,94 @@ func TestHandleInspectVMNotFound(t *testing.T) {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
+
+// === InspectResponseFromVM (shared constructor, also used by internal/cli) ===
+
+func TestInspectResponseFromVM(t *testing.T) {
+	now := time.Now()
+	vm := &state.VM{
+		Name:      "web",
+		Status:    "running",
+		GuestIP:   "192.168.64.5",
+		PID:       123,
+		Backend:   "applevz",
+		Ports:     []state.PortMap{{HostPort: 3000, GuestPort: 3000, Proto: "tcp"}},
+		CreatedAt: now,
+		Spec:      &state.VMSpec{Cpus: 4, NetPolicy: "deny"},
+		// internal runtime fields that must NOT leak into inspect output:
+		SocketPath: "/run/mvm/web.sock",
+		TAPIP:      "172.16.0.1",
+	}
+
+	resp := InspectResponseFromVM(vm)
+
+	if resp.Name != "web" || resp.Status != "running" || resp.Backend != "applevz" {
+		t.Errorf("resp = %+v, want identity fields copied", resp)
+	}
+	if resp.Spec == nil || resp.Spec.Cpus != 4 {
+		t.Errorf("resp.Spec = %+v, want the VM's spec", resp.Spec)
+	}
+
+	data, _ := json.Marshal(resp)
+	var m map[string]interface{}
+	json.Unmarshal(data, &m)
+	for _, forbidden := range []string{"socket_path", "tap_ip", "tap_device", "guest_mac", "rootfs_path"} {
+		if _, ok := m[forbidden]; ok {
+			t.Errorf("inspect output leaks internal field %q", forbidden)
+		}
+	}
+}
+
+// === Create -> Inspect round trip (through the real handlers) ===
+
+func TestCreateThenInspectRoundTrip(t *testing.T) {
+	s, store := testServer(t)
+
+	// Non-default cpus/memory so handleCreateVM skips the warm pool and goes
+	// straight through firecracker.Start with the mock executor.
+	body, _ := json.Marshal(CreateVMRequest{
+		Name:      "roundtrip",
+		Cpus:      1,
+		MemoryMB:  512,
+		NetPolicy: "deny",
+		Ports:     []state.PortMap{{HostPort: 8080, GuestPort: 80, Proto: "tcp"}},
+	})
+	createReq := httptest.NewRequest("POST", "/vms", bytes.NewReader(body))
+	createW := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(createW, createReq)
+
+	if createW.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201; body: %s", createW.Code, createW.Body.String())
+	}
+
+	// The spec must be persisted synchronously in handleCreateVM, not only in
+	// the async post-boot goroutine.
+	stored, err := store.GetVM("roundtrip")
+	if err != nil {
+		t.Fatalf("GetVM: %v", err)
+	}
+	if stored.Spec == nil {
+		t.Fatal("store has no Spec after create — handleCreateVM did not persist it")
+	}
+
+	inspectReq := httptest.NewRequest("GET", "/v1/vms/roundtrip", nil)
+	inspectW := httptest.NewRecorder()
+	s.buildMux().ServeHTTP(inspectW, inspectReq)
+
+	if inspectW.Code != http.StatusOK {
+		t.Fatalf("inspect status = %d, want 200; body: %s", inspectW.Code, inspectW.Body.String())
+	}
+	var resp VMInspectResponse
+	if err := json.NewDecoder(inspectW.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Name != "roundtrip" {
+		t.Errorf("resp.Name = %q, want roundtrip", resp.Name)
+	}
+	if resp.Spec == nil || resp.Spec.Cpus != 1 || resp.Spec.MemoryMB != 512 || resp.Spec.NetPolicy != "deny" {
+		t.Errorf("resp.Spec = %+v, want the create request echoed back", resp.Spec)
+	}
+	if len(resp.Spec.Ports) != 1 || resp.Spec.Ports[0].HostPort != 8080 {
+		t.Errorf("resp.Spec.Ports = %+v, want the create request's ports", resp.Spec.Ports)
+	}
+}

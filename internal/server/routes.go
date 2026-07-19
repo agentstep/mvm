@@ -75,6 +75,26 @@ type VMInspectResponse struct {
 	Spec *state.VMSpec `json:"spec,omitempty"`
 }
 
+// InspectResponseFromVM shapes a state.VM into the response inspect returns,
+// on either backend. Both the daemon's own GET /vms/{name} handler and the
+// CLI's local-store path (for applevz VMs, which the daemon never sees) call
+// this so the two converge on one schema and internal runtime fields
+// (SocketPath, TAPIP, TAPDevice, GuestMAC, RootfsPath) never leak into output.
+func InspectResponseFromVM(vm *state.VM) VMInspectResponse {
+	return VMInspectResponse{
+		VMResponse: VMResponse{
+			Name:      vm.Name,
+			Status:    vm.Status,
+			GuestIP:   vm.GuestIP,
+			PID:       vm.PID,
+			Backend:   vm.Backend,
+			Ports:     vm.Ports,
+			CreatedAt: vm.CreatedAt,
+		},
+		Spec: vm.Spec,
+	}
+}
+
 // specFromCreateRequest records the create request as a declarative spec,
 // persisted on the VM and returned by inspect.
 func specFromCreateRequest(req CreateVMRequest) *state.VMSpec {
@@ -825,18 +845,7 @@ func (s *Server) handleInspectVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(VMInspectResponse{
-		VMResponse: VMResponse{
-			Name:      vm.Name,
-			Status:    vm.Status,
-			GuestIP:   vm.GuestIP,
-			PID:       vm.PID,
-			Backend:   vm.Backend,
-			Ports:     vm.Ports,
-			CreatedAt: vm.CreatedAt,
-		},
-		Spec: vm.Spec,
-	})
+	json.NewEncoder(w).Encode(InspectResponseFromVM(vm))
 }
 
 func httpError(w http.ResponseWriter, err error, code int) {
