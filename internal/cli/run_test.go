@@ -175,13 +175,18 @@ func TestExistingVMNamesMergesDaemonVMs(t *testing.T) {
 
 // === runRun: applevz custom-image guard ===
 
-func TestRunRunRejectsCustomImageOnAppleVZ(t *testing.T) {
+func TestRunRunNoLongerHardBlocksCustomImageOnAppleVZ(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 	store.MarkInitialized("v1.13.0", "applevz")
 
 	err := runRun(store, "my-custom-image", nil, "", false, 0, 0, "open", nil, nil, false, "", nil, "", false)
-	if err == nil {
-		t.Fatal("runRun() = nil, want an error for a non-base image on applevz")
+	// Custom images on applevz are no longer a hard-blocked feature (Phase 2
+	// of docs/superpowers/plans/2026-07-19-backend-parity.md). Whatever this
+	// machine's local daemon/cache state produces, the error — if any — must
+	// come from actual image resolution failing, never from the old blanket
+	// rejection.
+	if err != nil && strings.Contains(err.Error(), "not supported on the Apple VZ backend") {
+		t.Fatalf("runRun() = %v, want the old blanket applevz --image rejection to be gone", err)
 	}
 }
 
