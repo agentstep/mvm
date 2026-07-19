@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 )
 
@@ -129,6 +133,40 @@ func TestExistingVMNamesIncludesLocalApplevzVMs(t *testing.T) {
 	}
 	if !names["web"] || !names["worker"] {
 		t.Errorf("names = %v, want web and worker present", names)
+	}
+}
+
+func TestExistingVMNamesMergesDaemonVMs(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /vms", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]server.VMResponse{
+			{Name: "daemon-vm-1", Status: "running", Backend: "firecracker"},
+			{Name: "daemon-vm-2", Status: "stopped", Backend: "firecracker"},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	t.Setenv("MVM_REMOTE", srv.URL)
+	t.Setenv("MVM_API_KEY", "")
+
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	if err := store.AddVM(&state.VM{Name: "local-applevz", Backend: "applevz", Status: "running", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("AddVM: %v", err)
+	}
+
+	names, err := existingVMNames(store)
+	if err != nil {
+		t.Fatalf("existingVMNames: %v", err)
+	}
+	for _, want := range []string{"local-applevz", "daemon-vm-1", "daemon-vm-2"} {
+		if !names[want] {
+			t.Errorf("names = %v, want %q present (merged from local applevz state + fake daemon)", names, want)
+		}
 	}
 }
 
