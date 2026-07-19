@@ -210,7 +210,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 	// Apple VZ path — dispatch to separate function
 	if backend == "applevz" {
 		out := resolveOutputMode(jsonOut, quiet)
-		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup, secretNames)
+		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup, secretNames, image)
 		return err
 	}
 	// Firecracker path: route through daemon
@@ -387,13 +387,47 @@ func resolveApplevzKernel(cacheDir string) (kernelPath string, warning string) {
 	)
 }
 
+// imageFileName maps an --image value to its rootfs filename, matching the
+// Firecracker path's convention (firecracker.CacheDir()+"/"+name+".ext4",
+// internal/firecracker/config.go:229). image == "" means the implicit
+// default.
+func imageFileName(image string) string {
+	if image == "" {
+		return "base.ext4"
+	}
+	return image + ".ext4"
+}
+
+// resolveAppleVZImage returns the local rootfs path for image inside
+// cacheDir, fetching it via fetch first if it isn't already cached locally.
+// fetch is injected so this is testable without a real daemon; runStartAppleVZ
+// passes a closure around requireDaemon()+Client.DownloadImage. A nil fetch
+// with a missing image is a clear, immediate error rather than a nil-pointer
+// call.
+func resolveAppleVZImage(cacheDir, image string, fetch func(image, destPath string) error) (string, error) {
+	rootfsPath := filepath.Join(cacheDir, imageFileName(image))
+	if image == "" {
+		return rootfsPath, nil
+	}
+	if _, err := os.Stat(rootfsPath); err == nil {
+		return rootfsPath, nil
+	}
+	if fetch == nil {
+		return "", fmt.Errorf("image %q not found in %s and no daemon reachable to fetch it (build it with: mvm build -t %s -f <Dockerfile>)", image, cacheDir, image)
+	}
+	if err := fetch(image, rootfsPath); err != nil {
+		return "", fmt.Errorf("fetch image %q from daemon: %w", image, err)
+	}
+	return rootfsPath, nil
+}
+
 // runStartAppleVZ starts a VM using the Apple Virtualization.framework backend.
 //
 // As of PR #2 this path drives the in-guest agent over vsock via the
 // per-VM mvm-vz helper IPC socket — no SSH, no TAP-IP TCP, no Lima.
 // The previous SSH-based post-boot path (and the applyPostBootDirect
 // helper that went with it) has been removed.
-func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode, startup *StartupSpec, secretNames []string) (*BootResult, error) {
+func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, cpus, memoryMB int, volumes []string, out outputMode, startup *StartupSpec, secretNames []string, image string) (*BootResult, error) {
 	// Progress goes to stderr unless we're in human mode, so stdout stays a
 	// clean JSON object (or silent, for the bench harness).
 	logf := func(format string, a ...any) {
@@ -416,7 +450,18 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	if kernelWarning != "" {
 		logf("  Warning: %s\n", kernelWarning)
 	}
-	rootfsPath := filepath.Join(cacheDir, "base.ext4")
+	rootfsPath, err := resolveAppleVZImage(cacheDir, image, func(img, dest string) error {
+		sc, dErr := requireDaemon()
+		if dErr != nil {
+			return dErr
+		}
+		logf("  Image %q not cached locally, fetching from daemon...\n", img)
+		return sc.DownloadImage(context.Background(), img, dest)
+	})
+	if err != nil {
+		return nil, err
+	}
+	timer.mark("image_resolve")
 
 	vmDir := filepath.Join(home, ".mvm", "vms", name)
 	os.MkdirAll(vmDir, 0o755)

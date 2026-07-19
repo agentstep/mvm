@@ -134,7 +134,7 @@ func runBench(store *state.Store, samples int, jsonOut, keep bool) error {
 // benchOneStart starts the bench VM and returns its total boot time in ms,
 // counting it only if the start succeeded and the agent answered.
 func benchOneStart(store *state.Store) (float64, bool) {
-	res, err := runStartAppleVZ(store, benchVMName, false, nil, "open", 0, 0, nil, outQuiet, nil, nil)
+	res, err := runStartAppleVZ(store, benchVMName, false, nil, "open", 0, 0, nil, outQuiet, nil, nil, "")
 	if err != nil || res == nil || !res.AgentReady {
 		return 0, false
 	}
