@@ -18,30 +18,32 @@ func newListCmd(store *state.Store) *cobra.Command {
 	var (
 		jsonOutput bool
 		quiet      bool
+		all        bool
 		format     string
 	)
 
 	cmd := &cobra.Command{
 		Use:     "list",
-		Short:   "List all microVMs",
+		Short:   "List microVMs (running only by default; -a for all)",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			wantJSON, err := resolveFormat(format, jsonOutput)
 			if err != nil {
 				return err
 			}
-			return runList(store, wantJSON, quiet)
+			return runList(store, wantJSON, quiet, all)
 		},
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "output as JSON (alias for --format json)")
 	cmd.Flags().StringVar(&format, "format", "", "output format: table (default) or json")
 	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "only print VM names")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "include stopped VMs (default: running only)")
 
 	return cmd
 }
 
-func runList(store *state.Store, jsonOutput, quiet bool) error {
+func runList(store *state.Store, jsonOutput, quiet, all bool) error {
 	// Apple VZ VMs live purely in local state — the Firecracker daemon has
 	// never heard of them (same reason exec/start/stop/pause special-case
 	// applevz instead of going through requireDaemon()). Read them directly
@@ -61,14 +63,8 @@ func runList(store *state.Store, jsonOutput, quiet bool) error {
 		}
 	}
 
-	vms := mergeVMResponses(localVMs, daemonVMs)
-
-	if len(vms) == 0 {
-		if !quiet && !jsonOutput {
-			fmt.Println("No microVMs. Create one with: mvm start <name>")
-		}
-		return nil
-	}
+	// Container semantics: `list` shows running VMs only unless -a/--all is set.
+	vms := filterRunning(mergeVMResponses(localVMs, daemonVMs), all)
 
 	// Sort by creation time
 	sort.Slice(vms, func(i, j int) bool {
@@ -76,8 +72,15 @@ func runList(store *state.Store, jsonOutput, quiet bool) error {
 	})
 
 	if jsonOutput {
-		data, _ := json.MarshalIndent(vms, "", "  ")
+		data, _ := json.MarshalIndent(toCFContainers(vms, specsByName(store)), "", "  ")
 		fmt.Println(string(data))
+		return nil
+	}
+
+	if len(vms) == 0 {
+		if !quiet {
+			fmt.Println("No microVMs. Create one with: mvm create <name>")
+		}
 		return nil
 	}
 
@@ -147,6 +150,38 @@ func mergeVMResponses(local, daemon []server.VMResponse) []server.VMResponse {
 		out = append(out, vm)
 	}
 	return out
+}
+
+// filterRunning drops stopped/paused VMs unless all is set (container default).
+func filterRunning(vms []server.VMResponse, all bool) []server.VMResponse {
+	if all {
+		return vms
+	}
+	out := make([]server.VMResponse, 0, len(vms))
+	for _, vm := range vms {
+		if vm.Status == "running" {
+			out = append(out, vm)
+		}
+	}
+	return out
+}
+
+// specsByName maps VM name → persisted spec, so container-shaped JSON can
+// populate image/cpus/memory that VMResponse omits.
+func specsByName(store *state.Store) map[string]*state.VMSpec {
+	m := map[string]*state.VMSpec{}
+	all, err := store.ListVMs()
+	if err != nil {
+		return m
+	}
+	for _, vm := range all {
+		if vm.Spec != nil {
+			m[vm.Name] = vm.Spec
+			continue
+		}
+		m[vm.Name] = &state.VMSpec{Cpus: vm.Cpus, MemoryMB: vm.MemoryMB}
+	}
+	return m
 }
 
 func timeAgo(t time.Time) string {

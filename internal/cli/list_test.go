@@ -65,6 +65,20 @@ func TestMergeVMResponses(t *testing.T) {
 	})
 }
 
+func TestFilterRunning(t *testing.T) {
+	vms := []server.VMResponse{
+		{Name: "a", Status: "running"},
+		{Name: "b", Status: "stopped"},
+		{Name: "c", Status: "paused"},
+	}
+	if got := filterRunning(vms, false); len(got) != 1 || got[0].Name != "a" {
+		t.Fatalf("default should keep only running, got %+v", got)
+	}
+	if got := filterRunning(vms, true); len(got) != 3 {
+		t.Fatalf("--all should keep all, got %d", len(got))
+	}
+}
+
 func TestLocalApplevzVMsFiltersBackend(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 

@@ -104,7 +104,7 @@ echo ""
 # --- Test 7: Pause/Resume ---
 echo "[7. Pause/Resume]"
 run_test_output "mvm pause" "paused" $MVM pause test-warm
-run_test_output "status shows paused" "paused" $MVM list
+run_test_output "status shows paused" "paused" $MVM list -a
 run_test_output "mvm resume" "resumed" $MVM resume test-warm
 run_test_output "exec after resume" "ALIVE" $MVM exec test-warm -- echo ALIVE
 echo ""
@@ -125,7 +125,7 @@ echo ""
 # --- Test 10: Stop ---
 echo "[10. Stop]"
 run_test_output "mvm stop" "stopped" $MVM stop test-warm
-run_test_output "status shows stopped" "stopped" $MVM list
+run_test_output "status shows stopped" "stopped" $MVM list -a
 echo ""
 
 # --- Test 11: Delete ---
