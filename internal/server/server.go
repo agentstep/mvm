@@ -169,6 +169,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	register("POST", "/vms/{name}/exec", s.handleExec)
 	register("DELETE", "/vms/{name}", s.handleDeleteVM)
 	register("POST", "/vms/{name}/stop", s.handleStopVM)
+	register("POST", "/vms/{name}/start", s.handleStartVM)
 	register("POST", "/vms/{name}/pause", s.handlePauseVM)
 	register("POST", "/vms/{name}/resume", s.handleResumeVM)
 	register("POST", "/vms/{name}/snapshot", s.handleSnapshotCreate)

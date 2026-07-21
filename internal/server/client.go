@@ -403,6 +403,24 @@ func (c *Client) StopVM(ctx context.Context, name string, force bool) error {
 	return nil
 }
 
+// StartVM boots an existing stopped VM in place (cold reboot, disk preserved).
+func (c *Client) StartVM(ctx context.Context, name string) (*VMResponse, error) {
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.url(fmt.Sprintf("/vms/%s/start", name)), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return nil, fmt.Errorf("start failed: %s", err)
+	}
+	var result VMResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // PauseVM pauses a running VM.
 func (c *Client) PauseVM(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST",

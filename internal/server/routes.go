@@ -212,6 +212,44 @@ func (s *Server) handleStatsVMs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+// postBootSetup runs the guest-agent-dependent setup shared by create and
+// start-resume: wait for the agent, configure guest networking, then apply
+// port forwarding, network policy, volume copy-in, and seccomp from the
+// persisted spec. Returns the volume copy-in error if any; network/policy/
+// seccomp failures are logged but non-fatal (matching the prior inline behavior).
+func (s *Server) postBootSetup(name string, alloc state.NetAllocation, volumes []string, seccomp string) error {
+	if !firecracker.WaitForGuest(s.executor, alloc.GuestIP, 120*time.Second) {
+		log.Printf("VM %s: guest agent not reachable after 120s", name)
+		return fmt.Errorf("guest agent not reachable after 120s")
+	}
+	firecracker.SetupGuestNetworkViaAgent(s.executor, alloc.GuestIP, alloc.TAPIP)
+
+	postVM, err := s.store.GetVM(name)
+	if err != nil {
+		log.Printf("VM %s: failed to reload state for post-boot setup: %v", name, err)
+		return err
+	}
+	if err := firecracker.SetupPortForwarding(s.executor, postVM); err != nil {
+		log.Printf("VM %s: port forwarding setup failed: %v", name, err)
+	}
+	if err := firecracker.ApplyNetworkPolicyViaAgent(s.executor, postVM); err != nil {
+		log.Printf("VM %s: network policy setup failed: %v", name, err)
+	}
+	var volErr error
+	if len(volumes) > 0 {
+		if err := firecracker.SetupVolumeMounts(postVM, volumes); err != nil {
+			log.Printf("VM %s: volume mount setup failed: %v", name, err)
+			volErr = err
+		}
+	}
+	if seccomp != "" {
+		if err := firecracker.ApplySeccompViaAgent(s.executor, postVM, seccomp); err != nil {
+			log.Printf("VM %s: seccomp setup failed: %v", name, err)
+		}
+	}
+	return volErr
+}
+
 func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	var req CreateVMRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -321,38 +359,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	// It returns the volume copy-in error (if any); network/policy/seccomp
 	// failures are logged but non-fatal, matching prior behavior.
 	postBoot := func() error {
-		if !firecracker.WaitForGuest(s.executor, alloc.GuestIP, 120*time.Second) {
-			log.Printf("VM %s: guest agent not reachable after 120s", req.Name)
-			return fmt.Errorf("guest agent not reachable after 120s")
-		}
-		firecracker.SetupGuestNetworkViaAgent(s.executor, alloc.GuestIP, alloc.TAPIP)
-
-		// Reload VM state for post-boot setup (state was updated above).
-		postVM, err := s.store.GetVM(req.Name)
-		if err != nil {
-			log.Printf("VM %s: failed to reload state for post-boot setup: %v", req.Name, err)
-			return err
-		}
-
-		if err := firecracker.SetupPortForwarding(s.executor, postVM); err != nil {
-			log.Printf("VM %s: port forwarding setup failed: %v", req.Name, err)
-		}
-		if err := firecracker.ApplyNetworkPolicyViaAgent(s.executor, postVM); err != nil {
-			log.Printf("VM %s: network policy setup failed: %v", req.Name, err)
-		}
-		var volErr error
-		if len(req.Volumes) > 0 {
-			if err := firecracker.SetupVolumeMounts(postVM, req.Volumes); err != nil {
-				log.Printf("VM %s: volume mount setup failed: %v", req.Name, err)
-				volErr = err
-			}
-		}
-		if req.Seccomp != "" {
-			if err := firecracker.ApplySeccompViaAgent(s.executor, postVM, req.Seccomp); err != nil {
-				log.Printf("VM %s: seccomp setup failed: %v", req.Name, err)
-			}
-		}
-		return volErr
+		return s.postBootSetup(req.Name, alloc, req.Volumes, req.Seccomp)
 	}
 
 	// When volumes are requested, the client execs into the guest the moment
@@ -384,6 +391,70 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		PID:       pid,
 		Ports:     req.Ports,
 		CreatedAt: now,
+	})
+}
+
+// handleStartVM boots an existing STOPPED Firecracker VM in place (cold reboot,
+// disk preserved). Additive endpoint for the start-resume verb — never alters
+// create. Reuses the VM's existing NetIndex (no ReserveVM), boots the existing
+// rootfs via StartExisting, then re-runs the shared post-boot setup.
+func (s *Server) handleStartVM(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	vm, err := s.store.GetVM(name)
+	if err != nil {
+		httpError(w, err, http.StatusNotFound)
+		return
+	}
+	if vm.Status != "stopped" {
+		httpError(w, fmt.Errorf("VM %q is %s, not stopped", name, vm.Status), http.StatusConflict)
+		return
+	}
+	alloc := state.AllocateNet(vm.NetIndex)
+	pid, err := firecracker.StartExisting(s.executor, name, alloc, vm.Cpus, vm.MemoryMB)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	s.store.UpdateVM(name, func(v *state.VM) {
+		v.Status = "running"
+		v.GuestIP = alloc.GuestIP
+		v.TAPIP = alloc.TAPIP
+		v.TAPDevice = alloc.TAPDev
+		v.GuestMAC = alloc.GuestMAC
+		v.SocketPath = firecracker.SocketPath(name)
+		v.PID = pid
+		v.RootfsPath = firecracker.VMDir(name) + "/rootfs.ext4"
+		v.StoppedAt = nil
+	})
+	started, err := s.store.GetVM(name)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	var volumes []string
+	var seccomp string
+	if started.Spec != nil {
+		volumes = started.Spec.Volumes
+		seccomp = started.Spec.Seccomp
+	}
+	postBoot := func() error { return s.postBootSetup(name, alloc, volumes, seccomp) }
+	if len(volumes) > 0 {
+		if err := postBoot(); err != nil {
+			httpError(w, fmt.Errorf("volume setup: %w", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		go func() { _ = postBoot() }()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(VMResponse{
+		Name:      name,
+		Status:    "running",
+		GuestIP:   alloc.GuestIP,
+		PID:       pid,
+		Backend:   started.Backend,
+		Ports:     started.Ports,
+		CreatedAt: started.CreatedAt,
 	})
 }
 

@@ -1305,3 +1305,57 @@ func TestHandleVMLogsNotFoundVM(t *testing.T) {
 		t.Errorf("status = %d, want 404", w.Code)
 	}
 }
+
+func TestHandleStartVMResumesStopped(t *testing.T) {
+	s, store := testServer(t)
+	s.executor = &mockExecutor{runFunc: func(command string) (string, error) {
+		return "PID:4242", nil // StartExisting parses "PID:" from the start script (parsePID: no space, matches config.go's echo "PID:$FC_PID")
+	}}
+	vm := &state.VM{Name: "box", Status: "stopped", Cpus: 2, MemoryMB: 1024, CreatedAt: time.Now()}
+	if _, err := store.ReserveVM(vm); err != nil {
+		t.Fatalf("ReserveVM: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/vms/box/start", nil)
+	req.SetPathValue("name", "box")
+	w := httptest.NewRecorder()
+	s.handleStartVM(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var resp VMResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "running" || resp.PID != 4242 {
+		t.Errorf("resp = %+v, want status=running pid=4242", resp)
+	}
+	got, _ := store.GetVM("box")
+	if got.Status != "running" {
+		t.Errorf("persisted status = %q, want running", got.Status)
+	}
+}
+
+func TestHandleStartVMRejectsRunning(t *testing.T) {
+	s, store := testServer(t)
+	if _, err := store.ReserveVM(&state.VM{Name: "box", Status: "running", CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("ReserveVM: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/vms/box/start", nil)
+	req.SetPathValue("name", "box")
+	w := httptest.NewRecorder()
+	s.handleStartVM(w, req)
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409 for a non-stopped VM", w.Code)
+	}
+}
+
+func TestHandleStartVMNotFound(t *testing.T) {
+	s, _ := testServer(t)
+	req := httptest.NewRequest("POST", "/vms/ghost/start", nil)
+	req.SetPathValue("name", "ghost")
+	w := httptest.NewRecorder()
+	s.handleStartVM(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
