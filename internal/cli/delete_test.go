@@ -24,6 +24,17 @@ func withTestMvmDir(t *testing.T) string {
 	return dir
 }
 
+func TestNewDeleteCmdFlagShorthands(t *testing.T) {
+	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
+	cmd := newDeleteCmd(store)
+	if f := cmd.Flags().Lookup("force"); f == nil || f.Shorthand != "f" {
+		t.Errorf("--force = %+v, want shorthand f", f)
+	}
+	if a := cmd.Flags().Lookup("all"); a == nil || a.Shorthand != "a" {
+		t.Errorf("--all = %+v, want shorthand a", a)
+	}
+}
+
 func TestRunDeleteAppleVZRunningWithoutForceRefuses(t *testing.T) {
 	dir := withTestMvmDir(t)
 	store := state.NewStore(filepath.Join(dir, "state.json"))

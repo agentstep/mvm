@@ -3,31 +3,73 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 	vm_pkg "github.com/agentstep/mvm/internal/vm"
 	"github.com/spf13/cobra"
 )
 
 func newStopCmd(store *state.Store) *cobra.Command {
-	var force bool
+	var (
+		signalName string
+		timeout    int
+		all        bool
+	)
 
 	cmd := &cobra.Command{
 		Use:   "stop <name>",
-		Short: "Stop a running microVM",
-		Args:  cobra.ExactArgs(1),
+		Short: "Gracefully stop a running microVM",
+		Long: `Stop a running microVM. Sends --signal (default TERM) and waits up to
+--time seconds before force-killing.
+
+  mvm stop mybox
+  mvm stop mybox -s KILL     # skip graceful shutdown, kill immediately
+  mvm stop mybox -t 10       # wait up to 10s before killing
+  mvm stop --all`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			allFlag, _ := cmd.Flags().GetBool("all")
+			if allFlag {
+				return nil
+			}
+			if len(args) != 1 {
+				return fmt.Errorf("requires exactly 1 argument (or --all)")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runStop(store, args[0], force)
+			if all {
+				return runStopAll(store, signalName, timeout)
+			}
+			return runStop(store, args[0], signalName, timeout)
 		},
 	}
 
-	cmd.Flags().BoolVar(&force, "force", false, "skip graceful shutdown, kill immediately")
+	cmd.Flags().StringVarP(&signalName, "signal", "s", "TERM", "signal to send (TERM graceful, KILL immediate)")
+	cmd.Flags().IntVarP(&timeout, "time", "t", 5, "seconds to wait for graceful stop before killing")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "stop all running microVMs")
 
 	return cmd
 }
 
-func runStop(store *state.Store, name string, force bool) error {
+// signalIsKill reports whether a --signal value means "kill immediately".
+func signalIsKill(name string) bool {
+	switch strings.ToUpper(strings.TrimPrefix(strings.ToUpper(name), "SIG")) {
+	case "KILL", "9":
+		return true
+	default:
+		return false
+	}
+}
+
+// runStop stops one VM. signalName selects graceful (TERM) vs immediate (KILL);
+// timeoutSec is the graceful grace period (honored on applevz; advisory on the
+// Firecracker daemon path, whose wire contract exposes only a force bool).
+func runStop(store *state.Store, name, signalName string, timeoutSec int) error {
+	force := signalIsKill(signalName)
+
 	// Check if this is an Apple VZ VM (local state).
 	vm, _ := store.GetVM(name)
 	if vm != nil && vm.Backend == "applevz" {
@@ -59,8 +101,7 @@ func runStop(store *state.Store, name string, force bool) error {
 	}
 
 	fmt.Printf("Stopping microVM '%s'...\n", name)
-	ctx := context.Background()
-	if err := sc.StopVM(ctx, name, force); err != nil {
+	if err := sc.StopVM(context.Background(), name, force); err != nil {
 		return err
 	}
 
@@ -68,6 +109,37 @@ func runStop(store *state.Store, name string, force bool) error {
 		fmt.Println("  ✓ Force killed")
 	} else {
 		fmt.Println("  ✓ VM stopped")
+	}
+	return nil
+}
+
+// runStopAll stops every running/paused microVM across both backends, using the
+// same merged local-applevz + daemon view as `mvm ls` / delete --all.
+func runStopAll(store *state.Store, signalName string, timeoutSec int) error {
+	localVMs, err := localApplevzVMs(store)
+	if err != nil {
+		return err
+	}
+	var daemonVMs []server.VMResponse
+	if sc, err := requireDaemon(); err == nil {
+		if vms, err := sc.ListVMs(context.Background()); err == nil {
+			daemonVMs = vms
+		}
+	}
+	vms := mergeVMResponses(localVMs, daemonVMs)
+	stopped := 0
+	for _, vm := range vms {
+		if vm.Status != "running" && vm.Status != "paused" {
+			continue
+		}
+		if err := runStop(store, vm.Name, signalName, timeoutSec); err != nil {
+			fmt.Printf("  Warning: failed to stop %s: %v\n", vm.Name, err)
+			continue
+		}
+		stopped++
+	}
+	if stopped == 0 {
+		fmt.Println("No running microVMs to stop.")
 	}
 	return nil
 }

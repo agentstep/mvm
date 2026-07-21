@@ -106,7 +106,7 @@ func runBench(store *state.Store, samples int, jsonOut, keep bool) error {
 			benchProgress(jsonOut, "checkpoint failed: %v\n", err)
 		} else {
 			for i := 0; i < samples; i++ {
-				_ = runStop(store, benchVMName, false)
+				_ = runStop(store, benchVMName, "TERM", 5)
 				time.Sleep(500 * time.Millisecond) // let the helper release the disk lock
 				ms, ok := benchOneStart(store)
 				if ok {
@@ -145,7 +145,7 @@ func benchOneStart(store *state.Store) (float64, bool) {
 // next cold boot is genuinely cold. `mvm delete` needs the daemon for some
 // backends; for applevz we stop + purge the record + rm the VM dir directly.
 func benchClean(store *state.Store) {
-	_ = runStop(store, benchVMName, true)
+	_ = runStop(store, benchVMName, "KILL", 5)
 	time.Sleep(300 * time.Millisecond)
 	store.RemoveVM(benchVMName)
 	home, _ := os.UserHomeDir()

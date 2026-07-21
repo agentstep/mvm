@@ -41,8 +41,8 @@ func newDeleteCmd(store *state.Store) *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&force, "force", false, "stop the VM first if running")
-	cmd.Flags().BoolVar(&all, "all", false, "delete all microVMs")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "stop the VM first if running")
+	cmd.Flags().BoolVarP(&all, "all", "a", false, "delete all microVMs")
 
 	return cmd
 }

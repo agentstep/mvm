@@ -243,7 +243,7 @@ if [ "${BENCH_FAST:-0}" != "1" ]; then
     echo "METRIC snap_create_ms=$SNAP_CREATE_MS"
 
     echo "[bench] measuring snapshot restore..." >&2
-    mvm stop "$BW_VM" --force >/dev/null 2>&1 || true
+    mvm stop "$BW_VM" -s KILL >/dev/null 2>&1 || true
     mvm delete "$BW_VM" --force >/dev/null 2>&1 || true
     sleep 2
 
