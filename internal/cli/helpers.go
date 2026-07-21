@@ -11,7 +11,7 @@ import (
 func requireDaemon() (*server.Client, error) {
 	sc := server.DefaultClient()
 	if !sc.IsAvailable() {
-		return nil, fmt.Errorf("daemon not running. Start it with: mvm serve start")
+		return nil, fmt.Errorf("daemon not running. Start it with: mvm system start")
 	}
 	return sc, nil
 }

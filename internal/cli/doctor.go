@@ -9,18 +9,7 @@ import (
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/lima"
 	"github.com/agentstep/mvm/internal/state"
-	"github.com/spf13/cobra"
 )
-
-func newDoctorCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
-	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Check system health and diagnose issues",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDoctor(limaClient, store)
-		},
-	}
-}
 
 func runDoctor(limaClient *lima.Client, store *state.Store) error {
 	fmt.Println("mvm doctor — system diagnostics")

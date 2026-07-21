@@ -205,10 +205,12 @@ mvm start sandbox --image my-agent
 - `mvm build -f Dockerfile -t <name> [--size MB]` — build custom rootfs
 - `mvm images list` / `mvm images delete <name>`
 
-### Server
-- `mvm serve start` — run the daemon locally (Unix socket)
-- `mvm serve start --listen 0.0.0.0:19876 --tls-cert ... --api-key-file ...` — cloud mode
-- `mvm serve status` / `mvm serve stop`
+### System / daemon
+- `mvm system start` — run the daemon locally (Unix socket)
+- `mvm system start --listen 0.0.0.0:19876 --tls-cert ... --api-key-file ...` — cloud mode
+- `mvm system stop` — stop the daemon
+- `mvm system logs [-f]` — show (or follow) the daemon log
+- `mvm system version` — print mvm version
 
 ### Remote mode
 All commands accept `--remote https://server:19876 --api-key <key>` or via env: `MVM_REMOTE`, `MVM_API_KEY`, `MVM_CA_CERT`.

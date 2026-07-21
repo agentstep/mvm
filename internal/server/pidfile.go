@@ -43,7 +43,7 @@ func RemovePID(path string) error {
 func CheckNotRunning(pidPath string) error {
 	running, pid, _ := IsRunning(pidPath)
 	if running {
-		return fmt.Errorf("mvm server already running (PID %d). Stop it first: mvm serve stop", pid)
+		return fmt.Errorf("mvm server already running (PID %d). Stop it first: mvm system stop", pid)
 	}
 	// Stale PID file — clean up
 	if pid > 0 {

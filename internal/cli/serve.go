@@ -18,56 +18,6 @@ import (
 
 const serveLaunchdLabel = "com.mvm.serve"
 
-func newServeCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Manage the mvm daemon (fast exec via persistent connections)",
-	}
-
-	cmd.AddCommand(
-		newServeStartCmd(limaClient, store),
-		newServeStopCmd(),
-		newServeStatusCmd(),
-		newServeInstallCmd(),
-		newServeUninstallCmd(),
-	)
-
-	return cmd
-}
-
-func newServeStartCmd(limaClient *lima.Client, store *state.Store) *cobra.Command {
-	var (
-		socketPath string
-		listenAddr string
-		tlsCert    string
-		tlsKey     string
-		apiKeyFlag string
-		apiKeyFile string
-	)
-
-	cmd := &cobra.Command{
-		Use:   "start",
-		Short: "Start the mvm daemon",
-		Long: `Start the mvm daemon. Holds persistent vsock connections to running VMs
-and exposes an HTTP API on a Unix socket for fast exec.
-
-  mvm serve start                          # start in foreground
-  mvm serve start --listen 0.0.0.0:19876   # also listen on TCP
-  curl --unix-socket ~/.mvm/server.sock http://mvm/health`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServeStart(limaClient, store, socketPath, listenAddr, tlsCert, tlsKey, apiKeyFlag, apiKeyFile)
-		},
-	}
-
-	cmd.Flags().StringVar(&socketPath, "socket", "", "Unix socket path (default: ~/.mvm/server.sock)")
-	cmd.Flags().StringVar(&listenAddr, "listen", "", "TCP listen address (e.g. 0.0.0.0:19876)")
-	cmd.Flags().StringVar(&tlsCert, "tls-cert", "", "TLS certificate file")
-	cmd.Flags().StringVar(&tlsKey, "tls-key", "", "TLS private key file")
-	cmd.Flags().StringVar(&apiKeyFlag, "api-key", "", "API key for TCP auth")
-	cmd.Flags().StringVar(&apiKeyFile, "api-key-file", "", "File containing API key")
-	return cmd
-}
-
 func runServeStart(limaClient *lima.Client, store *state.Store, socketPath, listenAddr, tlsCert, tlsKey, apiKeyFlag, apiKeyFile string) error {
 	// Detect environment: inside Lima = LocalExecutor, macOS = lima.Client
 	var executor firecracker.Executor
@@ -107,69 +57,26 @@ func runServeStart(limaClient *lima.Client, store *state.Store, socketPath, list
 	return srv.Start(ctx)
 }
 
-func newServeStopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop",
-		Short: "Stop the mvm daemon",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			pidPath := server.DefaultPIDPath()
-			running, pid, _ := server.IsRunning(pidPath)
-			if !running {
-				fmt.Println("mvm daemon is not running")
-				return nil
-			}
-
-			process, err := os.FindProcess(pid)
-			if err != nil {
-				return err
-			}
-			if err := process.Signal(syscall.SIGTERM); err != nil {
-				return fmt.Errorf("failed to stop daemon (PID %d): %w", pid, err)
-			}
-			fmt.Printf("mvm daemon stopped (PID %d)\n", pid)
-			return nil
-		},
+// runServeStopE sends SIGTERM to the running mvm daemon. Shared by
+// `system stop`.
+func runServeStopE(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+	pidPath := server.DefaultPIDPath()
+	running, pid, _ := server.IsRunning(pidPath)
+	if !running {
+		fmt.Fprintln(out, "mvm daemon is not running")
+		return nil
 	}
-}
 
-func newServeStatusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show mvm daemon status",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c := server.DefaultClient()
-			if c.IsAvailable() {
-				pidPath := server.DefaultPIDPath()
-				_, pid, _ := server.IsRunning(pidPath)
-				fmt.Printf("mvm daemon: running (PID %d)\n", pid)
-				fmt.Printf("  Socket: %s\n", server.DefaultSocketPath())
-			} else {
-				fmt.Println("mvm daemon: not running")
-				fmt.Println("  Start with: mvm serve start")
-			}
-			return nil
-		},
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
 	}
-}
-
-func newServeInstallCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "install",
-		Short: "Install mvm daemon as a launchd agent (auto-start on login)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return installServeLaunchd()
-		},
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("failed to stop daemon (PID %d): %w", pid, err)
 	}
-}
-
-func newServeUninstallCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "uninstall",
-		Short: "Remove mvm daemon launchd agent",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return uninstallServeLaunchd()
-		},
-	}
+	fmt.Fprintf(out, "mvm daemon stopped (PID %d)\n", pid)
+	return nil
 }
 
 func servePlistPath() string {
@@ -192,7 +99,7 @@ func installServeLaunchd() error {
     <key>ProgramArguments</key>
     <array>
         <string>%s</string>
-        <string>serve</string>
+        <string>system</string>
         <string>start</string>
     </array>
     <key>KeepAlive</key>

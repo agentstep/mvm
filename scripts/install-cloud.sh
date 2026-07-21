@@ -379,7 +379,7 @@ Wants=mvm-nat.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvm serve start --listen 0.0.0.0:19876 --tls-cert /etc/mvm/cert.pem --tls-key /etc/mvm/key.pem --api-key-file /etc/mvm/api-key
+ExecStart=/usr/local/bin/mvm system start --listen 0.0.0.0:19876 --tls-cert /etc/mvm/cert.pem --tls-key /etc/mvm/key.pem --api-key-file /etc/mvm/api-key
 Environment=MVM_DATA_DIR=/var/mvm
 Restart=always
 RestartSec=5

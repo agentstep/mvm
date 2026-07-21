@@ -150,7 +150,7 @@ echo ""
 
 # --- Test 14: Version ---
 echo "[14. Version]"
-run_test_output "mvm version" "mvm" $MVM version
+run_test_output "mvm system version" "mvm" $MVM system version
 echo ""
 
 # --- Summary ---

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -27,9 +26,9 @@ func Execute(version, commit, date string) error {
 
 func newRootCmd(version, commit, date string) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "mvm",
-		Short: "Run Firecracker microVMs on macOS",
-		Long:  "mvm makes it trivially easy to run Firecracker microVMs on macOS Apple Silicon via Lima.",
+		Use:           "mvm",
+		Short:         "Run Firecracker microVMs on macOS",
+		Long:          "mvm makes it trivially easy to run Firecracker microVMs on macOS Apple Silicon via Lima.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -58,7 +57,7 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 	store := state.NewStore(filepath.Join(mvmDir, "state.json"))
 
 	rootCmd.AddCommand(
-		newVersionCmd(version, commit, date),
+		newSystemCmd(limaClient, store, version, commit, date),
 		newInitCmd(limaClient, store),
 		newStartCmd(store),
 		newCreateCmd(store),
@@ -76,7 +75,6 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newInspectCmd(store),
 		newDeleteCmd(store),
 		newPoolCmd(),
-		newDoctorCmd(limaClient, store),
 		newUpdateCmd(version),
 		newDiffCmd(limaClient, store),
 		newTemplateCmd(limaClient, store),
@@ -88,20 +86,9 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newImageCmd(store),
 		newIdleCmd(limaClient, store),
 		newInstallCmd(limaClient, store),
-		newServeCmd(limaClient, store),
 		newMenuCmd(),
 		newForwardDaemonCmd(store),
 	)
 
 	return rootCmd
-}
-
-func newVersionCmd(version, commit, date string) *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: "Print mvm version",
-		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("mvm %s (commit: %s, built: %s)\n", version, commit, date)
-		},
-	}
 }
