@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/agentstep/mvm/internal/firecracker"
@@ -26,6 +28,7 @@ func newSystemCmd(limaClient *lima.Client, store *state.Store, version, commit, 
 	// df (Task 19) is added to this AddCommand when that task lands.
 	cmd.AddCommand(
 		newSystemStatusCmd(limaClient, store, version),
+		newSystemDFCmd(store),
 		newSystemVersionCmd(version, commit, date),
 		newSystemLogsCmd(),
 		newSystemStartCmd(limaClient, store),
@@ -34,6 +37,93 @@ func newSystemCmd(limaClient *lima.Client, store *state.Store, version, commit, 
 		newSystemUninstallCmd(),
 	)
 	return cmd
+}
+
+type resourceItem struct {
+	InUse bool
+	Bytes uint64
+}
+
+func diskEntry(items []resourceItem) cfDiskEntry {
+	var e cfDiskEntry
+	for _, it := range items {
+		e.Total++
+		e.SizeInBytes += it.Bytes
+		if it.InUse {
+			e.Active++
+		} else {
+			e.Reclaimable += it.Bytes
+		}
+	}
+	return e
+}
+
+// buildDiskUsage assembles the container-shaped cfDiskUsage. Pure so the
+// active/reclaimable/total accounting is testable without a real data dir.
+// Volumes stay zero until the volume noun lands (Slice 2).
+func buildDiskUsage(containers, images []resourceItem) cfDiskUsage {
+	return cfDiskUsage{Containers: diskEntry(containers), Images: diskEntry(images), Volumes: cfDiskEntry{}}
+}
+
+func newSystemDFCmd(store *state.Store) *cobra.Command {
+	var format string
+	cmd := &cobra.Command{
+		Use:   "df",
+		Short: "Show mvm disk usage (VMs, images, volumes)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			containers, images, err := collectDiskUsage(cmd.Context(), store)
+			if err != nil {
+				return err
+			}
+			du := buildDiskUsage(containers, images)
+			if format == "json" {
+				data, err := json.MarshalIndent(du, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(data))
+				return nil
+			}
+			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
+			fmt.Fprintln(w, "TYPE\tACTIVE\tTOTAL\tSIZE\tRECLAIMABLE")
+			fmt.Fprintf(w, "Containers\t%d\t%d\t%d\t%d\n", du.Containers.Active, du.Containers.Total, du.Containers.SizeInBytes, du.Containers.Reclaimable)
+			fmt.Fprintf(w, "Images\t%d\t%d\t%d\t%d\n", du.Images.Active, du.Images.Total, du.Images.SizeInBytes, du.Images.Reclaimable)
+			fmt.Fprintf(w, "Volumes\t%d\t%d\t%d\t%d\n", du.Volumes.Active, du.Volumes.Total, du.Volumes.SizeInBytes, du.Volumes.Reclaimable)
+			w.Flush()
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&format, "format", "table", "output format: json|table")
+	return cmd
+}
+
+// collectDiskUsage gathers VM rootfs sizes (from the store) and image sizes
+// (from the daemon, best-effort — an applevz-only host has no daemon). A
+// container is in use when running; an image when a VM spec references it.
+func collectDiskUsage(ctx context.Context, store *state.Store) (containers, images []resourceItem, err error) {
+	vms, err := store.ListVMs()
+	if err != nil {
+		return nil, nil, err
+	}
+	inUseImage := make(map[string]bool)
+	for _, vm := range vms {
+		var b uint64
+		if fi, statErr := os.Stat(vm.RootfsPath); statErr == nil {
+			b = uint64(fi.Size())
+		}
+		containers = append(containers, resourceItem{InUse: vm.Status == "running", Bytes: b})
+		if vm.Spec != nil && vm.Spec.Image != "" {
+			inUseImage[vm.Spec.Image] = true
+		}
+	}
+	if sc, derr := requireDaemon(); derr == nil {
+		if imgs, lerr := sc.ImageList(ctx); lerr == nil {
+			for _, img := range imgs {
+				images = append(images, resourceItem{InUse: inUseImage[img.Name], Bytes: uint64(img.SizeMB) * 1024 * 1024})
+			}
+		}
+	}
+	return containers, images, nil
 }
 
 type systemStatus struct {

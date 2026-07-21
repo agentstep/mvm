@@ -29,7 +29,7 @@ func TestSystemSubcommandsRegistered(t *testing.T) {
 	}
 	// Task 17 wires these; status/df are added by Tasks 18/19 (which
 	// extend this test to assert them).
-	for _, w := range []string{"version", "logs", "start", "stop", "install", "uninstall", "status"} {
+	for _, w := range []string{"version", "logs", "start", "stop", "install", "uninstall", "status", "df"} {
 		if !have[w] {
 			t.Errorf("missing subcommand %q (have %v)", w, have)
 		}
@@ -84,6 +84,38 @@ func TestSystemStatusJSONShape(t *testing.T) {
 	for _, k := range []string{"backend", "daemonRunning"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("json missing key %q (%s)", k, b)
+		}
+	}
+}
+
+func TestBuildDiskUsageComputes(t *testing.T) {
+	du := buildDiskUsage(
+		[]resourceItem{{InUse: true, Bytes: 100}, {InUse: false, Bytes: 40}},
+		[]resourceItem{{InUse: true, Bytes: 10}, {InUse: false, Bytes: 5}},
+	)
+	if du.Containers.Active != 1 || du.Containers.Total != 2 {
+		t.Errorf("containers active/total = %d/%d, want 1/2", du.Containers.Active, du.Containers.Total)
+	}
+	if du.Containers.SizeInBytes != 140 || du.Containers.Reclaimable != 40 {
+		t.Errorf("containers size/reclaimable = %d/%d, want 140/40", du.Containers.SizeInBytes, du.Containers.Reclaimable)
+	}
+	if du.Images.SizeInBytes != 15 || du.Images.Reclaimable != 5 {
+		t.Errorf("images size/reclaimable = %d/%d, want 15/5", du.Images.SizeInBytes, du.Images.Reclaimable)
+	}
+	if du.Volumes != (cfDiskEntry{}) {
+		t.Errorf("volumes = %+v, want zero until Slice 2", du.Volumes)
+	}
+}
+
+func TestSystemDFJSONShape(t *testing.T) {
+	b, _ := json.Marshal(buildDiskUsage(nil, nil))
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"containers", "images", "volumes"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("df json missing %q (%s)", k, b)
 		}
 	}
 }
