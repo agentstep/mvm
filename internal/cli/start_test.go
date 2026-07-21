@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
@@ -469,5 +470,34 @@ func TestRunStartNoLongerRejectsStartupOrSecretsOnDaemonPath(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not found") {
 		t.Errorf("err = %v, want it to mention the missing secret", err)
+	}
+}
+
+func TestStoppedApplevzVMPassesExistenceGuard(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	store := state.NewStore(filepath.Join(home, ".mvm", "state.json"))
+	store.MarkInitialized("v1.13.0", "applevz")
+	vm := &state.VM{Name: "box", Backend: "applevz", Status: "stopped", CreatedAt: time.Now()}
+	if _, err := store.ReserveVM(vm); err != nil {
+		t.Fatalf("ReserveVM: %v", err)
+	}
+	vmDir := filepath.Join(home, ".mvm", "vms", "box")
+	if err := os.MkdirAll(vmDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(vmDir, "rootfs.ext4"), []byte("PRESERVED"), 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+	_, err := runStartAppleVZ(store, "box", true, nil, "open", 0, 0, nil, outQuiet, nil, nil, "")
+	if err != nil && strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("runStartAppleVZ() = %v, want the stopped VM allowed through as a resume", err)
+	}
+	data, readErr := os.ReadFile(filepath.Join(vmDir, "rootfs.ext4"))
+	if readErr != nil {
+		t.Fatalf("read rootfs after resume attempt: %v", readErr)
+	}
+	if string(data) != "PRESERVED" {
+		t.Errorf("rootfs = %q, want the preserved contents untouched", data)
 	}
 }

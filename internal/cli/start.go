@@ -478,9 +478,12 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	now := time.Now()
 	var netIndex int
 	if existing, _ := store.GetVM(name); existing != nil {
-		// Already in state — allow it only as a restore: a stopped VM that has
-		// a saved state file. Reuse its existing network allocation.
-		if _, statErr := os.Stat(statePath); statErr != nil {
+		// Already in state. Allow it through as either (a) a restore from a
+		// saved RAM snapshot, or (b) a cold-boot resume of a cleanly stopped
+		// VM (rootfs preserved, no snapshot). Anything else — a VM state
+		// thinks is still running/paused with no snapshot — is a real
+		// collision. Reuse its existing network allocation.
+		if _, statErr := os.Stat(statePath); statErr != nil && existing.Status != "stopped" {
 			return nil, fmt.Errorf("microVM %q already exists", name)
 		}
 		netIndex = existing.NetIndex
@@ -526,6 +529,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 				}
 			}
 		}
+	} else if _, statErr := os.Stat(vmRootfs); statErr == nil {
+		// A stopped VM being resumed: its per-VM rootfs already holds the disk
+		// writes from before the stop. Do NOT re-copy base.ext4 over it — that
+		// would destroy the preserved state (same invariant as the restore branch).
 	} else if err := execLocal(fmt.Sprintf("cp -c %s %s", rootfsPath, vmRootfs)); err != nil {
 		// APFS copy-on-write clone — instant regardless of rootfs size, so a
 		// richer (Node/Python) base doesn't slow cold boot. Fall back to a plain
