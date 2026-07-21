@@ -49,15 +49,14 @@ func resolveImage(image string) string {
 	return image
 }
 
-// resolveRunName decides the VM's name and whether it should be deleted
-// after its foreground command exits. An explicit --name opts into
-// durability (never auto-deleted); with no --name, a fresh name is
-// generated and the VM is ephemeral.
-func resolveRunName(nameFlag string, existing map[string]bool) (name string, ephemeral bool) {
+// resolveRunName decides the VM's name: an explicit --name is used verbatim,
+// else a fresh adjective-noun name is generated. Durability is no longer tied
+// to the name — run persists by default; see resolveRmFlag.
+func resolveRunName(nameFlag string, existing map[string]bool) string {
 	if nameFlag != "" {
-		return nameFlag, false
+		return nameFlag
 	}
-	return GenerateVMName(existing), true
+	return GenerateVMName(existing)
 }
 
 // existingVMNames returns every VM name currently known, merging local
@@ -88,14 +87,11 @@ func existingVMNames(store *state.Store) (map[string]bool, error) {
 	return names, nil
 }
 
-// resolveRmFlag validates --rm against --detach. Detached VMs can't be
-// auto-reaped yet — mvm run returns and there is no background process
-// watching them — so --rm -d is a clear error rather than a silent no-op.
-// --rm in foreground mode is accepted (docker users reach for it out of
-// muscle memory) but is genuinely redundant there: foreground mvm run is
-// already ephemeral by default unless --name opts into durability. warn
-// reports whether that redundancy note should be printed.
-func resolveRmFlag(rm, detach bool) (warn bool, err error) {
+// resolveRmFlag validates --rm against --detach and reports whether the VM
+// should be auto-deleted when its foreground command exits. run now persists
+// by default (container semantics); --rm opts into ephemeral cleanup. Detached
+// VMs can't be reaped, so --rm -d is an error.
+func resolveRmFlag(rm, detach bool) (autoDelete bool, err error) {
 	if rm && detach {
 		return false, fmt.Errorf("--rm requires a foreground command; detached VMs can't be reaped on exit yet (clean up with: mvm delete <name>)")
 	}
@@ -122,14 +118,15 @@ func newRunCmd(store *state.Store) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "run <image> [-- command [args...]]",
-		Short: "Boot a VM from an image and run a command, ephemeral by default",
+		Short: "Boot a VM from an image and run a command; the VM persists by default",
 		Long: `Boot a VM from an image, image-first (Docker-style).
 
-Without --name, the VM is auto-named and deleted after the command exits
-(like docker run --rm). With --name, the VM persists. "base" is the
-default rootfs — there is no other catalogued image yet.
+The VM persists after the command exits (container run semantics). Pass --rm
+to auto-delete it on exit. Without --name the VM is auto-named. "base" is the
+default rootfs.
 
-  mvm run base -- ls /                  # ephemeral: boots, runs, deletes
+  mvm run base -- ls /                  # boots, runs, PERSISTS
+  mvm run base --rm -- ls /             # boots, runs, deletes
   mvm run base --name mybox -- bash     # persists as "mybox"
   mvm run base -d                       # boot and detach, no command
   mvm run base -p 8080:80 -- serve`,
@@ -155,29 +152,26 @@ default rootfs — there is no other catalogued image yet.
 
 	cmd.Flags().StringVar(&name, "name", "", "use this name and keep the VM after the command exits")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "boot and return immediately; do not run a foreground command")
-	cmd.Flags().IntVar(&cpus, "cpus", 0, "vCPU count (default: 2)")
-	cmd.Flags().IntVar(&memoryMB, "memory", 0, "RAM in MiB (default: 1024)")
+	cmd.Flags().IntVarP(&cpus, "cpus", "c", 0, "vCPU count (default: 2)")
+	cmd.Flags().IntVarP(&memoryMB, "memory", "m", 0, "RAM in MiB (default: 1024)")
 	cmd.Flags().StringVar(&netPolicy, "net-policy", "open", "network policy: open, deny, or allow:domain1,domain2")
 	cmd.Flags().StringArrayVarP(&ports, "publish", "p", nil, "publish port (hostPort:guestPort[/proto])")
-	cmd.Flags().StringArrayVarP(&volumes, "volume", "V", nil, "bind mount (hostPath:guestPath)")
+	cmd.Flags().StringArrayVarP(&volumes, "volume", "v", nil, "bind mount (hostPath:guestPath)")
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open (foreground command only)")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY (foreground command only)")
 	cmd.Flags().StringArrayVarP(&envVars, "env", "e", nil, "set environment variables (KEY=VALUE, foreground command only)")
 	cmd.Flags().StringVar(&envFile, "env-file", "", "read environment variables from a file (KEY=VALUE per line, foreground command only)")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "run as user (foreground command only)")
 	cmd.Flags().StringVarP(&workdir, "workdir", "w", "", "working directory inside the VM (foreground command only)")
-	cmd.Flags().BoolVar(&rm, "rm", false, "detached: error, since a detached VM can't be reaped yet; foreground: no-op (mvm run is already ephemeral by default unless --name is given)")
+	cmd.Flags().BoolVar(&rm, "rm", false, "auto-delete the VM when the foreground command exits (error with -d)")
 
 	return cmd
 }
 
 func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string, detach bool, cpus, memoryMB int, netPolicy string, ports []state.PortMap, volumes []string, interactive bool, workdir string, envVars []string, user string, rm bool) error {
-	warnRm, err := resolveRmFlag(rm, detach)
+	autoDelete, err := resolveRmFlag(rm, detach)
 	if err != nil {
 		return err
-	}
-	if warnRm {
-		fmt.Fprintln(os.Stderr, "note: --rm has no effect in foreground mode — mvm run is already ephemeral by default unless --name is given")
 	}
 
 	resolvedImage := resolveImage(image)
@@ -186,7 +180,7 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 	if err != nil {
 		return err
 	}
-	name, ephemeral := resolveRunName(nameFlag, existing)
+	name := resolveRunName(nameFlag, existing)
 
 	// Always create detached — run manages its own foreground behavior
 	// (readiness wait + exec) rather than delegating to start's boot-log
@@ -196,19 +190,15 @@ func runRun(store *state.Store, image string, cmdArgs []string, nameFlag string,
 	}
 
 	cleanup := func() {
-		if ephemeral {
+		if autoDelete {
 			if err := runDelete(store, name, true); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to clean up ephemeral VM %q: %v\n", name, err)
+				fmt.Fprintf(os.Stderr, "warning: failed to clean up VM %q: %v\n", name, err)
 			}
 		}
 	}
 
 	if detach {
-		if ephemeral {
-			fmt.Printf("%s (ephemeral — clean up with: mvm delete %s)\n", name, name)
-		} else {
-			fmt.Printf("%s\n", name)
-		}
+		fmt.Printf("%s\n", name)
 		return nil
 	}
 
