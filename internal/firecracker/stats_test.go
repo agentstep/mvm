@@ -65,3 +65,45 @@ func TestProcessStatsPropagatesExecutorError(t *testing.T) {
 		t.Errorf("error should wrap the underlying cause, got: %v", err)
 	}
 }
+
+// === ParseCumulativePS / parseCPUTime ===
+
+func TestParseCPUTime(t *testing.T) {
+	cases := []struct {
+		in   string
+		want uint64
+	}{
+		{"00:12.50", 12_500_000},
+		{"01:02", 62_000_000},
+		{"01:02:03", 3_723_000_000},
+		{"1-00:00:00", 86_400_000_000},
+	}
+	for _, c := range cases {
+		got, err := parseCPUTime(c.in)
+		if err != nil {
+			t.Fatalf("%q: %v", c.in, err)
+		}
+		if got != c.want {
+			t.Fatalf("%q: got %d want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestParseCumulativePS(t *testing.T) {
+	cpu, memMB, err := ParseCumulativePS("  00:12.50 102400\n")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if cpu != 12_500_000 {
+		t.Fatalf("cpu: got %d want 12500000", cpu)
+	}
+	if memMB != 100.0 {
+		t.Fatalf("mem: got %v want 100", memMB)
+	}
+}
+
+func TestParseCumulativePSBadFields(t *testing.T) {
+	if _, _, err := ParseCumulativePS("only-one-field"); err == nil {
+		t.Fatal("want error on malformed ps output")
+	}
+}

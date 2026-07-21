@@ -8,11 +8,9 @@ import (
 
 // ParsePSOutput parses the output of `ps -o %cpu=,rss= -p <pid>` (two
 // whitespace-separated numeric fields, no header — the trailing "=" on each
-// -o key suppresses ps's column header). Shared by ProcessStats (Firecracker,
-// run inside Lima via an Executor) and the CLI's own host-local ps call for
-// applevz PIDs (internal/cli/stats.go's hostProcessStats), so the parsing
-// logic — and its test coverage — isn't duplicated between the two
-// transports.
+// -o key suppresses ps's column header). Used by ProcessStats (Firecracker,
+// run inside Lima via an Executor). Reports an instantaneous %cpu; for the
+// cumulative-CPU-microseconds fidelity cfStats needs, see ParseCumulativePS.
 func ParsePSOutput(out string) (cpuPct, memMB float64, err error) {
 	fields := strings.Fields(strings.TrimSpace(out))
 	if len(fields) != 2 {
@@ -43,4 +41,60 @@ func ProcessStats(ex Executor, pid int) (cpuPct, memMB float64, err error) {
 		return 0, 0, fmt.Errorf("ps -p %d: %w", pid, err)
 	}
 	return ParsePSOutput(out)
+}
+
+// ParseCumulativePS parses `ps -o time=,rss= -p <pid>` — two fields: cumulative
+// CPU time [[DD-]HH:]MM:SS[.ff] and resident memory in KiB. Returns cumulative
+// CPU in microseconds (monotonic) and memory in MiB. Portable across BSD ps
+// (macOS/applevz) and Linux ps (Lima/firecracker) — both spell cumulative CPU
+// as the `time` keyword.
+func ParseCumulativePS(out string) (cpuUsec uint64, memMB float64, err error) {
+	fields := strings.Fields(strings.TrimSpace(out))
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("unexpected ps output %q (want 2 fields: time rss)", out)
+	}
+	cpuUsec, err = parseCPUTime(fields[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	rssKB, err := strconv.ParseFloat(fields[1], 64)
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse rss %q: %w", fields[1], err)
+	}
+	return cpuUsec, rssKB / 1024.0, nil
+}
+
+// parseCPUTime converts a ps `time` field — [[DD-]HH:]MM:SS[.ff] — to microseconds.
+func parseCPUTime(s string) (uint64, error) {
+	days := 0
+	rest := s
+	if i := strings.IndexByte(rest, '-'); i >= 0 {
+		d, err := strconv.Atoi(rest[:i])
+		if err != nil {
+			return 0, fmt.Errorf("parse cpu days %q: %w", s, err)
+		}
+		days = d
+		rest = rest[i+1:]
+	}
+	parts := strings.Split(rest, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, fmt.Errorf("parse cpu time %q: want [[DD-]HH:]MM:SS", s)
+	}
+	var hours, mins int
+	var secs float64
+	var err error
+	if len(parts) == 3 {
+		if hours, err = strconv.Atoi(parts[0]); err != nil {
+			return 0, fmt.Errorf("parse cpu hours %q: %w", s, err)
+		}
+		parts = parts[1:]
+	}
+	if mins, err = strconv.Atoi(parts[0]); err != nil {
+		return 0, fmt.Errorf("parse cpu minutes %q: %w", s, err)
+	}
+	if secs, err = strconv.ParseFloat(parts[1], 64); err != nil {
+		return 0, fmt.Errorf("parse cpu seconds %q: %w", s, err)
+	}
+	total := float64(days)*86400 + float64(hours)*3600 + float64(mins)*60 + secs
+	return uint64(total * 1e6), nil
 }
