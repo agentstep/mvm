@@ -26,9 +26,9 @@ func TestSystemSubcommandsRegistered(t *testing.T) {
 	for _, sub := range c.Commands() {
 		have[sub.Name()] = true
 	}
-	// Task 17 wires these four; status/df are added by Tasks 18/19 (which
+	// Task 17 wires these; status/df are added by Tasks 18/19 (which
 	// extend this test to assert them).
-	for _, w := range []string{"version", "logs", "start", "stop"} {
+	for _, w := range []string{"version", "logs", "start", "stop", "install", "uninstall"} {
 		if !have[w] {
 			t.Errorf("missing subcommand %q (have %v)", w, have)
 		}

@@ -27,6 +27,8 @@ func newSystemCmd(limaClient *lima.Client, store *state.Store, version, commit, 
 		newSystemLogsCmd(),
 		newSystemStartCmd(limaClient, store),
 		newSystemStopCmd(),
+		newSystemInstallCmd(),
+		newSystemUninstallCmd(),
 	)
 	return cmd
 }
@@ -61,6 +63,26 @@ func newSystemStartCmd(limaClient *lima.Client, store *state.Store) *cobra.Comma
 
 func newSystemStopCmd() *cobra.Command {
 	return &cobra.Command{Use: "stop", Short: "Stop the mvm daemon", RunE: runServeStopE}
+}
+
+func newSystemInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install the mvm daemon as a launchd login agent (auto-start on login)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return installServeLaunchd()
+		},
+	}
+}
+
+func newSystemUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the mvm daemon launchd login agent",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return uninstallServeLaunchd()
+		},
+	}
 }
 
 func newSystemLogsCmd() *cobra.Command {

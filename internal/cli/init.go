@@ -211,7 +211,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/mvm/mvm-daemon serve start
+ExecStart=/opt/mvm/mvm-daemon system start
 Restart=always
 RestartSec=2
 Environment=HOME=$HOME
