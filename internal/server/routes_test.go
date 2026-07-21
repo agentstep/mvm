@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -261,6 +264,35 @@ func TestHandleCreateVMRejectsInjectionImage(t *testing.T) {
 	}
 	if _, err := store.GetVM("web"); err == nil {
 		t.Error("VM was created despite an invalid image; image must be validated before ReserveVM")
+	}
+}
+
+func TestHandleCreateVMSyncVolumeFailureTearsDown(t *testing.T) {
+	dir := t.TempDir()
+	store := state.NewStore(filepath.Join(dir, "state.json"))
+	store.MarkInitialized("v1.13.0", "firecracker")
+	// "OK" satisfies WaitForGuest's nc probe so the synchronous post-boot path
+	// runs immediately instead of blocking on the 120s guest-boot timeout.
+	ex := &mockExecutor{runFunc: func(command string) (string, error) { return "OK", nil }}
+	s := &Server{store: store, executor: ex}
+
+	// A volume whose host path does not exist makes SetupVolumeMounts fail fast
+	// (buildTarArchive can't stat it) — standing in for any copy-in failure.
+	body, _ := json.Marshal(CreateVMRequest{
+		Name:    "web",
+		Volumes: []string{filepath.Join(dir, "nope") + ":/data"},
+	})
+	req := httptest.NewRequest("POST", "/vms", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.handleCreateVM(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 when a -V copy-in fails synchronously; body: %s", w.Code, w.Body.String())
+	}
+	// The half-created VM must be gone — a failed volume setup should not leave
+	// a running VM the client thinks doesn't exist.
+	if _, err := store.GetVM("web"); err == nil {
+		t.Error("VM must be torn down when its -V copy-in fails, not left half-created")
 	}
 }
 
@@ -1169,6 +1201,77 @@ func TestHandleVMLogsReturnsFileContents(t *testing.T) {
 	if frame.Type != "data" || frame.Data != "line1\nline2\nline3\n" {
 		t.Errorf("frame = %+v, want the full log contents", frame)
 	}
+}
+
+// TestHandleVMLogsFollowStreamsAppends exercises the follow-mode poll loop
+// over a real HTTP connection (httptest.NewServer, not NewRecorder, which
+// can't observe streaming) — the append made after the initial read must
+// arrive as a second NDJSON frame.
+func TestHandleVMLogsFollowStreamsAppends(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", CreatedAt: time.Now()})
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+
+	vmDir := firecracker.VMDir("web")
+	if err := os.MkdirAll(vmDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(vmDir, "firecracker.log")
+	if err := os.WriteFile(logPath, []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(s.buildMux())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/v1/vms/web/logs?boot=true&follow=true", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	type frame struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+	}
+	scanner := bufio.NewScanner(resp.Body)
+
+	readFrame := func() frame {
+		t.Helper()
+		if !scanner.Scan() {
+			t.Fatalf("expected another NDJSON frame; scan err: %v", scanner.Err())
+		}
+		var fr frame
+		if err := json.Unmarshal(scanner.Bytes(), &fr); err != nil {
+			t.Fatalf("decode frame %q: %v", scanner.Text(), err)
+		}
+		return fr
+	}
+
+	if fr := readFrame(); fr.Type != "data" || fr.Data != "initial\n" {
+		t.Fatalf("first frame = %+v, want the initial contents", fr)
+	}
+
+	// Append after the initial read — the poll loop must pick it up and send it.
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("appended\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	if fr := readFrame(); fr.Type != "data" || fr.Data != "appended\n" {
+		t.Errorf("second frame = %+v, want the appended contents streamed by follow mode", fr)
+	}
+
+	cancel() // end the stream; server returns on r.Context().Done()
+	io.Copy(io.Discard, resp.Body)
 }
 
 func TestHandleVMLogsTail(t *testing.T) {

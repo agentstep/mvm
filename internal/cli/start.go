@@ -451,7 +451,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 	// Firecracker backend always uses the shared vmlinux. See
 	// resolveApplevzKernel and build-applevz-kernel.sh.
 	kernelPath, kernelWarning := resolveApplevzKernel(cacheDir)
-	if kernelWarning != "" {
+	// The fallback only matters when volumes are requested — the shared kernel
+	// boots everything else fine. Warn only for -V so a plain `mvm start` isn't
+	// noisy on every applevz host that hasn't built the custom kernel.
+	if kernelWarning != "" && len(volumes) > 0 {
 		logf("  Warning: %s\n", kernelWarning)
 	}
 	rootfsPath, err := resolveAppleVZImage(cacheDir, image, func(img, dest string) error {

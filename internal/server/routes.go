@@ -317,10 +317,13 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		v.RootfsPath = firecracker.VMDir(req.Name) + "/rootfs.ext4"
 	})
 
-	go func() {
+	// postBoot runs the setup that can only happen once the guest agent is up.
+	// It returns the volume copy-in error (if any); network/policy/seccomp
+	// failures are logged but non-fatal, matching prior behavior.
+	postBoot := func() error {
 		if !firecracker.WaitForGuest(s.executor, alloc.GuestIP, 120*time.Second) {
 			log.Printf("VM %s: guest agent not reachable after 120s", req.Name)
-			return
+			return fmt.Errorf("guest agent not reachable after 120s")
 		}
 		firecracker.SetupGuestNetworkViaAgent(s.executor, alloc.GuestIP, alloc.TAPIP)
 
@@ -328,7 +331,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		postVM, err := s.store.GetVM(req.Name)
 		if err != nil {
 			log.Printf("VM %s: failed to reload state for post-boot setup: %v", req.Name, err)
-			return
+			return err
 		}
 
 		if err := firecracker.SetupPortForwarding(s.executor, postVM); err != nil {
@@ -337,9 +340,11 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		if err := firecracker.ApplyNetworkPolicyViaAgent(s.executor, postVM); err != nil {
 			log.Printf("VM %s: network policy setup failed: %v", req.Name, err)
 		}
+		var volErr error
 		if len(req.Volumes) > 0 {
 			if err := firecracker.SetupVolumeMounts(postVM, req.Volumes); err != nil {
 				log.Printf("VM %s: volume mount setup failed: %v", req.Name, err)
+				volErr = err
 			}
 		}
 		if req.Seccomp != "" {
@@ -347,7 +352,28 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 				log.Printf("VM %s: seccomp setup failed: %v", req.Name, err)
 			}
 		}
-	}()
+		return volErr
+	}
+
+	// When volumes are requested, the client execs into the guest the moment
+	// this create returns — so the tar copy-in must be finished by then, or the
+	// command races an empty mount (a silent, timing-dependent wrong result).
+	// Run post-boot setup synchronously for the -V case and fail the create if
+	// the copy-in fails, tearing the half-created VM down so the caller sees a
+	// real error instead of an empty directory. Volume-free VMs keep the fast
+	// fire-and-forget path.
+	if len(req.Volumes) > 0 {
+		if err := postBoot(); err != nil {
+			if cvm, gerr := s.store.GetVM(req.Name); gerr == nil {
+				firecracker.Cleanup(s.executor, cvm)
+			}
+			s.store.RemoveVM(req.Name)
+			httpError(w, fmt.Errorf("volume setup: %w", err), http.StatusInternalServerError)
+			return
+		}
+	} else {
+		go func() { _ = postBoot() }()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
@@ -1038,6 +1064,17 @@ func (s *Server) handleVMLogs(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	}
+	// writeErrorFrame emits a terminal {"type":"error"} NDJSON frame. Once
+	// streaming has begun the HTTP status is already 200, so an error that
+	// occurs mid-stream (only possible in follow mode) can't be reported via
+	// httpError — the client (Client.StreamLogs) surfaces this frame instead.
+	writeErrorFrame := func(msg string) {
+		frame, _ := json.Marshal(map[string]string{"type": "error", "error": msg})
+		w.Write(append(frame, '\n'))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 
 	if tail > 0 {
 		lines, err := tailLines(f, tail)
@@ -1083,6 +1120,7 @@ func (s *Server) handleVMLogs(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if err != nil && err != io.EOF {
+				writeErrorFrame(fmt.Sprintf("read boot log: %v", err))
 				return
 			}
 		}
