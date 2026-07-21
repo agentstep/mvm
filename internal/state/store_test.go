@@ -631,6 +631,57 @@ func TestValidateNameRejectsShellInjection(t *testing.T) {
 	}
 }
 
+func TestValidatePortAcceptsValid(t *testing.T) {
+	valid := []PortMap{
+		{HostPort: 8080, GuestPort: 80, Proto: "tcp"},
+		{HostPort: 53, GuestPort: 53, Proto: "udp"},
+		{HostPort: 8080, GuestPort: 80, Proto: ""}, // empty proto defaults to tcp downstream
+		{HostIP: "127.0.0.1", HostPort: 8080, GuestPort: 80, Proto: "tcp"},
+		{HostIP: "0.0.0.0", HostPort: 1, GuestPort: 65535, Proto: "tcp"},
+		{HostIP: "::1", HostPort: 8080, GuestPort: 80, Proto: "tcp"},
+	}
+	for _, p := range valid {
+		if err := ValidatePort(p); err != nil {
+			t.Errorf("ValidatePort(%+v) = %v, want nil", p, err)
+		}
+	}
+}
+
+func TestValidatePortRejectsHostIPInjection(t *testing.T) {
+	// HostIP is interpolated into a root `sudo iptables` command on the
+	// Firecracker daemon host — anything that isn't a bare IP must be rejected.
+	malicious := []string{
+		"$(id > /tmp/pwn)",
+		"127.0.0.1; rm -rf /",
+		"`whoami`",
+		"1.2.3.4 -j ACCEPT",
+		"not-an-ip",
+		"127.0.0.1/24", // CIDR is not a bare IP; iptables -d would take it but we forbid it for a tight surface
+	}
+	for _, ip := range malicious {
+		p := PortMap{HostIP: ip, HostPort: 8080, GuestPort: 80, Proto: "tcp"}
+		if err := ValidatePort(p); err == nil {
+			t.Errorf("ValidatePort(HostIP=%q) should reject non-IP host address", ip)
+		}
+	}
+}
+
+func TestValidatePortRejectsBadProtoAndPorts(t *testing.T) {
+	bad := []PortMap{
+		{HostPort: 8080, GuestPort: 80, Proto: "tcp; rm -rf /"},
+		{HostPort: 8080, GuestPort: 80, Proto: "icmp"},
+		{HostPort: 0, GuestPort: 80, Proto: "tcp"},
+		{HostPort: 70000, GuestPort: 80, Proto: "tcp"},
+		{HostPort: 8080, GuestPort: 0, Proto: "tcp"},
+		{HostPort: 8080, GuestPort: -1, Proto: "tcp"},
+	}
+	for _, p := range bad {
+		if err := ValidatePort(p); err == nil {
+			t.Errorf("ValidatePort(%+v) should reject", p)
+		}
+	}
+}
+
 // === NEW TESTS: Per-VM resources (cpus, memory) ===
 
 func TestVMWithCustomResources(t *testing.T) {

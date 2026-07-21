@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -42,6 +43,32 @@ type PortMap struct {
 	HostPort  int    `json:"host_port"`
 	GuestPort int    `json:"guest_port"`
 	Proto     string `json:"proto"` // "tcp" or "udp"
+}
+
+// ValidatePort rejects any PortMap whose fields could break out of their
+// intended use. This is load-bearing for security, not just hygiene: on the
+// Firecracker backend HostIP and Proto are interpolated into a `sudo iptables`
+// command string that the daemon runs via `bash -c` (see
+// internal/firecracker/network.go's SetupPortForwarding). An unvalidated
+// HostIP like "$(cmd)" would be arbitrary root code execution on the daemon
+// host. Both the CLI (parsePorts) and the daemon (handleCreateVM — the real
+// trust boundary, since a remote client can POST any request body) call this.
+func ValidatePort(p PortMap) error {
+	if p.HostIP != "" && net.ParseIP(p.HostIP) == nil {
+		return fmt.Errorf("invalid host IP %q (must be a valid IP address)", p.HostIP)
+	}
+	switch p.Proto {
+	case "", "tcp", "udp":
+	default:
+		return fmt.Errorf("invalid protocol %q (must be tcp or udp)", p.Proto)
+	}
+	if p.HostPort < 1 || p.HostPort > 65535 {
+		return fmt.Errorf("invalid host port %d (must be 1-65535)", p.HostPort)
+	}
+	if p.GuestPort < 1 || p.GuestPort > 65535 {
+		return fmt.Errorf("invalid guest port %d (must be 1-65535)", p.GuestPort)
+	}
+	return nil
 }
 
 // State holds all mvm state.

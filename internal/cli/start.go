@@ -122,7 +122,11 @@ func parsePorts(ports []string) ([]state.PortMap, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid guest port %q: %w", guestPortStr, err)
 		}
-		result = append(result, state.PortMap{HostIP: hostIP, HostPort: host, GuestPort: guest, Proto: proto})
+		pm := state.PortMap{HostIP: hostIP, HostPort: host, GuestPort: guest, Proto: proto}
+		if err := state.ValidatePort(pm); err != nil {
+			return nil, err
+		}
+		result = append(result, pm)
 	}
 	return result, nil
 }

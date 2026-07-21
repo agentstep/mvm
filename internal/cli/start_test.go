@@ -40,6 +40,9 @@ func TestParsePorts(t *testing.T) {
 		{[]string{":8080:80"}, 0, true, "", 0, 0, ""},         // empty host-ip
 		{[]string{"1:2:3:4"}, 0, true, "", 0, 0, ""},          // too many segments
 		{[]string{"127.0.0.1:abc:80"}, 0, true, "", 0, 0, ""}, // bad host port with host-ip present
+		{[]string{"$(id):8080:80"}, 0, true, "", 0, 0, ""},    // injection host-ip (would hit sudo iptables)
+		{[]string{"not-an-ip:8080:80"}, 0, true, "", 0, 0, ""}, // non-IP host address
+		{[]string{"8080:80/tcp;rm"}, 0, true, "", 0, 0, ""},    // injection proto
 	}
 
 	for _, tt := range tests {

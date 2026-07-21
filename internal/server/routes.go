@@ -224,6 +224,29 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate ports before any of their fields reach SetupPortForwarding,
+	// which interpolates HostIP/Proto into a root `sudo iptables` shell
+	// command. A remote client can POST an arbitrary body, so this server-side
+	// check — not just the CLI's parsePorts — is the load-bearing one.
+	for _, p := range req.Ports {
+		if err := state.ValidatePort(p); err != nil {
+			httpError(w, err, http.StatusBadRequest)
+			return
+		}
+	}
+
+	// A non-empty Image is interpolated into a root bash script (config.go's
+	// StartScriptWithImage, IMAGE_PATH=...) and a CacheDir path, so restrict it
+	// to safe characters exactly like handleBuild does — otherwise a crafted
+	// image name is a path-traversal/injection vector on the create path. Empty
+	// means the default base image and is left alone.
+	if req.Image != "" {
+		if err := state.ValidateName(req.Image); err != nil || req.Image == "." || req.Image == ".." {
+			httpError(w, fmt.Errorf("invalid image %q", req.Image), http.StatusBadRequest)
+			return
+		}
+	}
+
 	now := time.Now()
 	vm := &state.VM{
 		Name:      req.Name,
@@ -881,6 +904,14 @@ func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
 // filesystem with that Linux host at all.
 func (s *Server) handleImageDownload(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	// {name} arrives percent-decoded, so it can contain "/" (e.g.
+	// "..%2f..%2fetc%2fpasswd"). ValidateName rejects any path separator,
+	// which is what stops this from escaping CacheDir into an arbitrary
+	// *.ext4 read elsewhere on the host.
+	if err := state.ValidateName(name); err != nil {
+		httpError(w, err, http.StatusBadRequest)
+		return
+	}
 	imagePath := filepath.Join(firecracker.CacheDir(), name+".ext4")
 
 	f, err := os.Open(imagePath)
@@ -903,6 +934,12 @@ func (s *Server) handleImageDownload(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	// Same traversal guard as handleImageDownload — without it, a crafted
+	// {name} could delete an arbitrary *.ext4 file anywhere on the host.
+	if err := state.ValidateName(name); err != nil {
+		httpError(w, err, http.StatusBadRequest)
+		return
+	}
 
 	imagePath := filepath.Join(firecracker.CacheDir(), name+".ext4")
 	if _, err := os.Stat(imagePath); err != nil {

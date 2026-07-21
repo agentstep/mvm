@@ -209,6 +209,61 @@ func TestHandleCreateVMInjectionName(t *testing.T) {
 	}
 }
 
+func TestHandleCreateVMRejectsInjectionHostIP(t *testing.T) {
+	s, store := testServer(t)
+
+	body, _ := json.Marshal(CreateVMRequest{
+		Name:  "web",
+		Ports: []state.PortMap{{HostIP: "$(id > /tmp/pwn)", HostPort: 8080, GuestPort: 80, Proto: "tcp"}},
+	})
+	req := httptest.NewRequest("POST", "/vms", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.handleCreateVM(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for injection HostIP", w.Code)
+	}
+	// The VM must not have been reserved — a rejected request leaves no trace.
+	if _, err := store.GetVM("web"); err == nil {
+		t.Error("VM was created despite an invalid HostIP; the port must be validated before ReserveVM")
+	}
+}
+
+func TestHandleCreateVMRejectsBadProto(t *testing.T) {
+	s, _ := testServer(t)
+
+	body, _ := json.Marshal(CreateVMRequest{
+		Name:  "web",
+		Ports: []state.PortMap{{HostPort: 8080, GuestPort: 80, Proto: "tcp; rm -rf /"}},
+	})
+	req := httptest.NewRequest("POST", "/vms", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.handleCreateVM(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for injection Proto", w.Code)
+	}
+}
+
+func TestHandleCreateVMRejectsInjectionImage(t *testing.T) {
+	s, store := testServer(t)
+
+	body, _ := json.Marshal(CreateVMRequest{
+		Name:  "web",
+		Image: "../../../../etc/shadow",
+	})
+	req := httptest.NewRequest("POST", "/vms", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	s.handleCreateVM(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for traversal image name", w.Code)
+	}
+	if _, err := store.GetVM("web"); err == nil {
+		t.Error("VM was created despite an invalid image; image must be validated before ReserveVM")
+	}
+}
+
 func TestHandleCreateVMDuplicateName(t *testing.T) {
 	s, store := testServer(t)
 
@@ -1001,6 +1056,37 @@ func TestHandleImageDownloadNotFound(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
+	}
+}
+
+func TestHandleImageDownloadRejectsTraversal(t *testing.T) {
+	s, _ := testServer(t)
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+
+	// {name} arrives percent-decoded, so a real request can carry a name with
+	// path separators. It must be rejected before it reaches filepath.Join,
+	// not resolved into an arbitrary *.ext4 read elsewhere on the host.
+	req := httptest.NewRequest("GET", "/v1/images/x/download", nil)
+	req.SetPathValue("name", "../../etc/shadow")
+	w := httptest.NewRecorder()
+	s.handleImageDownload(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a traversal image name", w.Code)
+	}
+}
+
+func TestHandleImageDeleteRejectsTraversal(t *testing.T) {
+	s, _ := testServer(t)
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+
+	req := httptest.NewRequest("DELETE", "/v1/images/x", nil)
+	req.SetPathValue("name", "../../etc/shadow")
+	w := httptest.NewRecorder()
+	s.handleImageDelete(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for a traversal image name", w.Code)
 	}
 }
 
