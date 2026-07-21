@@ -31,6 +31,27 @@ func TestRunInspectAppleVZDoesNotRequireDaemon(t *testing.T) {
 	}
 }
 
+func TestInspectJSONIsOneElementArrayWithPlatform(t *testing.T) {
+	resp := server.VMInspectResponse{
+		VMResponse: server.VMResponse{
+			Name: "web", Status: "running", GuestIP: "192.168.64.5",
+			CreatedAt: time.Unix(1700000000, 0),
+		},
+		Spec: &state.VMSpec{Image: "nginx", Cpus: 2, MemoryMB: 512},
+	}
+	arr := []cfContainer{toCFContainer(resp.VMResponse, resp.Spec, true)}
+	if len(arr) != 1 {
+		t.Fatalf("inspect must wrap in a 1-element array, got %d", len(arr))
+	}
+	p := arr[0].Configuration.Platform
+	if p == nil || p.OS != "linux" || p.Architecture != "arm64" {
+		t.Fatalf("platform must be linux/arm64, got %+v", p)
+	}
+	if arr[0].Configuration.Resources.MemoryInBytes != 512*1024*1024 {
+		t.Fatalf("memoryInBytes nesting wrong: %d", arr[0].Configuration.Resources.MemoryInBytes)
+	}
+}
+
 // === runInspect: daemon-fallback branch ===
 
 func TestRunInspectFallsBackToDaemon(t *testing.T) {

@@ -60,7 +60,9 @@ func printInspectResult(resp server.VMInspectResponse, format string) error {
 }
 
 func printInspect(resp server.VMInspectResponse) error {
-	data, err := json.MarshalIndent(resp, "", "  ")
+	// container's inspect returns a JSON array the client reads [0] from.
+	arr := []cfContainer{toCFContainer(resp.VMResponse, resp.Spec, true)}
+	data, err := json.MarshalIndent(arr, "", "  ")
 	if err != nil {
 		return err
 	}
