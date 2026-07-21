@@ -242,6 +242,23 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 	}
 
 	ctx := context.Background()
+
+	// Resume path: an existing STOPPED VM cold-boots in place rather than
+	// 409ing on a second create. Any other status (or not-found) falls through
+	// to CreateVM. start does not accept create-time config on resume — the VM
+	// boots from its persisted spec (see handleStartVM).
+	if existing, ierr := sc.InspectVM(ctx, name); ierr == nil && existing.Status == "stopped" {
+		resp, serr := sc.StartVM(ctx, name)
+		if serr != nil {
+			return serr
+		}
+		if quiet {
+			return nil
+		}
+		printDaemonRunning(resp)
+		return nil
+	}
+
 	resp, err := sc.CreateVM(ctx, server.CreateVMRequest{
 		Name:      name,
 		Cpus:      cpus,
@@ -265,16 +282,7 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 		return nil
 	}
 
-	fmt.Printf("\n  %s is running!\n", resp.Name)
-	fmt.Printf("    IP:   %s\n", resp.GuestIP)
-	for _, p := range resp.Ports {
-		host := p.HostIP
-		if host == "" {
-			host = "localhost"
-		}
-		fmt.Printf("    Port: %s:%d -> %s:%d/%s\n", host, p.HostPort, resp.GuestIP, p.GuestPort, p.Proto)
-	}
-	fmt.Printf("    Exec: mvm exec %s -- <command>\n", resp.Name)
+	printDaemonRunning(resp)
 
 	if startup == nil {
 		return nil
@@ -310,6 +318,21 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 		return err
 	}
 	return nil
+}
+
+// printDaemonRunning prints the human "VM is running" banner from a daemon
+// VMResponse. Shared by the create and resume paths of runStartViaDaemon.
+func printDaemonRunning(resp *server.VMResponse) {
+	fmt.Printf("\n  %s is running!\n", resp.Name)
+	fmt.Printf("    IP:   %s\n", resp.GuestIP)
+	for _, p := range resp.Ports {
+		host := p.HostIP
+		if host == "" {
+			host = "localhost"
+		}
+		fmt.Printf("    Port: %s:%d -> %s:%d/%s\n", host, p.HostPort, resp.GuestIP, p.GuestPort, p.Proto)
+	}
+	fmt.Printf("    Exec: mvm exec %s <command>\n", resp.Name)
 }
 
 func printPorts(vm *state.VM) {

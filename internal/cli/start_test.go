@@ -501,3 +501,60 @@ func TestStoppedApplevzVMPassesExistenceGuard(t *testing.T) {
 		t.Errorf("rootfs = %q, want the preserved contents untouched", data)
 	}
 }
+
+func TestRunStartViaDaemonResumesStopped(t *testing.T) {
+	var startCalled, createCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /v1/vms/box", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.VMInspectResponse{
+			VMResponse: server.VMResponse{Name: "box", Status: "stopped", Backend: "firecracker"},
+		})
+	})
+	mux.HandleFunc("POST /vms/box/start", func(w http.ResponseWriter, r *http.Request) {
+		startCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(server.VMResponse{Name: "box", Status: "running", GuestIP: "10.0.0.5"})
+	})
+	mux.HandleFunc("POST /vms", func(w http.ResponseWriter, r *http.Request) {
+		createCalled = true
+		w.WriteHeader(http.StatusConflict)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("MVM_REMOTE", srv.URL)
+	t.Setenv("MVM_API_KEY", "")
+	if err := runStartViaDaemon("box", nil, "open", nil, "", 0, 0, "", nil, nil, false); err != nil {
+		t.Fatalf("runStartViaDaemon() = %v, want nil", err)
+	}
+	if !startCalled {
+		t.Error("resume endpoint POST /vms/box/start was not called")
+	}
+	if createCalled {
+		t.Error("create endpoint POST /vms was called — start should resume, not create")
+	}
+}
+
+func TestRunStartViaDaemonCreatesFreshName(t *testing.T) {
+	var createCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /v1/vms/newbox", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNotFound) })
+	mux.HandleFunc("POST /vms", func(w http.ResponseWriter, r *http.Request) {
+		createCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(server.VMResponse{Name: "newbox", Status: "running", GuestIP: "10.0.0.6"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	t.Setenv("MVM_REMOTE", srv.URL)
+	t.Setenv("MVM_API_KEY", "")
+	if err := runStartViaDaemon("newbox", nil, "open", nil, "", 0, 0, "", nil, nil, false); err != nil {
+		t.Fatalf("runStartViaDaemon() = %v, want nil", err)
+	}
+	if !createCalled {
+		t.Error("create endpoint POST /vms was not called for a fresh name")
+	}
+}
