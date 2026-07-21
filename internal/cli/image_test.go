@@ -29,6 +29,21 @@ func TestImagesToCFEmptyMarshalsToArray(t *testing.T) {
 	}
 }
 
+func TestFindImage(t *testing.T) {
+	imgs := []server.ImageInfo{{Name: "web", SizeMB: 64}}
+	got, err := findImage(imgs, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf := imageToCF(got)
+	if cf.Reference != "web" || cf.Descriptor.Size != 64*1024*1024 {
+		t.Errorf("cf = %+v", cf)
+	}
+	if _, err := findImage(imgs, "missing"); err == nil {
+		t.Error("expected error for missing image")
+	}
+}
+
 func TestImageCmdWiring(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 	c := newImageCmd(store)
@@ -39,8 +54,8 @@ func TestImageCmdWiring(t *testing.T) {
 	for _, sub := range c.Commands() {
 		names[sub.Name()] = true
 	}
-	if !names["ls"] || !names["rm"] {
-		t.Fatalf("subcommands = %v, want ls+rm", names)
+	if !names["ls"] || !names["rm"] || !names["inspect"] {
+		t.Fatalf("subcommands = %v, want ls+rm+inspect", names)
 	}
 	ls, _, err := c.Find([]string{"ls"})
 	if err != nil {
