@@ -12,7 +12,7 @@ import (
 )
 
 func runDoctor(limaClient *lima.Client, store *state.Store) error {
-	fmt.Println("mvm doctor — system diagnostics")
+	fmt.Println("mvm system status — diagnostics")
 	fmt.Println()
 	issues := 0
 
@@ -155,7 +155,7 @@ func runDoctor(limaClient *lima.Client, store *state.Store) error {
 	if issues == 0 {
 		fmt.Println("All checks passed.")
 	} else {
-		fmt.Printf("%d issue(s) found. Fix them and run 'mvm doctor' again.\n", issues)
+		fmt.Printf("%d issue(s) found. Fix them and run 'mvm system status' again.\n", issues)
 	}
 	return nil
 }

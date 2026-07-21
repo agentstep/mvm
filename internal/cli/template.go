@@ -171,7 +171,7 @@ func runTemplateInit(name, preset string) error {
 	}
 
 	readmePath := filepath.Join(dir, "README.md")
-	readme := fmt.Sprintf("# %s\n\nTemplate: %s (%s)\n\nSetup script runs inside the VM after boot:\n```\nmvm start %s\nmvm exec %s -- /bin/sh /app/setup.sh\n```\n", name, preset, p.description, name, name)
+	readme := fmt.Sprintf("# %s\n\nTemplate: %s (%s)\n\nSetup script runs inside the VM after boot:\n```\nmvm start %s\nmvm exec %s /bin/sh /app/setup.sh\n```\n", name, preset, p.description, name, name)
 	if err := os.WriteFile(readmePath, []byte(readme), 0o644); err != nil {
 		return err
 	}
@@ -181,7 +181,7 @@ func runTemplateInit(name, preset string) error {
 	fmt.Printf("  Setup:  %s\n", setupPath)
 	fmt.Printf("\nTo use:\n")
 	fmt.Printf("  mvm start %s\n", name)
-	fmt.Printf("  mvm exec %s -- sh %s/setup.sh\n", name, dir)
+	fmt.Printf("  mvm exec %s sh %s/setup.sh\n", name, dir)
 	return nil
 }
 

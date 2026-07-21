@@ -753,10 +753,10 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		}
 		printPorts(updatedVM)
 		fmt.Printf("    Boot: %s in %.0fms\n", bootPath, result.TotalMs)
-		fmt.Printf("    Exec: mvm exec %s -- <command>\n", name)
+		fmt.Printf("    Exec: mvm exec %s <command>\n", name)
 	} else {
 		fmt.Printf("\n  %s started but agent not reachable yet.\n", name)
-		fmt.Printf("    Exec: mvm exec %s -- <command>  (when ready)\n", name)
+		fmt.Printf("    Exec: mvm exec %s <command>  (when ready)\n", name)
 	}
 	if startupErr != nil {
 		fmt.Printf("    Startup recipe failed: %v\n", startupErr)

@@ -64,9 +64,11 @@ func signalIsKill(name string) bool {
 	}
 }
 
-// runStop stops one VM. signalName selects graceful (TERM) vs immediate (KILL);
-// timeoutSec is the graceful grace period (honored on applevz; advisory on the
-// Firecracker daemon path, whose wire contract exposes only a force bool).
+// runStop stops one VM. signalName selects graceful (TERM) vs immediate (KILL).
+// timeoutSec is accepted for CLI parity but not yet plumbed to either backend
+// (applevz's helper StopVM takes no timeout; the Firecracker daemon's wire
+// contract exposes only a force bool) — a graceful-timeout field on the stop
+// endpoint is a follow-up.
 func runStop(store *state.Store, name, signalName string, timeoutSec int) error {
 	force := signalIsKill(signalName)
 

@@ -81,24 +81,24 @@ echo ""
 
 # --- Test 4: Exec ---
 echo "[4. Exec]"
-run_test_output "exec uname" "Linux" $MVM exec test-warm -- uname
-run_test_output "exec hostname" "mvm" $MVM exec test-warm -- hostname
-run_test_output "exec with workdir" "/tmp" $MVM exec test-warm -w /tmp -- pwd
+run_test_output "exec uname" "Linux" $MVM exec test-warm uname
+run_test_output "exec hostname" "mvm" $MVM exec test-warm hostname
+run_test_output "exec with workdir" "/tmp" $MVM exec -w /tmp test-warm pwd
 echo ""
 
 # --- Test 5: Dev tools ---
 echo "[5. Dev Tools]"
-run_test_output "node installed" "v22" $MVM exec test-warm -- node --version
-run_test_output "python3 installed" "Python 3" $MVM exec test-warm -- python3 --version
-run_test_output "git installed" "git version" $MVM exec test-warm -- git --version
-run_test_output "claude installed" "installed" $MVM exec test-warm -- "test -x /usr/local/bin/claude && echo installed || echo missing"
-run_test_output "opencode installed" "installed" $MVM exec test-warm -- "test -x /usr/local/bin/opencode && echo installed || echo missing"
+run_test_output "node installed" "v22" $MVM exec test-warm node --version
+run_test_output "python3 installed" "Python 3" $MVM exec test-warm python3 --version
+run_test_output "git installed" "git version" $MVM exec test-warm git --version
+run_test_output "claude installed" "installed" $MVM exec test-warm "test -x /usr/local/bin/claude && echo installed || echo missing"
+run_test_output "opencode installed" "installed" $MVM exec test-warm "test -x /usr/local/bin/opencode && echo installed || echo missing"
 echo ""
 
 # --- Test 6: Skills files ---
 echo "[6. Skills Files]"
-run_test_output "SKILLS.md exists" "MVM Environment" $MVM exec test-warm -- cat /.mvm/SKILLS.md
-run_test_output "CLAUDE.md exists" "MVM Environment" $MVM exec test-warm -- cat /root/CLAUDE.md
+run_test_output "SKILLS.md exists" "MVM Environment" $MVM exec test-warm cat /.mvm/SKILLS.md
+run_test_output "CLAUDE.md exists" "MVM Environment" $MVM exec test-warm cat /root/CLAUDE.md
 echo ""
 
 # --- Test 7: Pause/Resume ---
@@ -106,7 +106,7 @@ echo "[7. Pause/Resume]"
 run_test_output "mvm pause" "paused" $MVM pause test-warm
 run_test_output "status shows paused" "paused" $MVM list -a
 run_test_output "mvm resume" "resumed" $MVM resume test-warm
-run_test_output "exec after resume" "ALIVE" $MVM exec test-warm -- echo ALIVE
+run_test_output "exec after resume" "ALIVE" $MVM exec test-warm echo ALIVE
 echo ""
 
 # --- Test 8: Logs ---
