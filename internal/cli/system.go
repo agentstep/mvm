@@ -1,14 +1,18 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/lima"
+	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -19,10 +23,9 @@ func newSystemCmd(limaClient *lima.Client, store *state.Store, version, commit, 
 		Short:   "Inspect and manage the mvm system and daemon",
 		Aliases: []string{"s"},
 	}
-	// status (Task 18) and df (Task 19) are added to this AddCommand when those
-	// tasks land — keeping each task independently compilable. Task 17 wires
-	// only the four it defines.
+	// df (Task 19) is added to this AddCommand when that task lands.
 	cmd.AddCommand(
+		newSystemStatusCmd(limaClient, store, version),
 		newSystemVersionCmd(version, commit, date),
 		newSystemLogsCmd(),
 		newSystemStartCmd(limaClient, store),
@@ -30,6 +33,73 @@ func newSystemCmd(limaClient *lima.Client, store *state.Store, version, commit, 
 		newSystemInstallCmd(),
 		newSystemUninstallCmd(),
 	)
+	return cmd
+}
+
+type systemStatus struct {
+	Backend       string `json:"backend"`
+	DaemonRunning bool   `json:"daemonRunning"`
+	Socket        string `json:"socket,omitempty"`
+	Version       string `json:"version,omitempty"`
+}
+
+func buildSystemStatus(backend string, daemonUp bool, socket, version string) systemStatus {
+	return systemStatus{Backend: backend, DaemonRunning: daemonUp, Socket: socket, Version: version}
+}
+
+// renderSystemStatusText emits the container-ecosystem load-bearing substrings
+// ("is running", "container-apiserver version: ", "application install root: ")
+// so container-dashboard's system-status parser reads mvm unchanged. applevz has
+// no daemon, so it says so honestly instead of faking one.
+func renderSystemStatusText(s systemStatus) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "backend: %s\n", s.Backend)
+	if s.Backend == "applevz" {
+		b.WriteString("applevz backend — no daemon required\n")
+		fmt.Fprintf(&b, "application install root: %s\n", firecracker.DataDir())
+		return b.String()
+	}
+	if s.DaemonRunning {
+		b.WriteString("mvm daemon is running\n")
+		fmt.Fprintf(&b, "container-apiserver version: %s\n", s.Version)
+		fmt.Fprintf(&b, "application install root: %s\n", firecracker.DataDir())
+		if s.Socket != "" {
+			fmt.Fprintf(&b, "socket: %s\n", s.Socket)
+		}
+	} else {
+		b.WriteString("mvm daemon is not running\n  start with: mvm system start\n")
+	}
+	return b.String()
+}
+
+func newSystemStatusCmd(limaClient *lima.Client, store *state.Store, version string) *cobra.Command {
+	var format string
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show system and daemon status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			backend := store.GetBackend()
+			daemonUp, socket := false, ""
+			if backend == "firecracker" {
+				c := server.DefaultClient()
+				daemonUp = c.IsAvailable()
+				socket = server.DefaultSocketPath()
+			}
+			st := buildSystemStatus(backend, daemonUp, socket, version)
+			if format == "json" {
+				data, err := json.MarshalIndent(st, "", "  ")
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), string(data))
+				return nil
+			}
+			fmt.Fprint(cmd.OutOrStdout(), renderSystemStatusText(st))
+			fmt.Fprintln(cmd.OutOrStdout())
+			return runDoctor(limaClient, store)
+		},
+	}
+	cmd.Flags().StringVar(&format, "format", "table", "output format: json|table")
 	return cmd
 }
 

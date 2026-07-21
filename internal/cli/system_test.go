@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -28,7 +29,7 @@ func TestSystemSubcommandsRegistered(t *testing.T) {
 	}
 	// Task 17 wires these; status/df are added by Tasks 18/19 (which
 	// extend this test to assert them).
-	for _, w := range []string{"version", "logs", "start", "stop", "install", "uninstall"} {
+	for _, w := range []string{"version", "logs", "start", "stop", "install", "uninstall", "status"} {
 		if !have[w] {
 			t.Errorf("missing subcommand %q (have %v)", w, have)
 		}
@@ -45,5 +46,44 @@ func TestSystemVersionPrints(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "1.2.3") {
 		t.Errorf("output %q missing version 1.2.3", buf.String())
+	}
+}
+
+func TestBuildSystemStatusFirecrackerRunning(t *testing.T) {
+	txt := renderSystemStatusText(buildSystemStatus("firecracker", true, "/root/.mvm/server.sock", "1.2.3"))
+	for _, sub := range []string{"is running", "container-apiserver version: ", "application install root: "} {
+		if !strings.Contains(txt, sub) {
+			t.Errorf("text missing %q:\n%s", sub, txt)
+		}
+	}
+}
+
+func TestBuildSystemStatusFirecrackerStopped(t *testing.T) {
+	s := buildSystemStatus("firecracker", false, "", "1.2.3")
+	if s.DaemonRunning {
+		t.Error("DaemonRunning = true, want false")
+	}
+	if strings.Contains(renderSystemStatusText(s), "is running") {
+		t.Error("stopped daemon should not report \"is running\"")
+	}
+}
+
+func TestBuildSystemStatusApplevz(t *testing.T) {
+	txt := renderSystemStatusText(buildSystemStatus("applevz", false, "", "1.2.3"))
+	if !strings.Contains(txt, "applevz backend — no daemon required") {
+		t.Errorf("applevz text missing marker:\n%s", txt)
+	}
+}
+
+func TestSystemStatusJSONShape(t *testing.T) {
+	b, _ := json.Marshal(buildSystemStatus("firecracker", true, "/s.sock", "1.2.3"))
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"backend", "daemonRunning"} {
+		if _, ok := m[k]; !ok {
+			t.Errorf("json missing key %q (%s)", k, b)
+		}
 	}
 }
