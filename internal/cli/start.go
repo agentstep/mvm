@@ -176,11 +176,11 @@ func parseVolumes(volumes []string) ([]string, error) {
 // --rm as "delete on `mvm stop`" would bolt an undocumented lifecycle rule
 // onto a command whose whole contract is idempotent, durable upsert (see
 // the design spec's decision #5: "start is upsert, forever"). mvm run
-// already has the correct ephemeral-unless---name semantics, so this
+// already has the correct persist-by-default-unless---rm semantics, so this
 // points there instead of inventing a second meaning for --rm.
 func validateStartRM(rm bool) error {
 	if rm {
-		return fmt.Errorf("mvm start does not support --rm: start has no foreground command to key cleanup on. Use `mvm run <image>` instead — it deletes the VM automatically unless you pass --name")
+		return fmt.Errorf("mvm start does not support --rm: start has no foreground command to key cleanup on. Use `mvm run <image>` instead — it persists the VM unless you pass --rm")
 	}
 	return nil
 }

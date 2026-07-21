@@ -150,7 +150,7 @@ default rootfs.
 		},
 	}
 
-	cmd.Flags().StringVar(&name, "name", "", "use this name and keep the VM after the command exits")
+	cmd.Flags().StringVar(&name, "name", "", "assign this name instead of auto-generating one")
 	cmd.Flags().BoolVarP(&detach, "detach", "d", false, "boot and return immediately; do not run a foreground command")
 	cmd.Flags().IntVarP(&cpus, "cpus", "c", 0, "vCPU count (default: 2)")
 	cmd.Flags().IntVarP(&memoryMB, "memory", "m", 0, "RAM in MiB (default: 1024)")
