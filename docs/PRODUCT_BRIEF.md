@@ -23,7 +23,7 @@ mvm gives each AI agent its own Firecracker microVM with KVM hardware isolation 
 **Local mode** (macOS via Lima):
 ```bash
 mvm start sandbox
-mvm exec sandbox -- claude --dangerously-skip-permissions
+mvm exec sandbox claude --dangerously-skip-permissions
 ```
 
 **Cloud mode** (bare-metal Linux with KVM):
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-
 From any laptop or CI:
 ```bash
 export MVM_REMOTE=https://server:19876
-mvm exec sandbox -- any-command          # same CLI, same API
+mvm exec sandbox any-command          # same CLI, same API
 ```
 
 Or programmatically via Python / TypeScript / Go SDKs.

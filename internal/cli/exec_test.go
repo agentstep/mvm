@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/agentstep/mvm/internal/server"
 	"github.com/agentstep/mvm/internal/state"
+	"github.com/spf13/cobra"
 )
 
 func TestShellQuote(t *testing.T) {
@@ -261,5 +263,41 @@ func TestDaemonSecretEnvNoSecretsViaInspectVM(t *testing.T) {
 	}
 	if env != nil {
 		t.Errorf("env = %v, want nil for a VM with no secrets attached", env)
+	}
+}
+
+func TestExecNoSeparatorTakesCommandDirectly(t *testing.T) {
+	cmd := newExecCmd(nil)
+	var got []string
+	cmd.RunE = func(c *cobra.Command, args []string) error { got = args; return nil }
+	cmd.SetArgs([]string{"web", "ls", "-la"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	want := []string{"web", "ls", "-la"}
+	if len(got) != len(want) {
+		t.Fatalf("args: got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("args[%d]: got %q want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExecLeadingFlagStillBinds(t *testing.T) {
+	cmd := newExecCmd(nil)
+	var got []string
+	cmd.RunE = func(c *cobra.Command, args []string) error { got = args; return nil }
+	cmd.SetArgs([]string{"-i", "web", "env"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(got) != 2 || got[0] != "web" || got[1] != "env" {
+		t.Fatalf("args: got %v want [web env]", got)
 	}
 }

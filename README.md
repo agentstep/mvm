@@ -7,14 +7,14 @@ Hardware-isolated Linux sandboxes for AI agents. **Native microVMs on Apple Sili
 ```bash
 # On your Mac — native Apple Silicon microVM, no nested layer:
 mvm start sandbox                       # ~0.7s cold boot to an agent-ready VM
-mvm exec sandbox -- npm test            # exec over vsock to the in-guest agent
+mvm exec sandbox npm test            # exec over vsock to the in-guest agent
 mvm pause sandbox && mvm resume sandbox # freeze in memory at zero CPU, then resume
 # (memory+disk save/restore also exists — see Snapshots; note the macOS 26.2 caveat)
 
 # Or on a Linux server you own:
 curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-cloud.sh | sudo bash
 export MVM_REMOTE=https://my-server:19876
-mvm exec sandbox -- npm test           # same CLI, same API
+mvm exec sandbox npm test           # same CLI, same API
 ```
 
 ## Why
@@ -50,7 +50,7 @@ mvm init --backend applevz
 mvm init --backend firecracker
 
 mvm start sandbox
-mvm exec sandbox -- echo hello
+mvm exec sandbox echo hello
 ```
 
 ### On bare-metal Linux with KVM (cloud mode)
@@ -159,7 +159,7 @@ Both backends do full memory-state checkpoints — freeze the whole machine, res
 mvm pause sandbox            # freeze VM in memory, zero CPU
 mvm resume sandbox           # instant resume
 mvm snapshot create sandbox  # checkpoint memory + disk
-mvm exec sandbox -- risky-install.sh
+mvm exec sandbox risky-install.sh
 mvm stop sandbox && mvm start sandbox   # restore: memory and disk roll back
 ```
 
@@ -186,7 +186,7 @@ mvm start sandbox --image my-agent
 
 ### VM lifecycle
 - `mvm start <name>` — create from warm pool (`-p`, `--net-policy`, `--image`, `--cpus`, `--memory`)
-- `mvm exec <name> -- <cmd>` — run a command (`-it`, `-e`, `-w`)
+- `mvm exec <name> <cmd>` — run a command (`-it`, `-e`, `-w`)
 - `mvm stop <name>` — graceful shutdown (`--force`)
 - `mvm pause <name>` / `mvm resume <name>` — memory-state checkpoint
 - `mvm list` — show all VMs (`--json`)

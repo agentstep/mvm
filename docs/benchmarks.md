@@ -138,7 +138,7 @@ From your laptop or CI:
 export MVM_REMOTE=https://server:19876
 export MVM_API_KEY=<generated>
 mvm start sandbox1
-mvm exec sandbox1 -- <anything>
+mvm exec sandbox1 <anything>
 ```
 
 Or programmatically (Python/TS/Go SDKs ship with the same API):
@@ -172,7 +172,7 @@ sudo mvm pool status  # until 3/3
 for i in 1 2 3 4 5; do
   START=$(date +%s%N)
   sudo mvm start t$i > /dev/null
-  sudo mvm exec t$i -- echo ok > /dev/null
+  sudo mvm exec t$i echo ok > /dev/null
   END=$(date +%s%N)
   echo "TTI $i: $(( (END - START) / 1000000 ))ms"
   sudo mvm delete t$i --force > /dev/null

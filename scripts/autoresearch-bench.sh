@@ -145,7 +145,7 @@ for i in 1 2 3 4 5; do
 
     EXEC_OK=0
     for retry in 1 2 3 4 5; do
-        if mvm exec "b$i" -- echo ok >/dev/null 2>&1; then
+        if mvm exec "b$i" echo ok >/dev/null 2>&1; then
             EXEC_OK=1
             break
         fi
@@ -188,7 +188,7 @@ BW_VM="$KEEP_VM"
 # First exec is slow (page-in); warmup and discard, with retry
 WARMUP_OK=0
 for _ in 1 2 3 4 5; do
-    if mvm exec "$BW_VM" -- true >/dev/null 2>&1; then
+    if mvm exec "$BW_VM" true >/dev/null 2>&1; then
         WARMUP_OK=1
         break
     fi
@@ -199,14 +199,14 @@ if [ $WARMUP_OK -eq 0 ]; then
     exit 4
 fi
 # Extra warmup to fully page in
-mvm exec "$BW_VM" -- true >/dev/null 2>&1 || true
-mvm exec "$BW_VM" -- true >/dev/null 2>&1 || true
+mvm exec "$BW_VM" true >/dev/null 2>&1 || true
+mvm exec "$BW_VM" true >/dev/null 2>&1 || true
 
 declare -a EX_SAMPLES=()
 FAILS=0
 for _ in $(seq 1 10); do
     T0=$(date +%s%N)
-    if mvm exec "$BW_VM" -- true >/dev/null 2>&1; then
+    if mvm exec "$BW_VM" true >/dev/null 2>&1; then
         T1=$(date +%s%N)
         EX_SAMPLES+=( "$(( (T1 - T0) / 1000000 ))" )
     else
@@ -264,13 +264,13 @@ fi
 echo "[bench] running correctness gate..." >&2
 
 # Restored VM must still be functional.
-if ! mvm exec "$BW_VM" -- true >/dev/null 2>&1; then
+if ! mvm exec "$BW_VM" true >/dev/null 2>&1; then
     echo "ERROR: exec failed on restored VM (correctness regression)" >&2
     exit 5
 fi
 
 # Guest agent protocol works end-to-end.
-OUT=$(mvm exec "$BW_VM" -- echo "correctness_ok" 2>&1 | head -1)
+OUT=$(mvm exec "$BW_VM" echo "correctness_ok" 2>&1 | head -1)
 if [ "$OUT" != "correctness_ok" ]; then
     echo "ERROR: exec returned wrong output '$OUT' (expected 'correctness_ok')" >&2
     exit 5
@@ -278,16 +278,16 @@ fi
 
 # Agent stdout is not being short-circuited.
 # Writing + reading a file round-trips data.
-mvm exec "$BW_VM" -- sh -c 'echo roundtrip_$$ > /tmp/rt' >/dev/null 2>&1 \
+mvm exec "$BW_VM" sh -c 'echo roundtrip_$$ > /tmp/rt' >/dev/null 2>&1 \
     || { echo "ERROR: file write via exec failed" >&2; exit 5; }
-RTOUT=$(mvm exec "$BW_VM" -- cat /tmp/rt 2>&1 | head -1)
+RTOUT=$(mvm exec "$BW_VM" cat /tmp/rt 2>&1 | head -1)
 if ! echo "$RTOUT" | grep -q "roundtrip_"; then
     echo "ERROR: file roundtrip failed: got '$RTOUT'" >&2
     exit 5
 fi
 
 # Exit code propagation (prevents agent-stub hacks that always return 0).
-if mvm exec "$BW_VM" -- false >/dev/null 2>&1; then
+if mvm exec "$BW_VM" false >/dev/null 2>&1; then
     echo "ERROR: exec returned 0 for false (exit code not propagated)" >&2
     exit 5
 fi

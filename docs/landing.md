@@ -6,8 +6,8 @@ Give every AI agent its own real Linux machine — root, shell, network, the wor
 
 ```bash
 mvm start sandbox                          # ~0.7s to a booted, isolated Linux VM
-mvm exec sandbox -- npm i -g @anthropic-ai/claude-code   # install your agent CLI
-mvm exec sandbox -- claude --dangerously-skip-permissions
+mvm exec sandbox npm i -g @anthropic-ai/claude-code   # install your agent CLI
+mvm exec sandbox claude --dangerously-skip-permissions
 mvm pause sandbox && mvm resume sandbox    # freeze in memory at zero CPU, then resume
 # (memory+disk save/restore exists too — works on macOS ≤26.1; 26.2 regression, see Benchmarks)
 ```
@@ -46,7 +46,7 @@ Develop against a sandbox on your Mac. Deploy the identical binary to a bare-met
 
 ### 🛠️ Built for agents, not humans
 - **16ms warm exec** over vsock — no SSH, no TCP round-trip. Agents firing dozens of sequential tool calls save seconds per session.
-- **Interactive PTY** (`mvm exec -it -- bash`) over a hijacked connection — full terminal, pure Go, no SSH daemon in the guest.
+- **Interactive PTY** (`mvm exec -it bash`) over a hijacked connection — full terminal, pure Go, no SSH daemon in the guest.
 - **Warm pool** for ~1s claimed starts.
 - **Per-VM network policy** (`--net-policy deny` / `allow:domains`) and seccomp profiles.
 
@@ -119,7 +119,7 @@ It's the same binary in both places. The daemon is the single source of truth fo
 git clone https://github.com/agentstep/mvm.git && cd mvm && make install
 mvm init --backend applevz
 mvm start sandbox
-mvm exec sandbox -- echo "hello from an isolated VM"
+mvm exec sandbox echo "hello from an isolated VM"
 ```
 
 **Self-host on a Linux box with `/dev/kvm`:**
@@ -129,7 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/agentstep/mvm/main/scripts/install-
 Then, from any laptop or CI:
 ```bash
 export MVM_REMOTE=https://your-server:19876
-mvm exec sandbox -- npm test                   # same CLI, same API
+mvm exec sandbox npm test                   # same CLI, same API
 ```
 
 **Or from code** — same API, local or remote:

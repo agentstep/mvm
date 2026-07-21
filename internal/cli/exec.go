@@ -29,16 +29,16 @@ func newExecCmd(store *state.Store) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "exec <name> -- <command> [args...]",
+		Use:   "exec <name> <command> [args...]",
 		Short: "Run a command in a running microVM",
 		Long: `Run a command inside a running microVM.
 
-  mvm exec my-vm -- ls /
-  mvm exec my-vm -it -- bash
-  mvm exec my-vm -e FOO=bar -- env
-  mvm exec my-vm --env-file .env -- env
-  mvm exec my-vm -d -- long-running-task    # detach: don't wait, no output
-  echo "data" | mvm exec my-vm -- cat`,
+  mvm exec my-vm ls /
+  mvm exec my-vm -it bash
+  mvm exec my-vm -e FOO=bar env
+  mvm exec my-vm --env-file .env env
+  mvm exec my-vm -d long-running-task    # detach: don't wait, no output
+  echo "data" | mvm exec my-vm cat`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := validateExecFlags(detach, interactive, tty); err != nil {
@@ -53,6 +53,9 @@ func newExecCmd(store *state.Store) *cobra.Command {
 			return runExec(store, name, remoteArgs, interactive || tty, detach, workdir, allEnv, user)
 		},
 	}
+	// Stop flag parsing at the first positional (<name>) so everything after is
+	// taken verbatim as the guest command — no `--` separator required.
+	cmd.Flags().SetInterspersed(false)
 
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY")
