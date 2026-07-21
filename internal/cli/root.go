@@ -34,7 +34,7 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
+	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "verbose output")
 	rootCmd.PersistentFlags().StringVar(&remoteFlag, "remote", "", "remote daemon URL (e.g. https://server:19876)")
 	rootCmd.PersistentFlags().StringVar(&apiKeyFlag, "api-key", "", "API key for remote daemon")
 
