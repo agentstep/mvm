@@ -44,6 +44,18 @@ func TestFindImage(t *testing.T) {
 	}
 }
 
+func TestUnreferencedImages(t *testing.T) {
+	imgs := []server.ImageInfo{{Name: "used"}, {Name: "orphan"}}
+	vms := []*state.VM{
+		{Name: "vm1", Spec: &state.VMSpec{Image: "used"}},
+		{Name: "vm2", Spec: nil},
+	}
+	got := unreferencedImages(imgs, vms)
+	if len(got) != 1 || got[0] != "orphan" {
+		t.Fatalf("unreferenced = %v, want [orphan]", got)
+	}
+}
+
 func TestImageCmdWiring(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 	c := newImageCmd(store)

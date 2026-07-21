@@ -16,7 +16,7 @@ func newImageCmd(store *state.Store) *cobra.Command {
 		Short:   "Manage custom rootfs images",
 		Aliases: []string{"i"},
 	}
-	cmd.AddCommand(newImageLsCmd(), newImageRmCmd(), newImageInspectCmd())
+	cmd.AddCommand(newImageLsCmd(), newImageRmCmd(), newImageInspectCmd(), newImagePruneCmd(store))
 	return cmd
 }
 
@@ -132,5 +132,56 @@ func runImageInspect(ctx context.Context, name string) error {
 		return err
 	}
 	fmt.Println(string(data))
+	return nil
+}
+
+func newImagePruneCmd(store *state.Store) *cobra.Command {
+	return &cobra.Command{
+		Use:   "prune",
+		Short: "Remove custom rootfs images not referenced by any VM",
+		RunE:  func(cmd *cobra.Command, args []string) error { return runImagePrune(cmd.Context(), store) },
+	}
+}
+
+func unreferencedImages(imgs []server.ImageInfo, vms []*state.VM) []string {
+	inUse := make(map[string]bool, len(vms))
+	for _, vm := range vms {
+		if vm.Spec != nil && vm.Spec.Image != "" {
+			inUse[vm.Spec.Image] = true
+		}
+	}
+	var out []string
+	for _, img := range imgs {
+		if !inUse[img.Name] {
+			out = append(out, img.Name)
+		}
+	}
+	return out
+}
+
+func runImagePrune(ctx context.Context, store *state.Store) error {
+	sc, err := requireDaemon()
+	if err != nil {
+		return err
+	}
+	images, err := sc.ImageList(ctx)
+	if err != nil {
+		return err
+	}
+	vms, err := store.ListVMs()
+	if err != nil {
+		return err
+	}
+	unused := unreferencedImages(images, vms)
+	if len(unused) == 0 {
+		fmt.Println("No unused images to prune.")
+		return nil
+	}
+	for _, name := range unused {
+		if err := sc.ImageDelete(ctx, name); err != nil {
+			return fmt.Errorf("remove %q: %w", name, err)
+		}
+		fmt.Printf("  Removed image '%s'\n", name)
+	}
 	return nil
 }
