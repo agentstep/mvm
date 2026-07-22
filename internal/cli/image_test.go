@@ -56,6 +56,18 @@ func TestUnreferencedImages(t *testing.T) {
 	}
 }
 
+func TestImageToCFCarriesDigest(t *testing.T) {
+	cf := imageToCF(server.ImageInfo{Name: "web", SizeMB: 64, Digest: "sha256:abc"})
+	if cf.Descriptor.Digest != "sha256:abc" {
+		t.Errorf("digest = %q, want sha256:abc", cf.Descriptor.Digest)
+	}
+	// list path (no digest) stays empty — dashboard tolerates it.
+	cf2 := imageToCF(server.ImageInfo{Name: "db", SizeMB: 10})
+	if cf2.Descriptor.Digest != "" {
+		t.Errorf("no-digest image digest = %q, want empty", cf2.Descriptor.Digest)
+	}
+}
+
 func TestImageCmdWiring(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 	c := newImageCmd(store)

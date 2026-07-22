@@ -52,7 +52,13 @@ func newImageInspectCmd() *cobra.Command {
 }
 
 func imageToCF(img server.ImageInfo) cfImage {
-	return cfImage{Reference: img.Name, Descriptor: cfDescriptor{Size: int64(img.SizeMB) * 1024 * 1024}}
+	return cfImage{
+		Reference: img.Name,
+		Descriptor: cfDescriptor{
+			Digest: img.Digest,
+			Size:   int64(img.SizeMB) * 1024 * 1024,
+		},
+	}
 }
 
 func findImage(imgs []server.ImageInfo, name string) (server.ImageInfo, error) {
@@ -119,15 +125,11 @@ func runImageInspect(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	images, err := sc.ImageList(ctx)
+	info, err := sc.ImageInspect(ctx, name)
 	if err != nil {
 		return err
 	}
-	img, err := findImage(images, name)
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(imageToCF(img), "", "  ")
+	data, err := json.MarshalIndent(imageToCF(*info), "", "  ")
 	if err != nil {
 		return err
 	}
