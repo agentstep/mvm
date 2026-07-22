@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/agentstep/mvm/internal/server"
 )
 
 func TestFilterSourcesByNameKeepsOnlyRequested(t *testing.T) {
@@ -68,5 +70,21 @@ func TestStatsJSONShape(t *testing.T) {
 ]`
 	if string(out) != want {
 		t.Fatalf("stats json:\n got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+func TestStatsFCSourceCarriesCumulativeCPU(t *testing.T) {
+	// A daemon VMStats with a cumulative µs value must flow into cfStatSource
+	// and out as cpuUsageUsec (not dropped to 0 as in Slice 1).
+	vs := server.VMStats{Name: "web", Backend: "firecracker", PID: 1, Status: "running", CPUUsageUsec: 9_000_000, MemMB: 100}
+	src := cfStatSource{
+		Name: vs.Name, Backend: vs.Backend, PID: vs.PID, Status: vs.Status,
+		CPUUsageUsec:     vs.CPUUsageUsec,
+		MemoryUsageBytes: uint64(vs.MemMB * 1024 * 1024),
+		NumProcesses:     1,
+	}
+	out := toCFStats([]cfStatSource{src})
+	if out[0].CPUUsageUsec != 9_000_000 {
+		t.Errorf("cpuUsageUsec = %d, want 9000000", out[0].CPUUsageUsec)
 	}
 }

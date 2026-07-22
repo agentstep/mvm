@@ -83,6 +83,7 @@ func runStats(store *state.Store, names []string, wantJSON bool) error {
 			for _, s := range stats {
 				sources = append(sources, cfStatSource{
 					Name: s.Name, Backend: s.Backend, PID: s.PID, Status: s.Status,
+					CPUUsageUsec:     s.CPUUsageUsec,
 					MemoryUsageBytes: uint64(s.MemMB * 1024 * 1024),
 					MemoryLimitBytes: memLimitBytes(specs[s.Name]), NumProcesses: 1,
 				})
