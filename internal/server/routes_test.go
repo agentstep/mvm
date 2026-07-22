@@ -1149,6 +1149,44 @@ func TestHandleImageDeleteRejectsTraversal(t *testing.T) {
 	}
 }
 
+func TestHandleImageInspectComputesDigest(t *testing.T) {
+	s, _ := testServer(t)
+	t.Setenv("MVM_DATA_DIR", t.TempDir())
+	if err := os.MkdirAll(firecracker.CacheDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(firecracker.CacheDir(), "web.ext4"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// sha256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+	req := httptest.NewRequest("GET", "/v1/images/web", nil)
+	req.SetPathValue("name", "web")
+	w := httptest.NewRecorder()
+	s.handleImageInspect(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+	}
+	var info ImageInfo
+	json.NewDecoder(w.Body).Decode(&info)
+	if info.Name != "web" || info.SizeMB != 0 {
+		t.Errorf("info = %+v", info)
+	}
+	if info.Digest != "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" {
+		t.Errorf("digest = %q", info.Digest)
+	}
+}
+
+func TestHandleImageInspectRejectsTraversal(t *testing.T) {
+	s, _ := testServer(t)
+	req := httptest.NewRequest("GET", "/v1/images/x", nil)
+	req.SetPathValue("name", "../../etc/passwd")
+	w := httptest.NewRecorder()
+	s.handleImageInspect(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for traversal name", w.Code)
+	}
+}
+
 // === GET /vms/{name}/logs ===
 
 func TestTailLines(t *testing.T) {

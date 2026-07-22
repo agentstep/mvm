@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,6 +49,7 @@ type BuildRequest struct {
 type ImageInfo struct {
 	Name   string `json:"name"`
 	SizeMB int    `json:"size_mb"`
+	Digest string `json:"digest,omitempty"` // "sha256:<hex>", computed on inspect
 }
 
 type ExecRequest struct {
@@ -1056,6 +1059,37 @@ func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleImageInspect(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := state.ValidateName(name); err != nil {
+		httpError(w, err, http.StatusBadRequest)
+		return
+	}
+	path := firecracker.CacheDir() + "/" + name + ".ext4"
+	fi, err := os.Stat(path)
+	if err != nil {
+		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ImageInfo{
+		Name:   name,
+		SizeMB: int(fi.Size() / (1024 * 1024)),
+		Digest: "sha256:" + hex.EncodeToString(h.Sum(nil)),
+	})
 }
 
 func (s *Server) handleInspectVM(w http.ResponseWriter, r *http.Request) {

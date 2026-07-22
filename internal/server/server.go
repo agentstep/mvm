@@ -180,6 +180,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	register("POST", "/pool/warm", s.handlePoolWarm)
 	register("POST", "/build", s.handleBuild)
 	register("GET", "/images", s.handleImageList)
+	register("GET", "/images/{name}", s.handleImageInspect)
 	register("DELETE", "/images/{name}", s.handleImageDelete)
 	register("GET", "/images/{name}/download", s.handleImageDownload)
 	return mux

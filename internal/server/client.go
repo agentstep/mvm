@@ -578,6 +578,25 @@ func (c *Client) ImageDelete(ctx context.Context, name string) error {
 	return nil
 }
 
+// ImageInspect fetches one image's info including its sha256 digest (computed
+// on-demand by the daemon).
+func (c *Client) ImageInspect(ctx context.Context, name string) (*ImageInfo, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/images/%s", name)), nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if err := checkStatus(resp); err != nil {
+		return nil, err
+	}
+	var info ImageInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
 // DownloadImage streams a custom image built via mvm build down to destPath.
 // Writes to a temp file alongside destPath first and renames into place, so
 // a failed/interrupted download never leaves a half-written image where a
