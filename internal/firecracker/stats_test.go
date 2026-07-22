@@ -107,3 +107,21 @@ func TestParseCumulativePSBadFields(t *testing.T) {
 		t.Fatal("want error on malformed ps output")
 	}
 }
+
+// === ProcessCumulativeCPU ===
+
+type fixedExec struct{ out string }
+
+func (f fixedExec) Run(string) (string, error)                           { return f.out, nil }
+func (f fixedExec) RunWithTimeout(string, time.Duration) (string, error) { return f.out, nil }
+
+func TestProcessCumulativeCPU(t *testing.T) {
+	// `ps -o time=,rss=` → cumulative CPU time + rss.
+	usec, err := ProcessCumulativeCPU(fixedExec{out: "  00:12.50 102400\n"}, 4242)
+	if err != nil {
+		t.Fatalf("ProcessCumulativeCPU: %v", err)
+	}
+	if usec != 12_500_000 {
+		t.Errorf("cpuUsec = %d, want 12500000", usec)
+	}
+}

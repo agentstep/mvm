@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ParsePSOutput parses the output of `ps -o %cpu=,rss= -p <pid>` (two
@@ -62,6 +63,20 @@ func ParseCumulativePS(out string) (cpuUsec uint64, memMB float64, err error) {
 		return 0, 0, fmt.Errorf("parse rss %q: %w", fields[1], err)
 	}
 	return cpuUsec, rssKB / 1024.0, nil
+}
+
+// ProcessCumulativeCPU returns a process's CUMULATIVE CPU time in microseconds
+// (monotonic — the value cfStats.cpuUsageUsec needs, which the dashboard deltas
+// across samples). It reads `ps -o time=,rss=` and parses via ParseCumulativePS,
+// discarding the memory field. Used by the daemon's stats handler so the
+// Firecracker path reports real cumulative CPU instead of 0.
+func ProcessCumulativeCPU(ex Executor, pid int) (uint64, error) {
+	out, err := ex.RunWithTimeout(fmt.Sprintf("ps -o time=,rss= -p %d", pid), 10*time.Second)
+	if err != nil {
+		return 0, err
+	}
+	usec, _, err := ParseCumulativePS(out)
+	return usec, err
 }
 
 // parseCPUTime converts a ps `time` field — [[DD-]HH:]MM:SS[.ff] — to microseconds.

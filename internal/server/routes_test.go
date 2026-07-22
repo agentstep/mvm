@@ -34,6 +34,33 @@ func (m *mockExecutor) RunWithTimeout(command string, timeout time.Duration) (st
 	return m.Run(command)
 }
 
+func TestHandleStatsVMsReportsCumulativeCPU(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", PID: 4242, CreatedAt: time.Now()})
+	s.executor = &mockExecutor{runFunc: func(command string) (string, error) {
+		// Both ProcessStats and ProcessCumulativeCPU shell ps, but with
+		// different -o formats: ProcessStats reads `%cpu,rss` (a float %cpu),
+		// ProcessCumulativeCPU reads `time,rss` (a [[DD-]HH:]MM:SS cumulative
+		// time). Return the format matching the command so the cumulative read
+		// (gated on ProcessStats success) is reached and yields nonzero µs.
+		if strings.Contains(command, "time=") {
+			return "  00:30.00 51200", nil
+		}
+		return " 3.0 51200", nil
+	}}
+	req := httptest.NewRequest("GET", "/vms/stats", nil)
+	w := httptest.NewRecorder()
+	s.handleStatsVMs(w, req)
+	var got []VMStats
+	json.NewDecoder(w.Body).Decode(&got)
+	if len(got) != 1 {
+		t.Fatalf("stats len = %d, want 1", len(got))
+	}
+	if got[0].CPUUsageUsec == 0 {
+		t.Errorf("CPUUsageUsec = 0, want nonzero cumulative µs")
+	}
+}
+
 func testServer(t *testing.T) (*Server, *state.Store) {
 	t.Helper()
 	dir := t.TempDir()

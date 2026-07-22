@@ -38,9 +38,9 @@ type CreateVMRequest struct {
 
 // BuildRequest is the body for POST /build.
 type BuildRequest struct {
-	ImageName string               `json:"image_name"`
+	ImageName string                  `json:"image_name"`
 	Steps     []firecracker.BuildStep `json:"steps"`
-	SizeMB    int                  `json:"size_mb,omitempty"`
+	SizeMB    int                     `json:"size_mb,omitempty"`
 }
 
 // ImageInfo describes a custom rootfs image.
@@ -84,8 +84,11 @@ type VMStats struct {
 	PID     int     `json:"pid,omitempty"`
 	CPUPct  float64 `json:"cpu_pct"`
 	MemMB   float64 `json:"mem_mb"`
-	Status  string  `json:"status"`
-	Error   string  `json:"error,omitempty"`
+	// CPUUsageUsec is cumulative CPU microseconds (monotonic). Additive,
+	// omitempty so existing clients that don't expect it are unaffected.
+	CPUUsageUsec uint64 `json:"cpu_usage_usec,omitempty"`
+	Status       string `json:"status"`
+	Error        string `json:"error,omitempty"`
 }
 
 // VMInspectResponse is VMResponse plus the persisted declarative spec.
@@ -203,6 +206,9 @@ func (s *Server) handleStatsVMs(w http.ResponseWriter, r *http.Request) {
 				st.Error = err.Error()
 			} else {
 				st.CPUPct, st.MemMB = cpu, memMB
+				if usec, cerr := firecracker.ProcessCumulativeCPU(s.executor, vm.PID); cerr == nil {
+					st.CPUUsageUsec = usec
+				}
 			}
 		}
 		result = append(result, st)
