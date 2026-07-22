@@ -149,3 +149,30 @@ func TestToCFStatsEmptyIsArrayNotNull(t *testing.T) {
 		t.Fatalf("empty stats: got %q want []", got)
 	}
 }
+
+func TestDefaultNetworkFirecracker(t *testing.T) {
+	got := mustJSON(t, defaultNetwork("firecracker"))
+	want := `{
+  "id": "default",
+  "state": "running",
+  "config": {
+    "mode": "nat"
+  },
+  "status": {
+    "ipv4Subnet": "172.16.0.0/24"
+  }
+}`
+	if got != want {
+		t.Errorf("firecracker default network:\n got:\n%s\n want:\n%s", got, want)
+	}
+}
+
+func TestDefaultNetworkApplevzHasNoSubnet(t *testing.T) {
+	n := defaultNetwork("applevz")
+	if n.Config.Mode != "nat" || n.ID != "default" {
+		t.Errorf("applevz network = %+v, want id=default mode=nat", n)
+	}
+	if n.Status.IPv4Subnet != "" {
+		t.Errorf("applevz ipv4Subnet = %q, want empty (Apple NAT assigns it dynamically)", n.Status.IPv4Subnet)
+	}
+}

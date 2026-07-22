@@ -31,14 +31,26 @@ type cfConfiguration struct {
 	PublishedPorts []cfPort    `json:"publishedPorts"`
 	Platform       *cfPlatform `json:"platform,omitempty"` // inspect only
 }
-type cfNetwork struct {
+type cfContainerNetwork struct {
 	IPv4Address string `json:"ipv4Address"`
 }
+type cfNetworkConfig struct {
+	Mode string `json:"mode"`
+}
+type cfNetworkStatus struct {
+	IPv4Subnet string `json:"ipv4Subnet"`
+}
+type cfNetwork struct {
+	ID     string          `json:"id"`
+	State  string          `json:"state"`
+	Config cfNetworkConfig `json:"config"`
+	Status cfNetworkStatus `json:"status"`
+}
 type cfContainer struct {
-	Configuration cfConfiguration `json:"configuration"`
-	Status        string          `json:"status"`
-	Networks      []cfNetwork     `json:"networks"`
-	StartedDate   float64         `json:"startedDate,omitempty"` // inspect only
+	Configuration cfConfiguration    `json:"configuration"`
+	Status        string             `json:"status"`
+	Networks      []cfContainerNetwork `json:"networks"`
+	StartedDate   float64            `json:"startedDate,omitempty"` // inspect only
 }
 type cfStats struct {
 	ID               string `json:"id"`
@@ -121,11 +133,11 @@ func cfPortsFrom(ports []state.PortMap) []cfPort {
 	return out
 }
 
-func cfNetworksFrom(guestIP string) []cfNetwork {
+func cfNetworksFrom(guestIP string) []cfContainerNetwork {
 	if guestIP == "" {
-		return []cfNetwork{}
+		return []cfContainerNetwork{}
 	}
-	return []cfNetwork{{IPv4Address: guestIP}}
+	return []cfContainerNetwork{{IPv4Address: guestIP}}
 }
 
 // toCFContainer converts one native VMResponse (plus its persisted spec, which
@@ -176,4 +188,18 @@ func toCFStats(src []cfStatSource) []cfStats {
 		})
 	}
 	return out
+}
+
+// defaultNetwork synthesizes mvm's single implicit "default" network. mvm has
+// no user-defined networks — each VM gets a per-VM /30 out of a fixed scheme —
+// so this reports the umbrella network honestly. Firecracker's subnet is the
+// real fixed constant (172.16.0.0/24, see internal/state/network.go); applevz
+// uses Apple's NAT, which assigns the subnet dynamically per machine, so its
+// subnet is left empty rather than faked.
+func defaultNetwork(backend string) cfNetwork {
+	n := cfNetwork{ID: "default", State: "running", Config: cfNetworkConfig{Mode: "nat"}}
+	if backend == "firecracker" {
+		n.Status.IPv4Subnet = "172.16.0.0/24"
+	}
+	return n
 }
