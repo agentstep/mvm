@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
+	"github.com/agentstep/mvm/internal/state"
 	"github.com/agentstep/mvm/internal/vzhelper"
 )
 
@@ -74,6 +75,192 @@ func (b *AppleVZBackend) AgentClient(name string) *agentclient.Client {
 // to the helper itself, not through it to the in-guest agent.
 func (b *AppleVZBackend) HelperClient(name string) *vzhelper.Client {
 	return vzhelper.New(b.IPCSocketPath(name))
+}
+
+// ResolveKernel picks the kernel to boot the applevz backend with.
+//
+// Preferred: cacheDir/vmlinux-applevz, a custom-built kernel with virtio-fs
+// support (see build-applevz-kernel.sh) required for -V volume mounts.
+//
+// That kernel is NOT part of a fresh `mvm init --backend applevz` install —
+// runInitAppleVZ only ever downloads the shared cacheDir/vmlinux — so on any
+// machine where nobody has manually run build-applevz-kernel.sh, the custom
+// kernel won't exist. Falling back to the shared vmlinux there keeps the
+// backend bootable; -V volume mounts still degrade gracefully afterward via
+// virtiofsMountCommands' own per-mount warning, since the shared kernel has
+// no virtio-fs driver.
+//
+// Returns the kernel path to boot with, and — only when falling back — a
+// warning message for the caller to log.
+//
+// Moved here (from internal/cli/start.go, exported) so internal/server's
+// daemon can create applevz VMs too, not just the local CLI path — the two
+// need to agree on kernel selection, not maintain two copies of the logic.
+func ResolveKernel(cacheDir string) (kernelPath string, warning string) {
+	custom := filepath.Join(cacheDir, "vmlinux-applevz")
+	if _, err := os.Stat(custom); err == nil {
+		return custom, ""
+	}
+	shared := filepath.Join(cacheDir, "vmlinux")
+	return shared, fmt.Sprintf(
+		"custom applevz kernel not found at %s; falling back to the shared vmlinux. "+
+			"Volume mounts (-V) will not work until you build it: internal/firecracker/scripts/build-applevz-kernel.sh",
+		custom,
+	)
+}
+
+// ImageFileName maps an --image value to its rootfs filename, matching the
+// Firecracker path's convention (firecracker.CacheDir()+"/"+name+".ext4",
+// internal/firecracker/config.go:229). image == "" means the implicit
+// default. Moved here alongside ResolveKernel — see its doc comment.
+func ImageFileName(image string) string {
+	if image == "" {
+		return "base.ext4"
+	}
+	return image + ".ext4"
+}
+
+// ResolveImage returns the local rootfs path for image inside cacheDir,
+// fetching it via fetch first if it isn't already cached locally. fetch is
+// injected so this is testable without a real daemon; the CLI's
+// runStartAppleVZ passes a closure around requireDaemon()+Client.DownloadImage.
+// A nil fetch with a missing image is a clear, immediate error rather than a
+// nil-pointer call. Moved here alongside ResolveKernel — see its doc comment.
+func ResolveImage(cacheDir, image string, fetch func(image, destPath string) error) (string, error) {
+	rootfsPath := filepath.Join(cacheDir, ImageFileName(image))
+	if image == "" {
+		return rootfsPath, nil
+	}
+	if _, err := os.Stat(rootfsPath); err == nil {
+		return rootfsPath, nil
+	}
+	if fetch == nil {
+		return "", fmt.Errorf("image %q not found in %s and no daemon reachable to fetch it (build it with: mvm build -t %s -f <Dockerfile>)", image, cacheDir, image)
+	}
+	if err := fetch(image, rootfsPath); err != nil {
+		return "", fmt.Errorf("fetch image %q from daemon: %w", image, err)
+	}
+	return rootfsPath, nil
+}
+
+// CreateAndBoot provisions and boots a MINIMAL applevz VM: default rootfs
+// only (no --image), no ports, no volumes, no startup recipe, no secrets, no
+// network-policy enforcement, no guest-IP/DNS discovery. It exists so
+// internal/server's HTTP daemon — which historically only knew how to create
+// Firecracker VMs (see routes.go's handleCreateVM, which never even set
+// Backend on a created VM's state record) — can also create a bare,
+// exec-and-file-io-capable applevz VM, reusing the exact boot primitives
+// (StartVM, the per-VM mvm-vz helper, vsock agent readiness) the CLI's own
+// runStartAppleVZ (internal/cli/start.go) already relies on for its richer,
+// full-featured local path.
+//
+// Ports/volumes/startup recipes/secrets/custom images are deliberately NOT
+// supported here — a caller that needs any of those should use the CLI's
+// local path (mvm start), not this. Reserves the VM in state with
+// Backend: "applevz" BEFORE booting (same ordering runStartAppleVZ uses), so
+// a failure partway through still leaves an inspectable, cleanable state
+// record rather than an orphaned process with nothing tracking it.
+func (b *AppleVZBackend) CreateAndBoot(store *state.Store, name string, cpus, memoryMB int) (*state.VM, error) {
+	vmEntry := &state.VM{
+		Name:      name,
+		Status:    "starting",
+		Backend:   "applevz",
+		CreatedAt: time.Now(),
+	}
+	netIndex, err := store.ReserveVM(vmEntry)
+	if err != nil {
+		return nil, err
+	}
+	// Only GuestMAC is actually used below — the guest gets its real IP via
+	// DHCP against Apple's VZNAT device, not this static Firecracker-scheme
+	// allocation (see runStartAppleVZ's identical comment in start.go).
+	alloc := state.AllocateNet(netIndex)
+
+	kernelPath, _ := ResolveKernel(b.cacheDir)
+	rootfsPath, err := ResolveImage(b.cacheDir, "", nil)
+	if err != nil {
+		store.RemoveVM(name)
+		return nil, err
+	}
+
+	vmDir := filepath.Join(b.dataDir, "vms", name)
+	if err := os.MkdirAll(vmDir, 0o755); err != nil {
+		store.RemoveVM(name)
+		return nil, fmt.Errorf("mkdir vm dir: %w", err)
+	}
+	vmRootfs := filepath.Join(vmDir, "rootfs.ext4")
+	// APFS copy-on-write clone — instant regardless of rootfs size. Falls back
+	// to a plain copy on non-APFS/cross-device. No existing-VM/resume case
+	// here (ReserveVM above already rejected a name collision), so this is
+	// always a fresh clone — unlike runStartAppleVZ, which also handles
+	// restore-from-snapshot and resume-a-stopped-VM.
+	if err := exec.Command("cp", "-c", rootfsPath, vmRootfs).Run(); err != nil {
+		if err := exec.Command("cp", rootfsPath, vmRootfs).Run(); err != nil {
+			store.RemoveVM(name)
+			return nil, fmt.Errorf("copy rootfs: %w", err)
+		}
+	}
+
+	vzCpus := cpus
+	if vzCpus <= 0 {
+		vzCpus = 2
+	}
+	vzMem := memoryMB
+	if vzMem <= 0 {
+		vzMem = 1024
+	}
+	// Matches runStartAppleVZ's bootArgs exactly (start.go) — both boot the
+	// same guest image and must agree on init/rootfs/networking flags.
+	bootArgs := "console=hvc0 root=/dev/vda rw reboot=k panic=1 rootfstype=ext4 init=/sbin/mvm-init ip=dhcp"
+
+	startResult, err := b.StartVM(name, kernelPath, vmRootfs, bootArgs, alloc.GuestMAC, vzCpus, vzMem, nil, "")
+	if err != nil {
+		store.RemoveVM(name)
+		return nil, fmt.Errorf("start VM: %w", err)
+	}
+
+	if err := store.UpdateVM(name, func(v *state.VM) {
+		v.Status = "running"
+		v.GuestMAC = alloc.GuestMAC
+		v.PID = startResult.PID
+		v.RootfsPath = vmRootfs
+		v.Backend = "applevz"
+	}); err != nil {
+		store.RemoveVM(name)
+		return nil, err
+	}
+
+	// Wait for the in-guest agent to be reachable over vsock before reporting
+	// success — a VM the daemon reports "running" but whose agent isn't up
+	// yet would 500 on the caller's very next exec, exactly the bug this
+	// method exists to fix.
+	agent := b.AgentClient(name)
+	if !waitForAgentReady(agent, 60*time.Second) {
+		_ = b.StopVM(name, startResult.PID)
+		store.RemoveVM(name)
+		return nil, fmt.Errorf("VM %q booted but the guest agent never became reachable within 60s", name)
+	}
+
+	return store.GetVM(name)
+}
+
+// waitForAgentReady polls Ping until the guest agent responds or timeout
+// elapses. Duplicated from (not shared with) internal/cli/start.go's
+// unexported waitForAgent: both are ~10 lines with no other coupling between
+// the two packages, so duplicating avoids a cross-package export that would
+// exist purely to save ten lines.
+func waitForAgentReady(c *agentclient.Client, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := c.Ping(ctx)
+		cancel()
+		if err == nil {
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
 }
 
 // vzCreateResult is the JSON status line the mvm-vz helper prints

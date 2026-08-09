@@ -197,3 +197,112 @@ func TestStartVMSurfacesHelperStderrOnFailure(t *testing.T) {
 		t.Fatalf("stderr log content = %q, want it to contain the helper's message", data)
 	}
 }
+
+// === ResolveKernel (moved from internal/cli/start_test.go) ===
+
+func TestResolveKernelPrefersCustomKernel(t *testing.T) {
+	cacheDir := t.TempDir()
+	custom := filepath.Join(cacheDir, "vmlinux-applevz")
+	if err := os.WriteFile(custom, []byte("fake kernel"), 0o644); err != nil {
+		t.Fatalf("write fake custom kernel: %v", err)
+	}
+	// Shared kernel present too, to confirm the custom one still wins.
+	if err := os.WriteFile(filepath.Join(cacheDir, "vmlinux"), []byte("fake shared kernel"), 0o644); err != nil {
+		t.Fatalf("write fake shared kernel: %v", err)
+	}
+
+	kernelPath, warning := ResolveKernel(cacheDir)
+	if kernelPath != custom {
+		t.Errorf("kernelPath = %q, want %q", kernelPath, custom)
+	}
+	if warning != "" {
+		t.Errorf("warning = %q, want empty when custom kernel exists", warning)
+	}
+}
+
+func TestResolveKernelFallsBackWhenCustomKernelMissing(t *testing.T) {
+	cacheDir := t.TempDir()
+	shared := filepath.Join(cacheDir, "vmlinux")
+	if err := os.WriteFile(shared, []byte("fake shared kernel"), 0o644); err != nil {
+		t.Fatalf("write fake shared kernel: %v", err)
+	}
+
+	kernelPath, warning := ResolveKernel(cacheDir)
+	if kernelPath != shared {
+		t.Errorf("kernelPath = %q, want %q (fallback to shared vmlinux)", kernelPath, shared)
+	}
+	if warning == "" {
+		t.Error("warning = \"\", want a non-empty warning when falling back")
+	}
+	if !strings.Contains(warning, "vmlinux-applevz") {
+		t.Errorf("warning = %q, want it to mention the missing custom kernel path", warning)
+	}
+}
+
+// === ImageFileName / ResolveImage (moved from internal/cli/start_test.go) ===
+
+func TestImageFileName(t *testing.T) {
+	if got := ImageFileName(""); got != "base.ext4" {
+		t.Errorf(`ImageFileName("") = %q, want base.ext4`, got)
+	}
+	if got := ImageFileName("my-image"); got != "my-image.ext4" {
+		t.Errorf(`ImageFileName("my-image") = %q, want my-image.ext4`, got)
+	}
+}
+
+func TestResolveImageDefaultsToBase(t *testing.T) {
+	path, err := ResolveImage("/cache", "", nil)
+	if err != nil {
+		t.Fatalf("ResolveImage: %v", err)
+	}
+	if path != "/cache/base.ext4" {
+		t.Errorf("path = %q, want /cache/base.ext4", path)
+	}
+}
+
+func TestResolveImageUsesLocalCacheWhenPresent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "my-image.ext4"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fetchCalled := false
+	path, err := ResolveImage(dir, "my-image", func(image, dest string) error {
+		fetchCalled = true
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ResolveImage: %v", err)
+	}
+	if fetchCalled {
+		t.Error("fetch was called for an already-cached image")
+	}
+	if path != filepath.Join(dir, "my-image.ext4") {
+		t.Errorf("path = %q, want the cached path", path)
+	}
+}
+
+func TestResolveImageFetchesWhenMissing(t *testing.T) {
+	dir := t.TempDir()
+	var fetchedImage, fetchedDest string
+	path, err := ResolveImage(dir, "my-image", func(image, dest string) error {
+		fetchedImage, fetchedDest = image, dest
+		return os.WriteFile(dest, []byte("fetched"), 0o644)
+	})
+	if err != nil {
+		t.Fatalf("ResolveImage: %v", err)
+	}
+	if fetchedImage != "my-image" || fetchedDest != path {
+		t.Errorf("fetch(%q, %q), want (my-image, %q)", fetchedImage, fetchedDest, path)
+	}
+}
+
+func TestResolveImageErrorsWhenNoDaemonAvailable(t *testing.T) {
+	dir := t.TempDir()
+	_, err := ResolveImage(dir, "my-image", nil)
+	if err == nil {
+		t.Fatal("ResolveImage() = nil, want an error when the image is missing and there's no way to fetch it")
+	}
+	if !strings.Contains(err.Error(), "my-image") {
+		t.Errorf("err = %v, want it to name the missing image", err)
+	}
+}

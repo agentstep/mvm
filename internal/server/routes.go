@@ -18,6 +18,7 @@ import (
 	"github.com/agentstep/mvm/internal/agentclient"
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
+	vmpkg "github.com/agentstep/mvm/internal/vm"
 )
 
 func snapshotsBaseDir() string { return filepath.Join(firecracker.DataDir(), "snapshots") }
@@ -271,6 +272,19 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// applevz VMs are created and booted entirely separately from the
+	// Firecracker path below. This daemon previously had NO applevz create
+	// path at all — a bare POST here always created a Firecracker VM
+	// regardless of the locally configured backend, and the resulting VM's
+	// state record never even got a Backend field, so handleExec's hardcoded
+	// FirecrackerVsockDialer always 500'd against it. See
+	// vm.AppleVZBackend.CreateAndBoot's doc comment for exactly what this
+	// minimal path does and doesn't support.
+	if s.store.GetBackend() == "applevz" {
+		s.handleCreateApplevzVM(w, req)
+		return
+	}
+
 	// Validate ports before any of their fields reach SetupPortForwarding,
 	// which interpolates HostIP/Proto into a root `sudo iptables` shell
 	// command. A remote client can POST an arbitrary body, so this server-side
@@ -403,6 +417,47 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCreateApplevzVM is handleCreateVM's applevz counterpart — split out
+// because the two backends share almost nothing past this point (no pool,
+// no Firecracker socket, no iptables-based network policy, a completely
+// different agent transport). See vm.AppleVZBackend.CreateAndBoot's doc
+// comment for exactly what this minimal path does and doesn't support;
+// anything in that "doesn't" list 400s here rather than silently ignoring it.
+func (s *Server) handleCreateApplevzVM(w http.ResponseWriter, req CreateVMRequest) {
+	if len(req.Ports) > 0 || len(req.Volumes) > 0 || req.Seccomp != "" || req.Image != "" || len(req.Secrets) > 0 {
+		httpError(w, fmt.Errorf(
+			"ports/volumes/seccomp/image/secrets are not yet supported for applevz VMs created via the daemon API — use the mvm CLI locally (mvm start) for those",
+		), http.StatusBadRequest)
+		return
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		httpError(w, fmt.Errorf("resolve home directory: %w", err), http.StatusInternalServerError)
+		return
+	}
+	backend := vmpkg.NewAppleVZBackend(filepath.Join(home, ".mvm"))
+
+	created, err := backend.CreateAndBoot(s.store, req.Name, req.Cpus, req.MemoryMB)
+	if err != nil {
+		// CreateAndBoot already cleans up its own partial state (ReserveVM/
+		// RemoveVM pairing) on every failure path — nothing further to tear
+		// down here.
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(VMResponse{
+		Name:      created.Name,
+		Status:    created.Status,
+		Backend:   created.Backend,
+		PID:       created.PID,
+		CreatedAt: created.CreatedAt,
+	})
+}
+
 // handleStartVM boots an existing STOPPED Firecracker VM in place (cold reboot,
 // disk preserved). Additive endpoint for the start-resume verb — never alters
 // create. Reuses the VM's existing NetIndex (no ReserveVM), boots the existing
@@ -482,6 +537,38 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// applevz VMs never reach the Firecracker vsock dial below — that dialer
+	// unconditionally assumed every VM was Firecracker-backed (the bug this
+	// branch fixes: a VM booted via handleCreateApplevzVM used to 500 on its
+	// very first exec, "no such file or directory" on a vsock UDS path that
+	// backend never creates). No pause/resume here yet — CreateAndBoot never
+	// produces a paused VM — and no interactive/streaming exec; both are
+	// explicit gaps (see vm.AppleVZBackend.CreateAndBoot's doc comment), not
+	// silently degraded behavior.
+	if vm.Backend == "applevz" {
+		if vm.Status != "running" {
+			httpError(w, fmt.Errorf("VM %q is %s", name, vm.Status), http.StatusConflict)
+			return
+		}
+		if req.Interactive {
+			httpError(w, fmt.Errorf("interactive exec is not yet supported for applevz VMs via the daemon API"), http.StatusBadRequest)
+			return
+		}
+		now := time.Now()
+		s.store.UpdateVM(name, func(v *state.VM) { v.LastActivity = &now })
+
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			httpError(w, fmt.Errorf("resolve home directory: %w", herr), http.StatusInternalServerError)
+			return
+		}
+		client := vmpkg.NewAppleVZBackend(filepath.Join(home, ".mvm")).AgentClient(name)
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		defer cancel()
+		s.execAndRespond(w, client, req, ctx)
+		return
+	}
+
 	// Auto-resume paused VMs so idle-pause doesn't break exec.
 	if vm.Status == "paused" {
 		if err := firecracker.Resume(s.executor, vm); err != nil {
@@ -510,6 +597,15 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
 	defer cancel()
 
+	s.execAndRespond(w, client, req, ctx)
+}
+
+// execAndRespond runs one exec through client (Firecracker- or
+// applevz-backed — agentclient.Client doesn't care which dialer built it)
+// and writes the response in whichever shape req asked for. Shared by both
+// backends in handleExec so the NDJSON-vs-JSON framing logic exists exactly
+// once.
+func (s *Server) execAndRespond(w http.ResponseWriter, client *agentclient.Client, req ExecRequest, ctx context.Context) {
 	result, execErr := client.Exec(ctx, req.Command, req.Stdin)
 	if execErr != nil {
 		httpError(w, execErr, http.StatusInternalServerError)
@@ -645,6 +741,21 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 	vm, err := s.store.GetVM(name)
 	if err != nil {
 		httpError(w, err, http.StatusNotFound)
+		return
+	}
+
+	if vm.Backend == "applevz" {
+		// Parity with firecracker.Cleanup below: stop the process (graceful
+		// IPC stop, SIGTERM fallback — AppleVZBackend.StopVM already does
+		// both) and remove the per-VM directory. Best-effort, same as
+		// Cleanup's own error handling (nothing here blocks the state removal).
+		if home, herr := os.UserHomeDir(); herr == nil {
+			backend := vmpkg.NewAppleVZBackend(filepath.Join(home, ".mvm"))
+			_ = backend.StopVM(name, vm.PID)
+			_ = os.RemoveAll(filepath.Join(home, ".mvm", "vms", name))
+		}
+		s.store.RemoveVM(name)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
