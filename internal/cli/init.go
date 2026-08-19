@@ -422,6 +422,14 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mkdir -p /dev/pts
 mount -t devpts -o mode=620,ptmxmode=666 devpts /dev/pts 2>/dev/null
 ln -sf /dev/pts/ptmx /dev/ptmx
+# POSIX shared memory. devtmpfs does not provide /dev/shm, and anything using
+# shm_open() aborts without it — Chromium dies at startup with
+# "FATAL: Unable to access(W_OK|X_OK) /dev/shm", the same failure Docker users
+# work around with --disable-dev-shm-usage. 1777 (sticky, world-writable) is
+# the standard mode; the size cap keeps a runaway workload from consuming all
+# guest RAM through tmpfs.
+mkdir -p /dev/shm
+mount -t tmpfs -o rw,nosuid,nodev,size=50%%,mode=1777 tmpfs /dev/shm 2>/dev/null
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /opt/mvm-agent
 MVMINIT
