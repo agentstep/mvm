@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,16 +38,21 @@ func (m *mockExecutor) RunWithTimeout(command string, timeout time.Duration) (st
 func TestHandleStatsVMsReportsCumulativeCPU(t *testing.T) {
 	s, store := testServer(t)
 	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", PID: 4242, CreatedAt: time.Now()})
+	// One /proc read now covers cumulative CPU, memory, and CPU% — no ps at
+	// all. 1500+1500 ticks at 100Hz = 30s cumulative; 25600 pages = 100 MiB.
+	var calls int
 	s.executor = &mockExecutor{runFunc: func(command string) (string, error) {
-		// Both ProcessStats and ProcessCumulativeCPU shell ps, but with
-		// different -o formats: ProcessStats reads `%cpu,rss` (a float %cpu),
-		// ProcessCumulativeCPU reads `time,rss` (a [[DD-]HH:]MM:SS cumulative
-		// time). Return the format matching the command so the cumulative read
-		// (gated on ProcessStats success) is reached and yields nonzero µs.
-		if strings.Contains(command, "time=") {
-			return "  00:30.00 51200", nil
+		calls++
+		if !strings.Contains(command, "/proc/4242/stat") {
+			return "", fmt.Errorf("unexpected command %q", command)
 		}
-		return " 3.0 51200", nil
+		f := make([]string, 22)
+		for i := range f {
+			f[i] = "0"
+		}
+		f[0] = "S"
+		f[14-3], f[15-3], f[24-3] = "1500", "1500", "25600"
+		return "4242 (firecracker) " + strings.Join(f, " ") + "|1000.0 900.0", nil
 	}}
 	req := httptest.NewRequest("GET", "/vms/stats", nil)
 	w := httptest.NewRecorder()
@@ -56,8 +62,39 @@ func TestHandleStatsVMsReportsCumulativeCPU(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("stats len = %d, want 1", len(got))
 	}
-	if got[0].CPUUsageUsec == 0 {
-		t.Errorf("CPUUsageUsec = 0, want nonzero cumulative µs")
+	if got[0].CPUUsageUsec != 30_000_000 {
+		t.Errorf("CPUUsageUsec = %d, want 30000000", got[0].CPUUsageUsec)
+	}
+	if got[0].MemMB != 100 {
+		t.Errorf("MemMB = %v, want 100", got[0].MemMB)
+	}
+	// One executor round-trip per VM, not the two `ps` spawns this replaced.
+	// The dashboard polls every 2s, so a per-VM regression here multiplies.
+	if calls != 1 {
+		t.Errorf("executor called %d times for 1 VM, want 1", calls)
+	}
+}
+
+// TestHandleStatsVMsSurfacesReadFailure pins that a failed /proc read is
+// reported rather than swallowed. CPUUsageUsec is omitempty, so a dropped
+// error is byte-identical to a genuine zero — the exact symptom this field
+// was added to fix.
+func TestHandleStatsVMsSurfacesReadFailure(t *testing.T) {
+	s, store := testServer(t)
+	store.AddVM(&state.VM{Name: "web", Status: "running", Backend: "firecracker", PID: 4242, CreatedAt: time.Now()})
+	s.executor = &mockExecutor{runFunc: func(string) (string, error) {
+		return "", fmt.Errorf("cat: /proc/4242/stat: No such file or directory")
+	}}
+	req := httptest.NewRequest("GET", "/vms/stats", nil)
+	w := httptest.NewRecorder()
+	s.handleStatsVMs(w, req)
+	var got []VMStats
+	json.NewDecoder(w.Body).Decode(&got)
+	if len(got) != 1 {
+		t.Fatalf("stats len = %d, want 1", len(got))
+	}
+	if got[0].Error == "" {
+		t.Error("Error is empty on a failed /proc read — the failure is indistinguishable from a real zero")
 	}
 }
 

@@ -75,9 +75,10 @@ func runStats(store *state.Store, names []string, wantJSON bool) error {
 
 	// Firecracker: best-effort daemon call, matching list.go's pattern — an
 	// applevz-only host with no daemon running is not an error for `mvm
-	// stats` either. The frozen VMStats wire contract carries only an
-	// instantaneous %cpu, so cpuUsageUsec stays 0 for the daemon path until
-	// an additive cumulative-CPU endpoint lands (Slice 3).
+	// stats` either. VMStats now carries cumulative CPU microseconds
+	// (additively — the daemon reads it from /proc/<pid>/stat), so the
+	// daemon path reports real values rather than 0. A zero here means the
+	// daemon's /proc read failed, and it sets VMStats.Error when it does.
 	if sc, err := requireDaemon(); err == nil {
 		if stats, err := sc.StatsVMs(context.Background()); err == nil {
 			for _, s := range stats {

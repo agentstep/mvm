@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,13 @@ import (
 )
 
 func snapshotsBaseDir() string { return filepath.Join(firecracker.DataDir(), "snapshots") }
+
+// baseImageName is the shared base rootfs (base.ext4) that every VM is cloned
+// from and that `mvm build` layers on top of. It is not a user-built image:
+// the list, inspect, and delete handlers all exclude it, so it stays out of
+// `image ls`/`image prune` and can't be inspected or removed by name. Deleting
+// it would require a full re-init to recover.
+const baseImageName = "base"
 
 // --- Request/Response types ---
 
@@ -204,14 +212,20 @@ func (s *Server) handleStatsVMs(w http.ResponseWriter, r *http.Request) {
 		}
 		st := VMStats{Name: vm.Name, Backend: vm.Backend, PID: vm.PID, Status: vm.Status}
 		if vm.Status == "running" && vm.PID > 0 {
-			cpu, memMB, err := firecracker.ProcessStats(s.executor, vm.PID)
+			// One /proc read per VM covers cumulative CPU, memory, and CPU%.
+			// This used to be two `ps` spawns per VM per poll (four processes,
+			// counting the `bash -c` each goes through) on a 2s dashboard tick.
+			//
+			// The error is surfaced, not swallowed: CPUUsageUsec is
+			// `omitempty`, so a silently-dropped failure is byte-identical to
+			// a genuine zero — exactly the symptom this field was added to
+			// fix, and undebuggable without a signal.
+			sample, err := firecracker.ProcessCumulativeStats(s.executor, vm.PID)
 			if err != nil {
 				st.Error = err.Error()
+				log.Printf("VM %s: stats read failed: %v", vm.Name, err)
 			} else {
-				st.CPUPct, st.MemMB = cpu, memMB
-				if usec, cerr := firecracker.ProcessCumulativeCPU(s.executor, vm.PID); cerr == nil {
-					st.CPUUsageUsec = usec
-				}
+				st.CPUPct, st.MemMB, st.CPUUsageUsec = sample.CPUPct, sample.MemMB, sample.CPUUsec
 			}
 		}
 		result = append(result, st)
@@ -983,7 +997,7 @@ func (s *Server) handleImageList(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		baseName := strings.TrimSuffix(name, ".ext4")
-		if baseName == "base" {
+		if baseName == baseImageName {
 			continue
 		}
 		info, err := e.Info()
@@ -1046,6 +1060,13 @@ func (s *Server) handleImageDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusBadRequest)
 		return
 	}
+	// Refuse the shared base rootfs. It is hidden from `image ls`, so deleting
+	// it by name would silently destroy the image every VM clones from and
+	// force a full re-init to recover.
+	if name == baseImageName {
+		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
+		return
+	}
 
 	imagePath := filepath.Join(firecracker.CacheDir(), name+".ext4")
 	if _, err := os.Stat(imagePath); err != nil {
@@ -1067,29 +1088,107 @@ func (s *Server) handleImageInspect(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusBadRequest)
 		return
 	}
-	path := firecracker.CacheDir() + "/" + name + ".ext4"
-	fi, err := os.Stat(path)
+	// base.ext4 is the shared base rootfs, not a user-built image.
+	// handleImageList hides it and handleImageDelete refuses it, so inspect
+	// must too — otherwise `base` is inspectable but unlistable and
+	// un-prunable. It is also the largest blob in the cache, i.e. the worst
+	// case for the hashing below.
+	if name == baseImageName {
+		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
+		return
+	}
+	path := filepath.Join(firecracker.CacheDir(), name+".ext4")
+	// Open once and Stat the handle: os.Stat followed by os.Open is two
+	// syscalls with a TOCTOU window between them, and matches neither
+	// sibling handler (handleImageDownload opens then f.Stat()s).
+	f, err := os.Open(path)
 	if err != nil {
 		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
 		return
 	}
-	f, err := os.Open(path)
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if fi.IsDir() {
+		httpError(w, fmt.Errorf("image %q not found", name), http.StatusNotFound)
+		return
+	}
+
+	digest, err := s.imageDigest(r.Context(), path, fi)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Client hung up mid-hash; nothing useful to write.
+			return
+		}
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ImageInfo{
 		Name:   name,
 		SizeMB: int(fi.Size() / (1024 * 1024)),
-		Digest: "sha256:" + hex.EncodeToString(h.Sum(nil)),
+		Digest: digest,
 	})
+}
+
+// digestKey identifies a cached digest. Size and mtime together are enough to
+// notice a rebuilt image: `mvm build` writes a fresh blob rather than mutating
+// one in place, so a changed image always changes at least mtime.
+type digestKey struct {
+	path  string
+	size  int64
+	mtime int64
+}
+
+// imageDigest returns the sha256 of an image blob, computing it at most once
+// per (path, size, mtime).
+//
+// Without the cache every inspect re-hashes the whole blob. Custom rootfs
+// images are GiB-scale, so that is tens of seconds of CPU and IO per call —
+// long enough for the TCP listener's WriteTimeout to kill the connection
+// before the first byte is written, and cheap enough to loop that an
+// authenticated client could pin the daemon with it.
+//
+// The hash honours ctx so a client that disconnects mid-hash stops the work
+// instead of leaving the daemon reading to EOF.
+func (s *Server) imageDigest(ctx context.Context, path string, fi os.FileInfo) (string, error) {
+	key := digestKey{path: path, size: fi.Size(), mtime: fi.ModTime().UnixNano()}
+	if v, ok := s.digestCache.Load(key); ok {
+		return v.(string), nil
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, &ctxReader{ctx: ctx, r: f}); err != nil {
+		return "", err
+	}
+	digest := "sha256:" + hex.EncodeToString(h.Sum(nil))
+	s.digestCache.Store(key, digest)
+	return digest, nil
+}
+
+// ctxReader aborts a long io.Copy when its context is cancelled. io.Copy
+// itself has no cancellation, so without this a disconnected client still
+// costs a full read of the file.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c *ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
 
 func (s *Server) handleInspectVM(w http.ResponseWriter, r *http.Request) {

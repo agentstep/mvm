@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -29,12 +30,18 @@ type Server struct {
 	store        *state.Store
 	executor     firecracker.Executor
 	unixListener net.Listener
-	tcpListener  net.Listener  // nil if no ListenAddr
+	tcpListener  net.Listener // nil if no ListenAddr
 	unixServer   *http.Server
-	tcpServer    *http.Server  // nil if no ListenAddr
+	tcpServer    *http.Server // nil if no ListenAddr
 	sockPath     string
 	pidPath      string
 	cfg          Config
+
+	// digestCache memoizes image sha256s by (path, size, mtime) so repeat
+	// `image inspect` calls don't re-hash a multi-GiB blob. Keyed by
+	// digestKey, values are strings. A sync.Map (rather than a plain map plus
+	// mutex) because the access pattern is write-once-read-many per image.
+	digestCache sync.Map
 }
 
 type Config struct {
