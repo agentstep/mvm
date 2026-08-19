@@ -151,7 +151,7 @@ func TestToCFStatsEmptyIsArrayNotNull(t *testing.T) {
 }
 
 func TestDefaultNetworkFirecracker(t *testing.T) {
-	got := mustJSON(t, defaultNetwork("firecracker"))
+	got := mustJSON(t, defaultNetwork("firecracker", true))
 	want := `{
   "id": "default",
   "state": "running",
@@ -167,8 +167,20 @@ func TestDefaultNetworkFirecracker(t *testing.T) {
 	}
 }
 
+// TestDefaultNetworkReportsDownWhenNotUp pins that the state is derived, not
+// hardcoded: before `mvm init`, or with Lima stopped, no TAP devices or NAT
+// rules exist and the subnet is unreachable, so "running" would be a lie.
+func TestDefaultNetworkReportsDownWhenNotUp(t *testing.T) {
+	if got := defaultNetwork("firecracker", false).State; got != "stopped" {
+		t.Errorf("State = %q with up=false, want stopped", got)
+	}
+	if got := defaultNetwork("firecracker", true).State; got != "running" {
+		t.Errorf("State = %q with up=true, want running", got)
+	}
+}
+
 func TestDefaultNetworkApplevzHasNoSubnet(t *testing.T) {
-	n := defaultNetwork("applevz")
+	n := defaultNetwork("applevz", true)
 	if n.Config.Mode != "nat" || n.ID != "default" {
 		t.Errorf("applevz network = %+v, want id=default mode=nat", n)
 	}

@@ -47,10 +47,10 @@ type cfNetwork struct {
 	Status cfNetworkStatus `json:"status"`
 }
 type cfContainer struct {
-	Configuration cfConfiguration    `json:"configuration"`
-	Status        string             `json:"status"`
+	Configuration cfConfiguration      `json:"configuration"`
+	Status        string               `json:"status"`
 	Networks      []cfContainerNetwork `json:"networks"`
-	StartedDate   float64            `json:"startedDate,omitempty"` // inspect only
+	StartedDate   float64              `json:"startedDate,omitempty"` // inspect only
 }
 type cfStats struct {
 	ID               string `json:"id"`
@@ -192,14 +192,23 @@ func toCFStats(src []cfStatSource) []cfStats {
 
 // defaultNetwork synthesizes mvm's single implicit "default" network. mvm has
 // no user-defined networks — each VM gets a per-VM /30 out of a fixed scheme —
-// so this reports the umbrella network honestly. Firecracker's subnet is the
-// real fixed constant (172.16.0.0/24, see internal/state/network.go); applevz
-// uses Apple's NAT, which assigns the subnet dynamically per machine, so its
-// subnet is left empty rather than faked.
-func defaultNetwork(backend string) cfNetwork {
-	n := cfNetwork{ID: "default", State: "running", Config: cfNetworkConfig{Mode: "nat"}}
+// so this reports the umbrella network honestly. Firecracker's subnet comes
+// from state.VMSubnetCIDR, the same constant AllocateNet derives every gateway
+// and guest IP from; applevz uses Apple's NAT, which assigns the subnet
+// dynamically per machine, so its subnet is left empty rather than faked.
+//
+// up is the caller's liveness verdict (see networkUp). It is a parameter
+// rather than a hardcoded "running" because on an uninitialized host, or one
+// where the Lima VM is stopped, no TAP devices or NAT rules exist and the
+// subnet is unreachable — reporting "running" there would be a plain lie.
+func defaultNetwork(backend string, up bool) cfNetwork {
+	netState := "stopped"
+	if up {
+		netState = "running"
+	}
+	n := cfNetwork{ID: "default", State: netState, Config: cfNetworkConfig{Mode: "nat"}}
 	if backend == "firecracker" {
-		n.Status.IPv4Subnet = "172.16.0.0/24"
+		n.Status.IPv4Subnet = state.VMSubnetCIDR
 	}
 	return n
 }

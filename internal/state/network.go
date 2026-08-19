@@ -5,6 +5,19 @@ import (
 	"net"
 )
 
+// VMSubnetPrefix is the first three octets of the /24 that every per-VM /30 is
+// carved out of. VMSubnetCIDR is that /24 in CIDR form, as reported by
+// `mvm network ls`.
+//
+// Both live here, and AllocateNet below derives from the prefix, so the scheme
+// has exactly one definition — changing it (say, to dodge a collision with a
+// corporate 172.16/12 range) is a one-line edit rather than a hunt through
+// unrelated string literals in the CLI and the allocator.
+const (
+	VMSubnetPrefix = "172.16.0"
+	VMSubnetCIDR   = VMSubnetPrefix + ".0/24"
+)
+
 // NetAllocation holds the network configuration for a single microVM.
 type NetAllocation struct {
 	Index    int
@@ -23,9 +36,9 @@ type NetAllocation struct {
 //	Index N: tapN, 172.16.0.(4N+1) (gw), 172.16.0.(4N+2) (guest)
 func AllocateNet(index int) NetAllocation {
 	base := 4 * index
-	gwIP := fmt.Sprintf("172.16.0.%d", base+1)
-	guestIP := fmt.Sprintf("172.16.0.%d", base+2)
-	subnet := fmt.Sprintf("172.16.0.%d/30", base)
+	gwIP := fmt.Sprintf("%s.%d", VMSubnetPrefix, base+1)
+	guestIP := fmt.Sprintf("%s.%d", VMSubnetPrefix, base+2)
+	subnet := fmt.Sprintf("%s.%d/30", VMSubnetPrefix, base)
 
 	return NetAllocation{
 		Index:    index,

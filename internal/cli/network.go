@@ -38,10 +38,32 @@ func newNetworkInspectCmd(store *state.Store) *cobra.Command {
 	}
 }
 
+// networkUp reports whether mvm's implicit network actually exists on this
+// host. It is not a constant: before `mvm init` there are no TAP devices and
+// no NAT rules, and on the Firecracker backend the whole network lives inside
+// Lima, so a stopped Lima VM (or a stopped daemon) means an unreachable subnet.
+func networkUp(store *state.Store) bool {
+	initialized, err := store.IsInitialized()
+	if err != nil || !initialized {
+		return false
+	}
+	if store.GetBackend() == "firecracker" {
+		// The subnet is inside Lima; reaching the daemon is the cheapest
+		// proof that Lima is up and the network was provisioned.
+		_, err := requireDaemon()
+		return err == nil
+	}
+	return true
+}
+
 func runNetworkLs(store *state.Store, format string) error {
+	wantJSON, err := resolveFormat(format, false)
+	if err != nil {
+		return err
+	}
 	// mvm has exactly one network: the implicit "default".
-	nets := []cfNetwork{defaultNetwork(store.GetBackend())}
-	if format == "json" {
+	nets := []cfNetwork{defaultNetwork(store.GetBackend(), networkUp(store))}
+	if wantJSON {
 		data, err := json.MarshalIndent(nets, "", "  ")
 		if err != nil {
 			return err
@@ -60,7 +82,12 @@ func runNetworkInspect(store *state.Store, name string) error {
 	if name != "default" {
 		return fmt.Errorf("no network named %q (mvm has one network: default)", name)
 	}
-	data, err := json.MarshalIndent(defaultNetwork(store.GetBackend()), "", "  ")
+	// A 1-element array, not a bare object: container's inspect returns an
+	// array the client reads [0] from (see inspect.go's printInspect). A
+	// dashboard adapter reusing its existing parser indexes [0], so emitting
+	// an object here reads as a type error or an empty result.
+	arr := []cfNetwork{defaultNetwork(store.GetBackend(), networkUp(store))}
+	data, err := json.MarshalIndent(arr, "", "  ")
 	if err != nil {
 		return err
 	}
