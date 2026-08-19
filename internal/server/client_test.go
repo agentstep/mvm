@@ -1013,6 +1013,52 @@ func TestBuild_Returns401AsError(t *testing.T) {
 	}
 }
 
+// === ImageInspect: name escaping ===
+
+// TestImageInspectEscapesName pins the fix for two bugs that shared a cause —
+// interpolating a raw name into the URL path.
+//
+// A name containing an invalid percent escape made NewRequestWithContext
+// return a nil request; the error was discarded, so httpClient.Do(nil) panicked
+// with a nil pointer dereference instead of surfacing the daemon's 400. Names
+// containing '?' or '#' parsed as query/fragment, silently resolving to a
+// different image than the caller asked for.
+func TestImageInspectEscapesName(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "d.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var gotName string
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/images/{name}", func(w http.ResponseWriter, r *http.Request) {
+		gotName = r.PathValue("name")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ImageInfo{Name: gotName, SizeMB: 1, Digest: "sha256:abc"})
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	c := NewClient(sock)
+
+	// Previously panicked: nil request passed to Do.
+	for _, name := range []string{"web%zz", "web%", "a b"} {
+		if _, err := c.ImageInspect(context.Background(), name); err != nil {
+			t.Logf("ImageInspect(%q) returned %v (an error is fine; a panic is not)", name, err)
+		}
+	}
+
+	// Previously truncated at '?' and returned image "web" instead.
+	if _, err := c.ImageInspect(context.Background(), "web?x=1"); err != nil {
+		t.Fatalf("ImageInspect(web?x=1): %v", err)
+	}
+	if gotName != "web?x=1" {
+		t.Errorf("daemon saw name %q, want %q — the name was not escaped, so a "+
+			"different image was inspected than the one requested", gotName, "web?x=1")
+	}
+}
+
 // === InspectVM ===
 
 func TestClientInspectVM(t *testing.T) {

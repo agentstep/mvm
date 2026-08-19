@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,9 +158,36 @@ func (c *Client) IsAvailable() bool {
 	return resp.StatusCode == 200
 }
 
+// StatusError is a >=400 response from the daemon. It carries the status code
+// and whether the body was the daemon's structured JSON, so callers can tell a
+// missing *route* (a daemon older than an endpoint) from a genuine 404 for a
+// resource. Its Error() string is unchanged from what checkStatus used to
+// return, so existing `%s`/`%w` wrapping keeps its old text.
+type StatusError struct {
+	Code int
+	Msg  string
+	// JSONBody is true when the daemon returned a structured {"error": ...}.
+	// net/http's ServeMux answers an unregistered route with plain text, so a
+	// 404 without a JSON body means the endpoint doesn't exist on that daemon.
+	JSONBody bool
+}
+
+func (e *StatusError) Error() string { return e.Msg }
+
+// IsRouteMissing reports whether err is a 404 from net/http's ServeMux for an
+// unregistered path — the daemon predates the endpoint — rather than a JSON
+// 404 for a resource that genuinely isn't there.
+//
+// This matters because the CLI runs on macOS while the daemon runs inside
+// Lima and is upgraded separately, so version skew is the normal state.
+func IsRouteMissing(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Code == http.StatusNotFound && !se.JSONBody
+}
+
 // checkStatus inspects an HTTP response and, if the status code is >= 400,
-// decodes a JSON error body and returns it as an error. The response body is
-// partially consumed on error. Callers must still close resp.Body.
+// decodes a JSON error body and returns it as a *StatusError. The response
+// body is partially consumed on error. Callers must still close resp.Body.
 func checkStatus(resp *http.Response) error {
 	if resp.StatusCode < 400 {
 		return nil
@@ -168,17 +196,18 @@ func checkStatus(resp *http.Response) error {
 		Error string `json:"error"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&errResp)
-	if errResp.Error == "" {
+	jsonBody := errResp.Error != ""
+	if !jsonBody {
 		errResp.Error = resp.Status
 	}
-	return fmt.Errorf("%s", errResp.Error)
+	return &StatusError{Code: resp.StatusCode, Msg: errResp.Error, JSONBody: jsonBody}
 }
 
 // Exec sends an exec request and returns the result.
 func (c *Client) Exec(ctx context.Context, vmName, command string) (string, int, error) {
 	body, _ := json.Marshal(ExecRequest{Command: command})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/exec", vmName)),
+		c.url(fmt.Sprintf("/vms/%s/exec", url.PathEscape(vmName))),
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -206,7 +235,7 @@ func (c *Client) Exec(ctx context.Context, vmName, command string) (string, int,
 func (c *Client) ExecStream(ctx context.Context, vmName, command string, stdout, stderr io.Writer) (int, error) {
 	body, _ := json.Marshal(ExecRequest{Command: command, Stream: true})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/exec", vmName)),
+		c.url(fmt.Sprintf("/vms/%s/exec", url.PathEscape(vmName))),
 		bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
@@ -287,7 +316,7 @@ func (c *Client) CreateVM(ctx context.Context, req CreateVMRequest) (*VMResponse
 
 // DeleteVM sends a delete request.
 func (c *Client) DeleteVM(ctx context.Context, name string) error {
-	req, _ := http.NewRequestWithContext(ctx, "DELETE", c.url(fmt.Sprintf("/vms/%s", name)), nil)
+	req, _ := http.NewRequestWithContext(ctx, "DELETE", c.url(fmt.Sprintf("/vms/%s", url.PathEscape(name))), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -343,7 +372,7 @@ func (c *Client) StatsVMs(ctx context.Context) ([]VMStats, error) {
 // InspectVM returns full details for one VM, including its declarative spec.
 // New method, so it targets the versioned /v1 surface directly.
 func (c *Client) InspectVM(ctx context.Context, name string) (*VMInspectResponse, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/v1/vms/"+name), nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.url("/v1/vms/"+url.PathEscape(name)), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -389,7 +418,7 @@ func (c *Client) PoolStatus(ctx context.Context) (*PoolStatusResponse, error) {
 func (c *Client) StopVM(ctx context.Context, name string, force bool) error {
 	body, _ := json.Marshal(StopVMRequest{Force: force})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/stop", name)), bytes.NewReader(body))
+		c.url(fmt.Sprintf("/vms/%s/stop", url.PathEscape(name))), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -405,7 +434,7 @@ func (c *Client) StopVM(ctx context.Context, name string, force bool) error {
 
 // StartVM boots an existing stopped VM in place (cold reboot, disk preserved).
 func (c *Client) StartVM(ctx context.Context, name string) (*VMResponse, error) {
-	req, _ := http.NewRequestWithContext(ctx, "POST", c.url(fmt.Sprintf("/vms/%s/start", name)), nil)
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.url(fmt.Sprintf("/vms/%s/start", url.PathEscape(name))), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -424,7 +453,7 @@ func (c *Client) StartVM(ctx context.Context, name string) (*VMResponse, error) 
 // PauseVM pauses a running VM.
 func (c *Client) PauseVM(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/pause", name)), nil)
+		c.url(fmt.Sprintf("/vms/%s/pause", url.PathEscape(name))), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -439,7 +468,7 @@ func (c *Client) PauseVM(ctx context.Context, name string) error {
 // ResumeVM resumes a paused VM.
 func (c *Client) ResumeVM(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/resume", name)), nil)
+		c.url(fmt.Sprintf("/vms/%s/resume", url.PathEscape(name))), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -455,7 +484,7 @@ func (c *Client) ResumeVM(ctx context.Context, name string) error {
 func (c *Client) SnapshotCreate(ctx context.Context, vmName, snapName string) error {
 	body, _ := json.Marshal(SnapshotCreateRequest{Name: snapName})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/snapshot", vmName)), bytes.NewReader(body))
+		c.url(fmt.Sprintf("/vms/%s/snapshot", url.PathEscape(vmName))), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -473,7 +502,7 @@ func (c *Client) SnapshotCreate(ctx context.Context, vmName, snapName string) er
 func (c *Client) SnapshotRestore(ctx context.Context, vmName, snapName string) error {
 	body, _ := json.Marshal(SnapshotRestoreRequest{Name: snapName})
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.url(fmt.Sprintf("/vms/%s/restore", vmName)), bytes.NewReader(body))
+		c.url(fmt.Sprintf("/vms/%s/restore", url.PathEscape(vmName))), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -510,7 +539,7 @@ func (c *Client) SnapshotList(ctx context.Context) ([]SnapshotInfo, error) {
 // SnapshotDelete removes a named snapshot.
 func (c *Client) SnapshotDelete(ctx context.Context, snapName string) error {
 	req, _ := http.NewRequestWithContext(ctx, "DELETE",
-		c.url(fmt.Sprintf("/snapshots/%s", snapName)), nil)
+		c.url(fmt.Sprintf("/snapshots/%s", url.PathEscape(snapName))), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -566,7 +595,7 @@ func (c *Client) ImageList(ctx context.Context) ([]ImageInfo, error) {
 // ImageDelete removes a custom rootfs image by name.
 func (c *Client) ImageDelete(ctx context.Context, name string) error {
 	req, _ := http.NewRequestWithContext(ctx, "DELETE",
-		c.url(fmt.Sprintf("/images/%s", name)), nil)
+		c.url(fmt.Sprintf("/images/%s", url.PathEscape(name))), nil)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -580,8 +609,18 @@ func (c *Client) ImageDelete(ctx context.Context, name string) error {
 
 // ImageInspect fetches one image's info including its sha256 digest (computed
 // on-demand by the daemon).
+//
+// The name is percent-escaped: unescaped, a name like "web%zz" makes
+// NewRequestWithContext fail and return a nil request, and passing that to
+// Do panics with a nil pointer dereference rather than surfacing the
+// daemon's 400. Escaping also stops "web?x=1" and "web#frag" from silently
+// resolving to a different image than the one asked for. Every other
+// name-interpolating method in this file escapes for the same reason.
 func (c *Client) ImageInspect(ctx context.Context, name string) (*ImageInfo, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/images/%s", name)), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/images/%s", url.PathEscape(name))), nil)
+	if err != nil {
+		return nil, fmt.Errorf("image inspect %q: %w", name, err)
+	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -602,7 +641,7 @@ func (c *Client) ImageInspect(ctx context.Context, name string) (*ImageInfo, err
 // a failed/interrupted download never leaves a half-written image where a
 // later start could pick it up.
 func (c *Client) DownloadImage(ctx context.Context, name, destPath string) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/images/%s/download", name)), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/images/%s/download", url.PathEscape(name))), nil)
 	if err != nil {
 		return err
 	}
@@ -801,7 +840,7 @@ func (c *Client) StreamLogs(ctx context.Context, vmName string, tail int, follow
 	if follow {
 		q += "&follow=true"
 	}
-	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/vms/%s/logs%s", vmName, q)), nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.url(fmt.Sprintf("/v1/vms/%s/logs%s", url.PathEscape(vmName), q)), nil)
 	if err != nil {
 		return err
 	}
