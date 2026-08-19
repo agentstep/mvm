@@ -70,8 +70,15 @@ func findImage(imgs []server.ImageInfo, name string) (server.ImageInfo, error) {
 	return server.ImageInfo{}, fmt.Errorf("image %q not found", name)
 }
 
-// imagesToCF transforms ImageInfo (MiB) into cfImage (bytes). Pure; digest is
-// empty until the OCI image store lands (Slice 3).
+// imagesToCF transforms ImageInfo (MiB) into cfImage (bytes). Pure.
+//
+// Digest is empty on this list path and populated on the inspect path: the
+// digest is a sha256 of the whole ext4 blob, computed on demand by the daemon,
+// and hashing every image just to list them would make `image ls` scale with
+// total image bytes. docs/container-compat-matrix.md blesses the empty value
+// here ("emit empty (dashboard tolerates) or synthesize a sha256"), so the key
+// is emitted-but-empty rather than omitted — the container CLI always includes
+// it, and dropping it would diverge from the shape this type exists to match.
 func imagesToCF(imgs []server.ImageInfo) []cfImage {
 	out := make([]cfImage, 0, len(imgs))
 	for _, img := range imgs {
@@ -127,9 +134,25 @@ func runImageInspect(ctx context.Context, name string) error {
 	}
 	info, err := sc.ImageInspect(ctx, name)
 	if err != nil {
-		return err
+		if !server.IsRouteMissing(err) {
+			return err
+		}
+		// The daemon predates GET /v1/images/{name}. The CLI (macOS) and the
+		// daemon (inside Lima) are upgraded separately, so this is routine
+		// skew, not a broken install — fall back to the list route every
+		// daemon version has. The digest is empty on that path, which is the
+		// documented pre-digest shape rather than a hard failure.
+		imgs, listErr := sc.ImageList(ctx)
+		if listErr != nil {
+			return err
+		}
+		found, findErr := findImage(imgs, name)
+		if findErr != nil {
+			return findErr
+		}
+		info = &found
 	}
-	data, err := json.MarshalIndent(imageToCF(*info), "", "  ")
+	data, err := json.MarshalIndent([]cfImage{imageToCF(*info)}, "", "  ")
 	if err != nil {
 		return err
 	}
