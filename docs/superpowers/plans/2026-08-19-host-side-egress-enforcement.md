@@ -15,6 +15,14 @@
 - **Chains and ipsets are keyed on `NetAllocation.Index`, never on the VM name.** TAP device names (`tap0`, `tap1`, …) are derived from the index and are *reused* by the next VM at that index. A chain keyed on anything else leaks rules across VMs.
 - **No user-controlled string is ever interpolated into an iptables command.** Domains reach the DNS proxy as Go values only. Port fields already go through `state.ValidatePort`.
 - **Scope is the Firecracker backend only.** The Apple VZ path (`internal/cli/start.go:787`) has no host-side TAP and needs a different mechanism; it gets its own plan. Task 5 makes the VZ gap explicit rather than silently leaving it.
+- **Every policy must cover IPv6 as well as IPv4.** The current implementation
+  drives `iptables` only, so `ip6tables` is wide open. This is latent rather
+  than exploitable today — the guest gets no IPv6 route, so v6 egress fails on
+  its own — but it is one `ip=dhcp6` or one upstream image change away from
+  silently bypassing `deny` and `allow:` completely. A filter that holds only
+  because the transport happens to be unconfigured is not a filter. Verified
+  during the 2026-08-19 browser spike: guest DNS returns AAAA records today,
+  so `curl` without `-4` already prefers a v6 path that no policy governs.
 - Existing test command: `make test` (`go test ./internal/... -v -race`).
 
 ---
@@ -270,7 +278,7 @@ Pure script generation, fully unit-testable without Lima. This is where the secu
 
 **Interfaces:**
 - Consumes: `state.ParsedNetPolicy`, `state.NetAllocation` (fields `Index`, `TAPDev`, `TAPIP`) from Task 1 and existing code.
-- Produces: `firecracker.EgressChainName(index int) string`, `firecracker.EgressIPSetName(index int) string`, `firecracker.EgressInstallScript(alloc state.NetAllocation, policy state.ParsedNetPolicy) string`, `firecracker.EgressRemoveScript(alloc state.NetAllocation) string`.
+- Produces: `firecracker.EgressChainName(index int) string`, `firecracker.EgressIPSetName(index int) string`, `firecracker.EgressIPSetName6(index int) string`, `firecracker.EgressInstallScript(alloc state.NetAllocation, policy state.ParsedNetPolicy) string`, `firecracker.EgressRemoveScript(alloc state.NetAllocation) string`.
 
 Design notes the implementer needs:
 
@@ -279,6 +287,9 @@ Design notes the implementer needs:
 - vsock is not IP and never traverses these chains, so `mvm exec` stays available under `deny`. That is the intended behavior: the operator keeps control, the guest loses the network.
 - The script is idempotent — it flushes the chain and de-duplicates the jumps on every run — so re-applying after a snapshot restore converges instead of stacking rules.
 - `NetPolicyOpen` returns the *removal* script, so callers have a single entry point.
+- **The same chain is installed twice: once via `iptables`, once via `ip6tables`.** Both take identical rules, so the generator emits one rule body and loops over the two binaries. `ipset` needs two sets, though — `hash:ip` is `family inet` by default and *rejects* an IPv6 address, so the v6 set must be created with `family inet6` and matched from the `ip6tables` chain only.
+
+Below, `$IPT` is the loop variable holding `iptables` or `ip6tables`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -303,6 +314,9 @@ func TestEgressNamesAreKeyedOnIndex(t *testing.T) {
 	}
 	if got := EgressIPSetName(3); got != "mvm-allow-3" {
 		t.Errorf("EgressIPSetName(3) = %q, want mvm-allow-3", got)
+	}
+	if got := EgressIPSetName6(3); got != "mvm-allow6-3" {
+		t.Errorf("EgressIPSetName6(3) = %q, want mvm-allow6-3", got)
 	}
 }
 
@@ -339,6 +353,61 @@ func TestEgressInstallJumpsFromBothForwardAndInput(t *testing.T) {
 	}
 }
 
+// TestEgressCoversIPv6 is the regression guard on the gap the 2026-08-19
+// browser spike surfaced: enforcement drove iptables only, so ip6tables was
+// wide open. That was survivable only because the guest has no IPv6 route —
+// a filter that holds because the transport is unconfigured is not a filter.
+// Guest DNS already returns AAAA records, so this is one routing change away
+// from live.
+func TestEgressCoversIPv6(t *testing.T) {
+	for _, mode := range []state.NetPolicyMode{state.NetPolicyDeny, state.NetPolicyAllow} {
+		policy := state.ParsedNetPolicy{Mode: mode}
+		if mode == state.NetPolicyAllow {
+			policy.Domains = []string{"github.com"}
+		}
+		script := EgressInstallScript(state.AllocateNet(0), policy)
+		for _, ipt := range []string{"IPT=iptables", "IPT=ip6tables"} {
+			if !strings.Contains(script, ipt) {
+				t.Errorf("mode %v: script never sets %s, so that family is unfiltered:\n%s", mode, ipt, script)
+			}
+		}
+	}
+}
+
+// TestEgressAllowUsesFamilySpecificIPSets pins that the v6 chain matches a
+// v6 set. An ipset's family is fixed at creation and `hash:ip` defaults to
+// inet, which rejects an IPv6 address rather than storing it — so a single
+// shared set would silently never match any AAAA the proxy resolved.
+func TestEgressAllowUsesFamilySpecificIPSets(t *testing.T) {
+	script := EgressInstallScript(state.AllocateNet(1), state.ParsedNetPolicy{
+		Mode: state.NetPolicyAllow, Domains: []string{"github.com"},
+	})
+	if !strings.Contains(script, "ipset create mvm-allow-1 hash:ip family inet timeout 600 -exist") {
+		t.Errorf("missing the inet set:\n%s", script)
+	}
+	if !strings.Contains(script, "ipset create mvm-allow6-1 hash:ip family inet6 timeout 600 -exist") {
+		t.Errorf("missing the inet6 set:\n%s", script)
+	}
+	if !strings.Contains(script, `--match-set mvm-allow6-1 dst -j ACCEPT`) {
+		t.Errorf("v6 chain must match the v6 set:\n%s", script)
+	}
+}
+
+// The DNS hole is for the VM's own gateway, which is IPv4-only, so the v6
+// chain must not carry a port-53 ACCEPT at all.
+func TestEgressAllowV6ChainHasNoDNSHole(t *testing.T) {
+	script := EgressInstallScript(state.AllocateNet(1), state.ParsedNetPolicy{
+		Mode: state.NetPolicyAllow, Domains: []string{"github.com"},
+	})
+	_, v6Part, ok := strings.Cut(script, "IPT=ip6tables")
+	if !ok {
+		t.Fatal("no ip6tables section")
+	}
+	if strings.Contains(v6Part, "--dport 53") {
+		t.Errorf("v6 chain must have no DNS carve-out (the resolver is IPv4-only):\n%s", v6Part)
+	}
+}
+
 func TestEgressInstallIsIdempotent(t *testing.T) {
 	alloc := state.AllocateNet(0)
 	script := EgressInstallScript(alloc, state.ParsedNetPolicy{Mode: state.NetPolicyDeny})
@@ -348,7 +417,7 @@ func TestEgressInstallIsIdempotent(t *testing.T) {
 	if flush < 0 || appendRule < 0 || flush > appendRule {
 		t.Errorf("install must flush the chain before appending rules, got:\n%s", script)
 	}
-	if !strings.Contains(script, `while sudo iptables -C FORWARD -i "$TAP" -j "$CHAIN"`) {
+	if !strings.Contains(script, `while sudo "$IPT" -C FORWARD -i "$TAP" -j "$CHAIN"`) {
 		t.Error("install must drain duplicate FORWARD jumps left by an earlier run")
 	}
 }
@@ -358,7 +427,7 @@ func TestEgressAllowUsesIPSetAndDefaultsToDrop(t *testing.T) {
 	policy := state.ParsedNetPolicy{Mode: state.NetPolicyAllow, Domains: []string{"github.com"}}
 	script := EgressInstallScript(alloc, policy)
 
-	if !strings.Contains(script, "ipset create mvm-allow-1 hash:ip timeout 600 -exist") {
+	if !strings.Contains(script, "ipset create mvm-allow-1 hash:ip family inet timeout 600 -exist") {
 		t.Errorf("allow must create the VM's ipset before referencing it, got:\n%s", script)
 	}
 	if !strings.Contains(script, `-m set --match-set mvm-allow-1 dst -j ACCEPT`) {
@@ -472,26 +541,40 @@ func EgressChainName(index int) string {
 	return fmt.Sprintf("MVM-EGRESS-%d", index)
 }
 
-// EgressIPSetName returns the ipset holding the addresses the egress DNS proxy
-// has resolved for this VM's allowlisted domains.
+// EgressIPSetName returns the IPv4 ipset holding the addresses the egress DNS
+// proxy has resolved for this VM's allowlisted domains.
 func EgressIPSetName(index int) string {
 	return fmt.Sprintf("mvm-allow-%d", index)
 }
 
+// EgressIPSetName6 is the IPv6 counterpart. It has to be a separate set: an
+// ipset is created with a fixed family, and `hash:ip` defaults to inet, which
+// rejects an IPv6 address outright rather than storing it.
+func EgressIPSetName6(index int) string {
+	return fmt.Sprintf("mvm-allow6-%d", index)
+}
+
+// egressBinaries is every netfilter binary a policy must be installed into.
+//
+// Filtering only IPv4 would leave a policy that holds solely because the guest
+// happens to have no IPv6 route — one image or boot-arg change away from
+// silently allowing everything it was meant to block.
+var egressBinaries = []string{"iptables", "ip6tables"}
+
 // egressChainPreamble creates the chain, empties it, and re-points the jumps.
-// Expects $CHAIN and $TAP to be set. Draining the jumps in a loop (rather than
-// a single -D) makes the script converge even if an earlier crashed run left
-// duplicates behind.
-const egressChainPreamble = `sudo iptables -N "$CHAIN" 2>/dev/null || true
-sudo iptables -F "$CHAIN"
-while sudo iptables -C FORWARD -i "$TAP" -j "$CHAIN" 2>/dev/null; do
-    sudo iptables -D FORWARD -i "$TAP" -j "$CHAIN"
+// Expects $IPT, $CHAIN and $TAP to be set. Draining the jumps in a loop (rather
+// than a single -D) makes the script converge even if an earlier crashed run
+// left duplicates behind.
+const egressChainPreamble = `sudo "$IPT" -N "$CHAIN" 2>/dev/null || true
+sudo "$IPT" -F "$CHAIN"
+while sudo "$IPT" -C FORWARD -i "$TAP" -j "$CHAIN" 2>/dev/null; do
+    sudo "$IPT" -D FORWARD -i "$TAP" -j "$CHAIN"
 done
-while sudo iptables -C INPUT -i "$TAP" -j "$CHAIN" 2>/dev/null; do
-    sudo iptables -D INPUT -i "$TAP" -j "$CHAIN"
+while sudo "$IPT" -C INPUT -i "$TAP" -j "$CHAIN" 2>/dev/null; do
+    sudo "$IPT" -D INPUT -i "$TAP" -j "$CHAIN"
 done
-sudo iptables -I FORWARD 1 -i "$TAP" -j "$CHAIN"
-sudo iptables -I INPUT 1 -i "$TAP" -j "$CHAIN"
+sudo "$IPT" -I FORWARD 1 -i "$TAP" -j "$CHAIN"
+sudo "$IPT" -I INPUT 1 -i "$TAP" -j "$CHAIN"
 `
 
 // EgressInstallScript returns a shell script, to be run on the Firecracker
@@ -513,29 +596,47 @@ func EgressInstallScript(alloc state.NetAllocation, policy state.ParsedNetPolicy
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "set -e\nCHAIN=%s\nTAP=%s\n", EgressChainName(alloc.Index), alloc.TAPDev)
-	b.WriteString(egressChainPreamble)
 
-	switch policy.Mode {
-	case state.NetPolicyDeny:
-		// No carve-outs, not even DNS: a reachable resolver is an
-		// exfiltration channel under a policy named "deny".
-		b.WriteString("sudo iptables -A \"$CHAIN\" -j DROP\n")
-
-	case state.NetPolicyAllow:
-		set := EgressIPSetName(alloc.Index)
+	if policy.Mode == state.NetPolicyAllow {
 		// Created empty and populated by internal/egressdns as the proxy
 		// answers queries. Empty behaves exactly like deny, so there is no
-		// window in which the VM is unprotected.
-		fmt.Fprintf(&b, "sudo ipset create %s hash:ip timeout 600 -exist\n", set)
-		fmt.Fprintf(&b, "sudo ipset flush %s\n", set)
-		b.WriteString("sudo iptables -A \"$CHAIN\" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n")
-		// DNS is permitted only to this VM's own gateway, where the egress
-		// proxy listens — never to a public resolver, which would let the
-		// guest resolve blocked names and bypass the ipset.
-		fmt.Fprintf(&b, "sudo iptables -A \"$CHAIN\" -p udp -d %s --dport 53 -j ACCEPT\n", alloc.TAPIP)
-		fmt.Fprintf(&b, "sudo iptables -A \"$CHAIN\" -p tcp -d %s --dport 53 -j ACCEPT\n", alloc.TAPIP)
-		fmt.Fprintf(&b, "sudo iptables -A \"$CHAIN\" -m set --match-set %s dst -j ACCEPT\n", set)
-		b.WriteString("sudo iptables -A \"$CHAIN\" -j DROP\n")
+		// window in which the VM is unprotected. Two sets because an ipset's
+		// family is fixed at creation and inet rejects IPv6 addresses.
+		fmt.Fprintf(&b, "sudo ipset create %s hash:ip family inet timeout 600 -exist\n", EgressIPSetName(alloc.Index))
+		fmt.Fprintf(&b, "sudo ipset flush %s\n", EgressIPSetName(alloc.Index))
+		fmt.Fprintf(&b, "sudo ipset create %s hash:ip family inet6 timeout 600 -exist\n", EgressIPSetName6(alloc.Index))
+		fmt.Fprintf(&b, "sudo ipset flush %s\n", EgressIPSetName6(alloc.Index))
+	}
+
+	// Identical rules go into both the v4 and v6 chains. Only the ipset
+	// differs, since each set is family-locked.
+	for _, ipt := range egressBinaries {
+		set := EgressIPSetName(alloc.Index)
+		if ipt == "ip6tables" {
+			set = EgressIPSetName6(alloc.Index)
+		}
+		fmt.Fprintf(&b, "IPT=%s\n", ipt)
+		b.WriteString(egressChainPreamble)
+
+		switch policy.Mode {
+		case state.NetPolicyDeny:
+			// No carve-outs, not even DNS: a reachable resolver is an
+			// exfiltration channel under a policy named "deny".
+			b.WriteString("sudo \"$IPT\" -A \"$CHAIN\" -j DROP\n")
+
+		case state.NetPolicyAllow:
+			b.WriteString("sudo \"$IPT\" -A \"$CHAIN\" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n")
+			// DNS is permitted only to this VM's own gateway, where the egress
+			// proxy listens — never to a public resolver, which would let the
+			// guest resolve blocked names and bypass the ipset. The gateway is
+			// IPv4-only, so the v6 chain gets no DNS hole at all.
+			if ipt == "iptables" {
+				fmt.Fprintf(&b, "sudo \"$IPT\" -A \"$CHAIN\" -p udp -d %s --dport 53 -j ACCEPT\n", alloc.TAPIP)
+				fmt.Fprintf(&b, "sudo \"$IPT\" -A \"$CHAIN\" -p tcp -d %s --dport 53 -j ACCEPT\n", alloc.TAPIP)
+			}
+			fmt.Fprintf(&b, "sudo \"$IPT\" -A \"$CHAIN\" -m set --match-set %s dst -j ACCEPT\n", set)
+			b.WriteString("sudo \"$IPT\" -A \"$CHAIN\" -j DROP\n")
+		}
 	}
 
 	b.WriteString("echo EGRESS_OK\n")
@@ -549,17 +650,20 @@ func EgressInstallScript(alloc state.NetAllocation, policy state.ParsedNetPolicy
 func EgressRemoveScript(alloc state.NetAllocation) string {
 	return fmt.Sprintf(`CHAIN=%s
 TAP=%s
-while sudo iptables -C FORWARD -i "$TAP" -j "$CHAIN" 2>/dev/null; do
-    sudo iptables -D FORWARD -i "$TAP" -j "$CHAIN"
+for IPT in iptables ip6tables; do
+    while sudo "$IPT" -C FORWARD -i "$TAP" -j "$CHAIN" 2>/dev/null; do
+        sudo "$IPT" -D FORWARD -i "$TAP" -j "$CHAIN"
+    done
+    while sudo "$IPT" -C INPUT -i "$TAP" -j "$CHAIN" 2>/dev/null; do
+        sudo "$IPT" -D INPUT -i "$TAP" -j "$CHAIN"
+    done
+    sudo "$IPT" -F "$CHAIN" 2>/dev/null || true
+    sudo "$IPT" -X "$CHAIN" 2>/dev/null || true
 done
-while sudo iptables -C INPUT -i "$TAP" -j "$CHAIN" 2>/dev/null; do
-    sudo iptables -D INPUT -i "$TAP" -j "$CHAIN"
-done
-sudo iptables -F "$CHAIN" 2>/dev/null || true
-sudo iptables -X "$CHAIN" 2>/dev/null || true
+sudo ipset destroy %s 2>/dev/null || true
 sudo ipset destroy %s 2>/dev/null || true
 echo EGRESS_REMOVED
-`, EgressChainName(alloc.Index), alloc.TAPDev, EgressIPSetName(alloc.Index))
+`, EgressChainName(alloc.Index), alloc.TAPDev, EgressIPSetName(alloc.Index), EgressIPSetName6(alloc.Index))
 }
 ```
 
@@ -765,17 +869,33 @@ Expected: PASS. A compile error naming `ApplyNetworkPolicyViaAgent` means a call
 
 This cannot be asserted in a unit test; run it against a real Lima VM.
 
+Note `mvm exec` takes the command directly — there is no `--` separator, and
+passing one makes the guest try to run `--` as the binary.
+
 ```bash
 mvm start netcage --net-policy deny
-# Expect failure — egress is blocked on the host:
-mvm exec netcage -- curl -s -m 5 https://example.com ; echo "curl exit: $?"
+# Expect failure — egress is blocked on the host. -4 is load-bearing: without
+# it DNS returns AAAA, the connection dies for lack of a v6 route regardless
+# of policy, and a broken filter would still look like it was working.
+mvm exec netcage curl -4 -s -m 5 -o /dev/null -w "%{http_code}\n" https://example.com
 # Now have the guest try to free itself, exactly as a rogue agent would:
-mvm exec netcage -- iptables -F
-mvm exec netcage -- iptables -t nat -F
-mvm exec netcage -- curl -s -m 5 https://example.com ; echo "curl exit after flush: $?"
+mvm exec netcage iptables -F
+mvm exec netcage ip6tables -F
+mvm exec netcage curl -4 -s -m 5 -o /dev/null -w "%{http_code}\n" https://example.com
 ```
 
-Expected: both `curl` calls fail (non-zero exit, no body). Before this change the second one succeeds — that is the vulnerability.
+Expected: both print `000`. Before this change the second prints `200` — that is
+the vulnerability, and it reproduces today on applevz.
+
+Also confirm IPv6 is actually covered, since that is the half most likely to be
+skipped:
+
+```bash
+limactl shell mvm sudo ip6tables -L MVM-EGRESS-0 -n
+```
+
+Expected: the chain exists and ends in DROP. An empty or missing chain means
+the policy is IPv4-only and one routing change from being bypassed entirely.
 
 Confirm the host-side chain is what is doing the work, and that teardown is clean:
 
@@ -818,7 +938,7 @@ Replaces the one-shot `getent` lookup that pinned IPs at boot. A per-VM DNS prox
 
 **Interfaces:**
 - Consumes: `state.NetAllocation`, `state.ParsedNetPolicy` (Task 1), `EgressIPSetName` (Task 2).
-- Produces: `egressdns.Allowed(qname string, domains []string) bool`, `egressdns.Resolver` with `NewResolver(upstream string) *Resolver`, `(*Resolver).Start(alloc state.NetAllocation, setName string, domains []string) error`, `(*Resolver).Stop(index int)`.
+- Produces: `egressdns.Allowed(qname string, domains []string) bool`, `egressdns.Resolver` with `NewResolver(upstream string) *Resolver`, `(*Resolver).Start(alloc state.NetAllocation, sets SetPair, domains []string) error`, `(*Resolver).Stop(index int)`, and `egressdns.SetPair{V4, V6 string}`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -948,7 +1068,7 @@ func TestHandlerRefusesNamesOffTheAllowlist(t *testing.T) {
 	var upstreamCalls int
 	r := &Resolver{
 		domains: map[int][]string{0: {"github.com"}},
-		sets:    map[int]string{0: "mvm-allow-0"},
+		sets:    map[int]SetPair{0: {V4: "mvm-allow-0", V6: "mvm-allow6-0"}},
 		exchange: func(*dns.Msg, string) (*dns.Msg, error) {
 			upstreamCalls++
 			return nil, nil
@@ -978,7 +1098,7 @@ func TestHandlerPopulatesIPSetFromAnswers(t *testing.T) {
 
 	r := &Resolver{
 		domains: map[int][]string{0: {"github.com"}},
-		sets:    map[int]string{0: "mvm-allow-0"},
+		sets:    map[int]SetPair{0: {V4: "mvm-allow-0", V6: "mvm-allow6-0"}},
 		exchange: func(m *dns.Msg, _ string) (*dns.Msg, error) {
 			resp := new(dns.Msg)
 			resp.SetReply(m)
@@ -1015,10 +1135,47 @@ func TestHandlerPopulatesIPSetFromAnswers(t *testing.T) {
 	}
 }
 
+// TestHandlerRoutesAAAAToTheV6Set pins that an AAAA answer lands in the inet6
+// set. Sending it to the inet set would fail at the ipset layer rather than
+// store it, leaving every IPv6 address the proxy resolved unreachable — a
+// failure that is invisible until a dual-stack host prefers the v6 route.
+func TestHandlerRoutesAAAAToTheV6Set(t *testing.T) {
+	var gotSets []string
+	r := &Resolver{
+		domains: map[int][]string{0: {"github.com"}},
+		sets:    map[int]SetPair{0: {V4: "mvm-allow-0", V6: "mvm-allow6-0"}},
+		exchange: func(m *dns.Msg, _ string) (*dns.Msg, error) {
+			resp := new(dns.Msg)
+			resp.SetReply(m)
+			a, _ := dns.NewRR("github.com. 300 IN A 140.82.114.6")
+			aaaa, _ := dns.NewRR("github.com. 300 IN AAAA 2606:50c0:8000::153")
+			resp.Answer = []dns.RR{a, aaaa}
+			return resp, nil
+		},
+		ipsetAdd: func(set string, _ net.IP, _ uint32) error {
+			gotSets = append(gotSets, set)
+			return nil
+		},
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("github.com.", dns.TypeA)
+	r.handle(0, q)
+
+	if len(gotSets) != 2 {
+		t.Fatalf("got %d ipset adds, want 2 (one per family): %v", len(gotSets), gotSets)
+	}
+	if gotSets[0] != "mvm-allow-0" {
+		t.Errorf("A record went to %q, want mvm-allow-0", gotSets[0])
+	}
+	if gotSets[1] != "mvm-allow6-0" {
+		t.Errorf("AAAA record went to %q, want mvm-allow6-0", gotSets[1])
+	}
+}
+
 func TestHandlerRefusesUnknownVM(t *testing.T) {
 	r := &Resolver{
 		domains:  map[int][]string{},
-		sets:     map[int]string{},
+		sets:     map[int]SetPair{},
 		exchange: func(*dns.Msg, string) (*dns.Msg, error) { return nil, nil },
 		ipsetAdd: func(string, net.IP, uint32) error { return nil },
 	}
@@ -1060,6 +1217,14 @@ import (
 // given.
 const minIPSetTTL = 60
 
+// SetPair is one VM's two allowlist ipsets. They are separate because an
+// ipset's address family is fixed at creation: adding an IPv6 address to an
+// inet set fails rather than storing it.
+type SetPair struct {
+	V4 string
+	V6 string
+}
+
 // Resolver runs one DNS listener per allow-policy VM, bound to that VM's own
 // gateway address. The listener a query arrives on identifies the VM, so no
 // client-supplied field is ever trusted for authorization.
@@ -1068,7 +1233,7 @@ type Resolver struct {
 
 	mu      sync.RWMutex
 	domains map[int][]string      // net index -> allowlist
-	sets    map[int]string        // net index -> ipset name
+	sets    map[int]SetPair       // net index -> its family-locked ipsets
 	servers map[int][]*dns.Server // net index -> its udp+tcp listeners
 
 	// Injectable for tests.
@@ -1082,7 +1247,7 @@ func NewResolver(upstream string) *Resolver {
 	return &Resolver{
 		upstream: upstream,
 		domains:  map[int][]string{},
-		sets:     map[int]string{},
+		sets:     map[int]SetPair{},
 		servers:  map[int][]*dns.Server{},
 		exchange: func(m *dns.Msg, addr string) (*dns.Msg, error) {
 			resp, _, err := c.Exchange(m, addr)
@@ -1095,12 +1260,12 @@ func NewResolver(upstream string) *Resolver {
 // Start binds UDP and TCP listeners on the VM's gateway address and registers
 // its allowlist. Safe to call again for the same index: the previous listeners
 // are stopped first, so a policy change converges.
-func (r *Resolver) Start(alloc state.NetAllocation, setName string, domains []string) error {
+func (r *Resolver) Start(alloc state.NetAllocation, sets SetPair, domains []string) error {
 	r.Stop(alloc.Index)
 
 	r.mu.Lock()
 	r.domains[alloc.Index] = domains
-	r.sets[alloc.Index] = setName
+	r.sets[alloc.Index] = sets
 	r.mu.Unlock()
 
 	addr := net.JoinHostPort(alloc.TAPIP, "53")
@@ -1164,7 +1329,7 @@ func (r *Resolver) handle(index int, req *dns.Msg) *dns.Msg {
 
 	r.mu.RLock()
 	domains, known := r.domains[index]
-	setName := r.sets[index]
+	sets := r.sets[index]
 	r.mu.RUnlock()
 
 	if !known || len(req.Question) == 0 {
@@ -1186,11 +1351,17 @@ func (r *Resolver) handle(index int, req *dns.Msg) *dns.Msg {
 
 	for _, rr := range upstream.Answer {
 		var ip net.IP
+		// A and AAAA go to different sets: an ipset's family is fixed at
+		// creation, and adding an IPv6 address to the inet set fails rather
+		// than storing it — so a shared set would leave every AAAA the proxy
+		// resolved unreachable, silently.
+		target := sets.V4
 		switch v := rr.(type) {
 		case *dns.A:
 			ip = v.A
 		case *dns.AAAA:
 			ip = v.AAAA
+			target = sets.V6
 		default:
 			continue
 		}
@@ -1198,7 +1369,7 @@ func (r *Resolver) handle(index int, req *dns.Msg) *dns.Msg {
 		if ttl < minIPSetTTL {
 			ttl = minIPSetTTL
 		}
-		r.ipsetAdd(setName, ip, ttl)
+		r.ipsetAdd(target, ip, ttl)
 	}
 
 	upstream.Id = req.Id
@@ -1305,7 +1476,11 @@ In `handleCreateVM`, immediately after the `InstallEgressPolicy` call added in T
 
 ```go
 	if policy.Mode == state.NetPolicyAllow {
-		if err := s.dns.Start(alloc, firecracker.EgressIPSetName(alloc.Index), policy.Domains); err != nil {
+		sets := egressdns.SetPair{
+			V4: firecracker.EgressIPSetName(alloc.Index),
+			V6: firecracker.EgressIPSetName6(alloc.Index),
+		}
+		if err := s.dns.Start(alloc, sets, policy.Domains); err != nil {
 			firecracker.RemoveEgressPolicy(s.executor, vm)
 			s.store.RemoveVM(req.Name)
 			httpError(w, err, http.StatusInternalServerError)
@@ -1501,12 +1676,37 @@ An earlier implementation resolved each domain once with `getent` at boot and
 pinned the resulting IPs. That broke open (a rotated-away address still
 allowed) and closed (the current address blocked) unpredictably.
 
+## IPv6
+
+Policies are installed into `ip6tables` as well as `iptables`, with a separate
+`inet6` ipset for allowlists (an ipset's address family is fixed at creation,
+and adding an IPv6 address to an `inet` set fails rather than storing it).
+
+This matters more than the current setup suggests. The guest has no IPv6 route
+today, so v6 egress fails on its own — but guest DNS already returns AAAA
+records, so `curl` without `-4` prefers a v6 path. A filter that holds only
+because the transport happens to be unconfigured is not a filter, and one
+routing change would silently open every policy.
+
 ## Apple VZ
 
 **On the `applevz` backend `--net-policy` is still enforced inside the guest
 and is a guardrail, not a boundary.** There is no host-side TAP device to
 filter on. Use `--backend firecracker` where the policy needs to hold against
 the code running in the sandbox.
+
+This is demonstrable, not theoretical — verified on applevz, 2026-08-19:
+
+    mvm start denytest2 --net-policy deny
+    mvm exec denytest2 sh -c 'curl -4 -s -o /dev/null -w "%{http_code}" https://example.com'
+    # -> 000  (blocked)
+    mvm exec denytest2 sh -c 'iptables -F OUTPUT'
+    mvm exec denytest2 sh -c 'curl -4 -s -o /dev/null -w "%{http_code}" https://example.com'
+    # -> 200  (the guest removed its own cage)
+
+Force IPv4 when testing this. Without `-4`, DNS returns AAAA records and the
+connection fails for lack of a v6 route regardless of policy, which reads as
+"still blocked" and hides the escape.
 ```
 
 - [ ] **Step 8: Run the full suite**
