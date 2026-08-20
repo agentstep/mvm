@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"github.com/agentstep/mvm/internal/state"
 	"strings"
 	"testing"
 )
@@ -75,5 +76,23 @@ func TestRootfsScriptUsesTheGivenRuntime(t *testing.T) {
 		if !strings.HasPrefix(strings.TrimSpace(script), rt+" run ") {
 			t.Errorf("script for runtime %q does not invoke it: %.60s", rt, strings.TrimSpace(script))
 		}
+	}
+}
+
+// TestRootfsScriptBakesInGuestDocs pins that the sandbox self-description
+// actually reaches the image. Without it an agent working inside treats the VM
+// as an ordinary Linux box: it never snapshots before a risky change, never
+// declares a service for a long-running process, and cannot recover from its
+// own mistakes.
+func TestRootfsScriptBakesInGuestDocs(t *testing.T) {
+	script := rootfsBuildScript("docker", "/tmp/base.ext4", false)
+	if !strings.Contains(script, "/rootfs"+state.GuestDocsPath) {
+		t.Errorf("build does not write %s into the image", state.GuestDocsPath)
+	}
+	if !strings.Contains(script, "/rootfs"+state.GuestDocsAlias) {
+		t.Errorf("build does not create the %s alias", state.GuestDocsAlias)
+	}
+	if !strings.Contains(script, "hardware-isolated sandbox") {
+		t.Error("the docs body is missing from the build script")
 	}
 }

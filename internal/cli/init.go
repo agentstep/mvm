@@ -484,9 +484,13 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /opt/mvm-agent
 MVMINIT
 chmod +x /rootfs/sbin/mvm-init
+cat > /rootfs%s << MVMDOCS
+%s
+MVMDOCS
+ln -sf %s /rootfs%s
 dd if=/dev/zero of=/output/base.ext4 bs=1M count=0 seek=%d
 mkfs.ext4 -F -d /rootfs /output/base.ext4
-'`, runtime, dest, packages, sizeMB)
+'`, runtime, dest, packages, state.GuestDocsPath, state.GuestDocs, state.GuestDocsPath, state.GuestDocsAlias, sizeMB)
 }
 
 func execLocal(cmd string) error {
