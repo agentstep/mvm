@@ -26,6 +26,7 @@ const (
 	reqTCPForward = "tcp_forward"
 	reqNetInfo    = "net_info"
 	reqMount      = "mount"
+	reqBounce     = "bounce"
 )
 
 // Wire-format response types — must match agent/internal/protocol.

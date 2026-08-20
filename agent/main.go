@@ -259,6 +259,17 @@ func serveConn(conn net.Conn, firstFrame []byte) {
 		// rshared, so this propagates into the inner container and into any
 		// container spawned later. Mounting inside the container instead would
 		// confine it there and lose it on respawn.
+		// Outer-only: bouncing means destroying the inner namespace, so it
+		// cannot be served from inside the namespace being destroyed.
+		case protocol.ReqBounce:
+			if containerMgr == nil {
+				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: "no inner container is running"}
+			} else if err := containerMgr.Bounce(); err != nil {
+				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: err.Error()}
+			} else {
+				resp = &protocol.Response{Type: protocol.RespOK, ID: req.ID}
+			}
+
 		case protocol.ReqMount:
 			resp = handler.HandleMount(req.Mount)
 			resp.ID = req.ID

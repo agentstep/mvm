@@ -123,6 +123,28 @@ func (c *Client) Mount(ctx context.Context, source, target, fstype, data string,
 	return nil
 }
 
+// Bounce restarts user code inside the guest without rebooting the VM.
+//
+// Processes, PTYs, IPC objects and inner mounts reset; every file persists (the
+// rootfs is shared, not an overlay), as do routes, iptables rules and anything
+// in the root namespace. In-flight exec sessions are lost; this connection and
+// the host's port forwards survive, which is the point of bouncing rather than
+// restarting the VM.
+func (c *Client) Bounce(ctx context.Context) error {
+	req := &request{Type: reqBounce, ID: newID()}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return err
+	}
+	if resp.Type == respError {
+		return fmt.Errorf("agent error: %s", resp.Error)
+	}
+	if resp.Type != respOK {
+		return fmt.Errorf("unexpected bounce response type: %q", resp.Type)
+	}
+	return nil
+}
+
 // Exec runs a shell command on the guest and returns its combined output
 // and exit code. stdin may be empty.
 //

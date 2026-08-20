@@ -183,3 +183,32 @@ func (m *Manager) Restarts() int {
 	defer m.mu.Unlock()
 	return m.restarts
 }
+
+// Bounce restarts user code without rebooting the VM.
+//
+// This is deliberately not new machinery: killing the inner init makes the
+// kernel SIGKILL everything in its namespace, and Supervise then creates a
+// fresh one. That is exactly the crash-recovery path, so bounce and recovery
+// cannot drift apart.
+//
+// What resets: processes, PTYs, IPC objects, /dev/shm contents, inner mounts,
+// hostname. What persists: every file (the rootfs is shared, not an overlay),
+// iptables rules, routes, sysctls, and anything in the root namespace.
+//
+// In-flight sessions are lost — their connections were handed to the namespace
+// being destroyed. Host-side vsock connections and port forwards survive, which
+// is the whole reason this exists rather than rebooting the VM.
+func (m *Manager) Bounce() error {
+	m.mu.Lock()
+	cmd, running := m.cmd, m.running
+	m.mu.Unlock()
+
+	if !running || cmd == nil || cmd.Process == nil {
+		return fmt.Errorf("inner container is not running")
+	}
+	// Supervise() observes the exit and respawns; no separate restart path.
+	if err := cmd.Process.Kill(); err != nil {
+		return fmt.Errorf("bounce inner container: %w", err)
+	}
+	return nil
+}

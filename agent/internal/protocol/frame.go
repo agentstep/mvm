@@ -20,6 +20,7 @@ const (
 	ReqTCPForward = "tcp_forward"
 	ReqNetInfo    = "net_info"
 	ReqMount      = "mount"
+	ReqBounce     = "bounce"
 )
 
 // Response types
