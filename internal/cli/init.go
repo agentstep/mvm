@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/agentstep/mvm/internal/firecracker"
@@ -372,18 +373,56 @@ func findAgentSrc() string {
 	}
 }
 
-func buildLocalRootfs(dest string, minimal bool) error {
-	// Try Docker if available
-	if _, err := os.Stat("/usr/local/bin/docker"); err == nil {
-		return buildRootfsViaDocker(dest, minimal)
+// ociRuntimes are the container runtimes the rootfs build can use, in
+// preference order. Each is invoked as `<rt> run --rm --platform linux/arm64
+// -v host:/output <image> bash -c ...`, a shape all of them accept.
+//
+// Apple's `container` is included because it is the native runtime on Apple
+// Silicon and needs no extra VM beyond its own — on a Mac with it installed,
+// the rootfs builds with nothing else to set up. Colima users get the docker
+// entries, since Colima provides the daemon but the CLI is a separate install.
+var ociRuntimes = []string{"docker", "container", "nerdctl", "podman"}
+
+// findOCIRuntime returns the first available container runtime.
+//
+// PATH is consulted rather than a hardcoded list of absolute paths: the
+// previous version only checked /usr/local/bin/docker and
+// /opt/homebrew/bin/docker, so a working runtime installed anywhere else — or
+// any runtime that is not Docker — reported "Docker not found".
+func findOCIRuntime() (string, error) {
+	for _, rt := range ociRuntimes {
+		if path, err := exec.LookPath(rt); err == nil {
+			return path, nil
+		}
 	}
-	if _, err := os.Stat("/opt/homebrew/bin/docker"); err == nil {
-		return buildRootfsViaDocker(dest, minimal)
-	}
-	return fmt.Errorf("Docker not found — needed to build rootfs without Lima")
+	return "", fmt.Errorf("no container runtime found on PATH (looked for %s) — "+
+		"needed to build the rootfs without Lima", strings.Join(ociRuntimes, ", "))
 }
 
-func buildRootfsViaDocker(dest string, minimal bool) error {
+func buildLocalRootfs(dest string, minimal bool) error {
+	rt, err := findOCIRuntime()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  Building rootfs with %s\n", rt)
+	return buildRootfsViaDocker(rt, dest, minimal)
+}
+
+// buildRootfsViaDocker builds the guest rootfs inside a container.
+//
+// runtime is the OCI runtime binary (docker, Apple's container, nerdctl, ...);
+// the invocation below uses only flags all of them share.
+func buildRootfsViaDocker(runtime, dest string, minimal bool) error {
+	return execLocal(rootfsBuildScript(runtime, dest, minimal))
+}
+
+// rootfsBuildScript renders the rootfs build as a shell script.
+//
+// Split out from the execution so it can be asserted on without running a
+// multi-minute container build — in particular so a stray apostrophe cannot
+// silently break the embedded, single-quoted guest script again. See
+// TestRootfsScriptHasNoStrayApostrophe.
+func rootfsBuildScript(runtime, dest string, minimal bool) string {
 	// Debian package names (the base image is debian:bookworm). The old list
 	// used Alpine names (py3-pip), so apt-get aborted under `set -e` and the
 	// rootfs shipped without python/node — hence the bare base.
@@ -398,8 +437,8 @@ func buildRootfsViaDocker(dest string, minimal bool) error {
 		sizeMB = 256
 	}
 
-	script := fmt.Sprintf(`
-docker run --rm --platform linux/arm64 -v "$(dirname %s):/output" debian:bookworm bash -c '
+	return fmt.Sprintf(`
+%s run --rm --platform linux/arm64 -v "$(dirname %s):/output" debian:bookworm bash -c '
 set -e
 apt-get update -qq && apt-get install -y --no-install-recommends %s e2fsprogs >/dev/null
 mkdir -p /rootfs
@@ -431,10 +470,12 @@ ln -sf /dev/pts/ptmx /dev/ptmx
 mkdir -p /dev/shm
 mount -t tmpfs -o rw,nosuid,nodev,size=50%%,mode=1777 tmpfs /dev/shm 2>/dev/null
 # Make the root mount tree shared so mounts performed here later (volumes, in
-# particular) propagate into the agent's inner container, which mounts itself
-# rslave. Without this the propagation type is private in both directions, and
-# a volume mounted after the container started would be invisible inside it —
-# and would silently vanish from a respawned container.
+# particular) propagate into the inner container, which mounts itself rslave.
+# Without this the propagation type is private in both directions, and a volume
+# mounted after the container started would be invisible inside it, then vanish
+# from a respawned container.
+# NOTE: no apostrophes anywhere in this script — it is embedded in a
+# single-quoted bash -c argument, so one would terminate the quote.
 mount --make-rshared / 2>/dev/null
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /opt/mvm-agent
@@ -442,9 +483,7 @@ MVMINIT
 chmod +x /rootfs/sbin/mvm-init
 dd if=/dev/zero of=/output/base.ext4 bs=1M count=0 seek=%d
 mkfs.ext4 -F -d /rootfs /output/base.ext4
-'`, dest, packages, sizeMB)
-
-	return execLocal(script)
+'`, runtime, dest, packages, sizeMB)
 }
 
 func execLocal(cmd string) error {
