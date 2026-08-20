@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/agentstep/mvm/agent/internal/container"
@@ -19,7 +21,7 @@ func main() {
 	// re-exec'd into a fresh namespace and must not set up listeners, write the
 	// ready file, or otherwise behave like the outer agent. Never returns.
 	if container.IsInitProcess(os.Args) {
-		container.RunInit()
+		container.RunInit(serveConn)
 		return
 	}
 
@@ -43,11 +45,30 @@ func main() {
 			log.Printf("inner container unavailable (continuing without it): %v", err)
 		} else {
 			go cm.Supervise()
+			// Only now is routing enabled. Until MVM_CONTAINER_EXEC is set,
+			// user code still runs in the root namespace exactly as before —
+			// the container is created and supervised but nothing is sent to
+			// it, so the spawn and respawn paths are exercised in production
+			// before anything depends on them.
+			if os.Getenv("MVM_CONTAINER_EXEC") != "" {
+				containerMgr = cm
+				log.Printf("routing user code into the inner container")
+			}
 		}
 	}
 
 	// Start TCP listener immediately (legacy host-side control path).
-	tcpLn, tcpErr := net.Listen("tcp", ":5123")
+	//
+	// The port is overridable so a second agent can be run alongside the real
+	// one for testing. The host always uses vsockPort; nothing in production
+	// sets this.
+	listenPort := vsockPort
+	if p := os.Getenv("MVM_AGENT_PORT"); p != "" {
+		if n, err := strconv.Atoi(p); err == nil && n > 0 && n < 65536 {
+			listenPort = n
+		}
+	}
+	tcpLn, tcpErr := net.Listen("tcp", fmt.Sprintf(":%d", listenPort))
 	if tcpErr != nil {
 		log.Fatalf("TCP listen failed: %v", tcpErr)
 	}
@@ -73,7 +94,7 @@ func main() {
 	// 250ms so a vsock-less guest doesn't busy-spin. Same ~15s overall budget.
 	go acceptVsock()
 
-	log.Printf("listening on port %d", vsockPort)
+	log.Printf("listening on port %d (vsock %d)", listenPort, vsockPort)
 	os.WriteFile("/run/mvm-agent.ready", []byte("ready"), 0o644)
 
 	// Both listeners are served by their own goroutine; park here. This used to
@@ -135,13 +156,47 @@ func acceptVsock() {
 	log.Printf("vsock not available, TCP-only mode")
 }
 
+// containerMgr is the inner container, or nil if none is running. It is set
+// once during startup in the outer agent and stays nil in the inner init, which
+// is what stops a forwarded request from being forwarded again.
+var containerMgr *container.Manager
+
 func handleConnection(conn net.Conn) {
+	serveConn(conn, nil)
+}
+
+// serveConn serves a connection. firstFrame, if non-nil, is a request frame
+// already read from it — the case for a connection handed over from the outer
+// agent, where the frame had to be read to make the routing decision.
+func serveConn(conn net.Conn, firstFrame []byte) {
 	defer conn.Close()
 
 	for {
+		var raw []byte
+		if firstFrame != nil {
+			raw, firstFrame = firstFrame, nil
+		} else {
+			var err error
+			if raw, err = protocol.ReadRawFrame(conn); err != nil {
+				return
+			}
+		}
+
 		var req protocol.Request
-		if err := protocol.ReadFrame(conn, &req); err != nil {
+		if err := json.Unmarshal(raw, &req); err != nil {
 			return
+		}
+
+		// Hand user-code requests to the inner container, passing the whole
+		// connection rather than proxying it. On success the container owns the
+		// connection and this loop is done; on failure we serve it here, so a
+		// broken container degrades to previous behaviour instead of an outage.
+		if containerMgr != nil && container.RouteInside(req.Type) {
+			if err := containerMgr.Send(conn, raw); err == nil {
+				return
+			} else {
+				log.Printf("routing %s to container failed, serving locally: %v", req.Type, err)
+			}
 		}
 
 		var resp *protocol.Response

@@ -152,6 +152,24 @@ func (m *Manager) Supervise() {
 	}
 }
 
+// Send hands an accepted connection to the inner container, along with the
+// request frame the outer agent already read from it.
+//
+// On success the container owns the connection: the caller must stop using it
+// and release its own reference (the fd stays alive via the in-flight
+// SCM_RIGHTS message even if the sender closes first). On failure the caller
+// still owns it and should serve the request itself.
+func (m *Manager) Send(conn net.Conn, rawRequest []byte) error {
+	m.mu.Lock()
+	ctrl, running := m.conn, m.running
+	m.mu.Unlock()
+
+	if !running || ctrl == nil {
+		return fmt.Errorf("inner container is not running")
+	}
+	return SendConn(ctrl, conn, rawRequest)
+}
+
 // Running reports whether a container is currently up.
 func (m *Manager) Running() bool {
 	m.mu.Lock()

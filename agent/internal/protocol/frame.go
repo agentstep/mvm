@@ -138,17 +138,33 @@ func WriteFrame(w io.Writer, v interface{}) error {
 
 // ReadFrame reads a length-prefixed JSON frame.
 func ReadFrame(r io.Reader, v interface{}) error {
+	data, err := ReadRawFrame(r)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, v)
+}
+
+// ReadRawFrame reads a length-prefixed frame and returns its undecoded payload.
+//
+// The agent needs the raw bytes as well as the decoded request: it decodes to
+// decide whether a request belongs in the inner container, and if it does, the
+// original frame is forwarded verbatim alongside the connection's file
+// descriptor. Re-encoding the decoded struct instead would silently drop any
+// field this build does not know about, which is exactly the wrong behaviour
+// across a version skew.
+func ReadRawFrame(r io.Reader) ([]byte, error) {
 	length := make([]byte, 4)
 	if _, err := io.ReadFull(r, length); err != nil {
-		return fmt.Errorf("read length: %w", err)
+		return nil, fmt.Errorf("read length: %w", err)
 	}
 	size := binary.BigEndian.Uint32(length)
 	if size > 10*1024*1024 { // 10MB max
-		return fmt.Errorf("frame too large: %d bytes", size)
+		return nil, fmt.Errorf("frame too large: %d bytes", size)
 	}
 	data := make([]byte, size)
 	if _, err := io.ReadFull(r, data); err != nil {
-		return fmt.Errorf("read data: %w", err)
+		return nil, fmt.Errorf("read data: %w", err)
 	}
-	return json.Unmarshal(data, v)
+	return data, nil
 }

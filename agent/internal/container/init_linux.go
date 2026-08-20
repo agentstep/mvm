@@ -3,7 +3,9 @@
 package container
 
 import (
+	"fmt"
 	"log"
+	"net"
 	"os"
 	"syscall"
 
@@ -14,6 +16,14 @@ import (
 // ExtraFiles places the first extra file at fd 3.
 const ctrlFD = 3
 
+// Dispatcher serves one connection, starting from a request frame that has
+// already been read from it.
+//
+// The inner init needs the agent's full request dispatch, which lives in
+// package main; passing it in as a callback keeps that dispatch table in one
+// place rather than duplicating it here and letting the two drift.
+type Dispatcher func(conn net.Conn, firstFrame []byte)
+
 // RunInit is the entry point for the inner-namespace init. main() dispatches
 // here when IsInitProcess(os.Args) is true, before doing anything else.
 //
@@ -23,7 +33,7 @@ const ctrlFD = 3
 // namespace can never be used again.
 //
 // It never returns.
-func RunInit() {
+func RunInit(dispatch Dispatcher) {
 	log.SetPrefix("[mvm-container] ")
 	log.SetFlags(log.LstdFlags)
 
@@ -58,10 +68,43 @@ func RunInit() {
 
 	log.Printf("container init ready (%s)", Describe())
 
-	// Park. Step 1 routes no traffic here; the process exists so the namespace
-	// exists and the spawn/respawn path can be exercised for real. Exiting
-	// would tear down the namespace.
-	select {}
+	unixCtrl, err := ctrlConn(ctrl)
+	if err != nil {
+		// Without the control channel nothing can ever be routed here, but
+		// exiting would tear down the namespace and trigger a respawn loop.
+		// Park instead and let the outer agent serve everything itself.
+		log.Printf("control channel unusable (%v); no work will be routed here", err)
+		select {}
+	}
+
+	// Serve connections handed over by the outer agent. Each arrives as a file
+	// descriptor plus the request frame already read from it, so the existing
+	// dispatch runs verbatim — the connection is owned outright rather than
+	// proxied, which is why PTY and streaming work here without special cases.
+	for {
+		conn, rawReq, err := RecvConn(unixCtrl)
+		if err != nil {
+			// EOF means the outer agent is gone. Exiting takes the namespace
+			// down with us, which is correct: there is nobody left to serve.
+			log.Printf("control channel closed (%v); container init exiting", err)
+			return
+		}
+		go dispatch(conn, rawReq)
+	}
+}
+
+// ctrlConn wraps the inherited control fd as a *net.UnixConn.
+func ctrlConn(f *os.File) (*net.UnixConn, error) {
+	fc, err := net.FileConn(f)
+	if err != nil {
+		return nil, err
+	}
+	uc, ok := fc.(*net.UnixConn)
+	if !ok {
+		fc.Close()
+		return nil, fmt.Errorf("control channel is %T, want *net.UnixConn", fc)
+	}
+	return uc, nil
 }
 
 // setupMounts gives the container its own view of the pseudo-filesystems whose
