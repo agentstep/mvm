@@ -117,7 +117,7 @@ func TestStartScript(t *testing.T) {
 		"172.16.0.2",
 		"firecracker",
 		"--config-file",
-				"setsid",
+		"setsid",
 		"PID:",
 	}
 	for _, c := range checks {
@@ -143,7 +143,7 @@ func TestStartFromSnapshotScript(t *testing.T) {
 		"resume_vm",
 		"firecracker",
 		"--api-sock",
-				"PID:",
+		"PID:",
 	}
 	for _, c := range checks {
 		if !strings.Contains(script, c) {

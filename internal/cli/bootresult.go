@@ -17,9 +17,9 @@ const (
 type BootPath string
 
 const (
-	BootCold     BootPath = "cold_boot"        // booted a fresh rootfs
-	BootRestore  BootPath = "snapshot_restore" // restored from a saved memory+disk checkpoint
-	BootPoolClaim BootPath = "pool_claim"      // claimed a pre-booted warm VM (reserved; no VZ pool yet)
+	BootCold      BootPath = "cold_boot"        // booted a fresh rootfs
+	BootRestore   BootPath = "snapshot_restore" // restored from a saved memory+disk checkpoint
+	BootPoolClaim BootPath = "pool_claim"       // claimed a pre-booted warm VM (reserved; no VZ pool yet)
 )
 
 // BootResult is the structured outcome of a start, including a per-phase timing

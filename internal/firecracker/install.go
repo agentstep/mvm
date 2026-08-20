@@ -77,7 +77,7 @@ func DownloadImages(limaClient *lima.Client, cacheDir string, minimal bool) erro
 	// Write scripts to host temp files, copy to Lima via limactl copy.
 	// This avoids ALL shell quoting issues — scripts never pass through bash -c.
 	scripts := map[string]string{
-		"/tmp/build-rootfs.sh":  buildRootfsScript,
+		"/tmp/build-rootfs.sh": buildRootfsScript,
 		"/tmp/chroot-setup.sh": chrootSetupScript,
 	}
 	for remotePath, content := range scripts {

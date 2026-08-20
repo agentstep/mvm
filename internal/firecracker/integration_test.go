@@ -175,27 +175,27 @@ func TestStartScriptAllRequiredElements(t *testing.T) {
 	script := StartScript("integ-vm", alloc, 2, 1024)
 
 	required := map[string]string{
-		"set -e":           "should use strict mode",
-		"integ-vm":         "should contain VM name",
-		"tap2":             "should contain TAP device",
-		"172.16.0.9":       "should contain TAP IP",
-		"172.16.0.10":      "should contain guest IP",
-		"firecracker":      "should launch firecracker",
-		"--config-file":    "should use config file",
-		"--api-sock":       "should set API socket",
-		"--sparse=always":  "should use sparse copy",
-		"base.ext4":        "should copy base rootfs",
-		"rootfs.ext4":      "should target rootfs path",
-		"ip tuntap add":    "should create TAP device",
-		"ip addr add":      "should assign IP to TAP",
-		"ip link set":      "should bring TAP up",
-		"setsid":           "should detach process",
-		"PID:$FC_PID":      "should output PID marker",
-		"kill -0":          "should check process alive",
-		"firecracker.log":  "should create log file",
-		"/run/mvm":         "should use run directory",
-		"/opt/mvm":         "should use opt directory",
-		".vsock":           "should clean stale vsock",
+		"set -e":          "should use strict mode",
+		"integ-vm":        "should contain VM name",
+		"tap2":            "should contain TAP device",
+		"172.16.0.9":      "should contain TAP IP",
+		"172.16.0.10":     "should contain guest IP",
+		"firecracker":     "should launch firecracker",
+		"--config-file":   "should use config file",
+		"--api-sock":      "should set API socket",
+		"--sparse=always": "should use sparse copy",
+		"base.ext4":       "should copy base rootfs",
+		"rootfs.ext4":     "should target rootfs path",
+		"ip tuntap add":   "should create TAP device",
+		"ip addr add":     "should assign IP to TAP",
+		"ip link set":     "should bring TAP up",
+		"setsid":          "should detach process",
+		"PID:$FC_PID":     "should output PID marker",
+		"kill -0":         "should check process alive",
+		"firecracker.log": "should create log file",
+		"/run/mvm":        "should use run directory",
+		"/opt/mvm":        "should use opt directory",
+		".vsock":          "should clean stale vsock",
 	}
 
 	for substr, reason := range required {
@@ -388,16 +388,16 @@ func TestDefaultResourcesMatchConstants(t *testing.T) {
 
 func TestCustomResourcesOverrideDefaults(t *testing.T) {
 	tests := []struct {
-		cpus   int
-		memMB  int
-		wantC  int
-		wantM  int
+		cpus  int
+		memMB int
+		wantC int
+		wantM int
 	}{
 		{0, 0, GuestVcpuCount, GuestMemSizeMiB}, // defaults
-		{1, 512, 1, 512},                          // custom
-		{16, 8192, 16, 8192},                      // large
-		{0, 1024, GuestVcpuCount, 1024},           // only memory custom
-		{8, 0, 8, GuestMemSizeMiB},               // only cpus custom
+		{1, 512, 1, 512},                        // custom
+		{16, 8192, 16, 8192},                    // large
+		{0, 1024, GuestVcpuCount, 1024},         // only memory custom
+		{8, 0, 8, GuestMemSizeMiB},              // only cpus custom
 	}
 
 	for _, tt := range tests {

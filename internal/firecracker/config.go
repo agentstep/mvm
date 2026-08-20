@@ -57,11 +57,11 @@ func BootArgs(guestIP, gatewayIP string) string {
 
 // fcConfig is the Firecracker JSON configuration file format.
 type fcConfig struct {
-	BootSource    fcBootSource       `json:"boot-source"`
-	Drives        []fcDrive          `json:"drives"`
-	NetworkIfaces []fcNetworkIface   `json:"network-interfaces"`
-	MachineConfig *fcMachineConfig   `json:"machine-config,omitempty"`
-	Vsock         *fcVsock           `json:"vsock,omitempty"`
+	BootSource    fcBootSource     `json:"boot-source"`
+	Drives        []fcDrive        `json:"drives"`
+	NetworkIfaces []fcNetworkIface `json:"network-interfaces"`
+	MachineConfig *fcMachineConfig `json:"machine-config,omitempty"`
+	Vsock         *fcVsock         `json:"vsock,omitempty"`
 }
 
 type fcVsock struct {

@@ -20,8 +20,8 @@ func newDeleteCmd(store *state.Store) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "delete <name>",
-		Short: "Delete a microVM and all its resources",
+		Use:     "delete <name>",
+		Short:   "Delete a microVM and all its resources",
 		Aliases: []string{"rm"},
 		Args: func(cmd *cobra.Command, args []string) error {
 			allFlag, _ := cmd.Flags().GetBool("all")

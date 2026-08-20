@@ -30,8 +30,8 @@ func TestIsM3OrNewer(t *testing.T) {
 		{"Apple M2 Max", false},
 		{"Intel Core i9", false},
 		{"", false},
-		{"apple m3", true},  // lowercase
-		{"APPLE M4", true},  // uppercase
+		{"apple m3", true},   // lowercase
+		{"APPLE M4", true},   // uppercase
 		{"Apple M10", false}, // M1 followed by 0, not M10
 	}
 
@@ -148,7 +148,7 @@ func TestParseMajorVersionEdgeCases(t *testing.T) {
 	}{
 		{"0.1", 0, false},     // version 0
 		{"100.0", 100, false}, // triple digit
-		{".5", 0, true},      // starts with dot
+		{".5", 0, true},       // starts with dot
 		{"15.", 15, false},    // trailing dot
 	}
 

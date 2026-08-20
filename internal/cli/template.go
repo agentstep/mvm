@@ -50,8 +50,8 @@ func newTemplateInitCmd() *cobra.Command {
 
 func newTemplateListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list",
-		Short: "List available templates",
+		Use:     "list",
+		Short:   "List available templates",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTemplateList()

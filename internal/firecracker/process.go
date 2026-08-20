@@ -97,7 +97,6 @@ func WaitForGuest(ex Executor, guestIP string, timeout time.Duration) bool {
 	return false
 }
 
-
 // SetupGuestNetworkViaAgent configures networking via the agent.
 func SetupGuestNetworkViaAgent(ex Executor, guestIP, gatewayIP string) error {
 	return agentExec(ex, guestIP, fmt.Sprintf(
@@ -243,4 +242,3 @@ func agentExec(ex Executor, guestIP, command string) error {
 		5*time.Second)
 	return execErr
 }
-

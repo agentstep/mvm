@@ -5,7 +5,7 @@
 // per-VM Unix socket (~/.mvm/run/vz-<name>.sock). This package speaks
 // that protocol from Go.
 //
-// Wire format
+// # Wire format
 //
 // All messages are length-prefixed JSON: a 4-byte big-endian length
 // followed by the JSON payload. This mirrors the agent protocol and
@@ -18,7 +18,7 @@
 // returned fd is a duplicate (the kernel ref-counts the underlying
 // file), so the caller owns it and must Close it.
 //
-// Concurrency
+// # Concurrency
 //
 // A Client is safe for concurrent use — calls are serialized by an
 // internal mutex. Concurrent callers block each other since each call

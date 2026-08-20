@@ -252,4 +252,3 @@ func TestRunRunRejectsRmWithDetach(t *testing.T) {
 		t.Errorf("error = %q, want mention of the foreground requirement", err)
 	}
 }
-

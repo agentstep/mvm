@@ -267,8 +267,6 @@ func (c *Client) ShellWithTimeout(command string, timeout time.Duration) (string
 	return out, nil
 }
 
-
-
 // ShellScript writes a script to the Lima VM and executes it as a single invocation.
 // This avoids multiple SSH round-trips for multi-step operations.
 func (c *Client) ShellScript(script string) (string, error) {
