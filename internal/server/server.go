@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/agentstep/mvm/internal/egressdns"
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
 )
@@ -27,8 +28,11 @@ const DaemonSocketPath = "/run/mvm/daemon.sock"
 const DaemonTCPPort = 19876
 
 type Server struct {
-	store        *state.Store
-	executor     firecracker.Executor
+	store    *state.Store
+	executor firecracker.Executor
+	// dns serves allow:<domains> policies: it is the only writer to the
+	// allowlist ipsets the egress filter matches on.
+	dns          *egressdns.Resolver
 	unixListener net.Listener
 	tcpListener  net.Listener // nil if no ListenAddr
 	unixServer   *http.Server
@@ -119,6 +123,7 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		store:        cfg.Store,
 		executor:     cfg.Executor,
+		dns:          egressdns.NewResolver("8.8.8.8:53"),
 		unixListener: ln,
 		sockPath:     cfg.SocketPath,
 		pidPath:      cfg.PIDPath,

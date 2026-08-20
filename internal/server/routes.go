@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/agentstep/mvm/internal/agentclient"
+	"github.com/agentstep/mvm/internal/egressdns"
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
 )
@@ -345,6 +346,19 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err, http.StatusInternalServerError)
 		return
 	}
+	if policy.Mode == state.NetPolicyAllow {
+		sets := egressdns.SetPair{
+			V4: firecracker.EgressIPSetName(alloc.Index),
+			V6: firecracker.EgressIPSetName6(alloc.Index),
+		}
+		if err := s.dns.Start(alloc, sets, policy.Domains); err != nil {
+			firecracker.RemoveEgressPolicy(s.executor, vm)
+			s.dns.Stop(vm.NetIndex)
+			s.store.RemoveVM(req.Name)
+			httpError(w, err, http.StatusInternalServerError)
+			return
+		}
+	}
 
 	// If a custom image is specified, verify it exists.
 	if req.Image != "" {
@@ -489,6 +503,16 @@ func (s *Server) handleStartVM(w http.ResponseWriter, r *http.Request) {
 	if err := firecracker.InstallEgressPolicy(s.executor, alloc, resumePolicy); err != nil {
 		httpError(w, fmt.Errorf("egress policy: %w", err), http.StatusInternalServerError)
 		return
+	}
+	if resumePolicy.Mode == state.NetPolicyAllow {
+		sets := egressdns.SetPair{
+			V4: firecracker.EgressIPSetName(alloc.Index),
+			V6: firecracker.EgressIPSetName6(alloc.Index),
+		}
+		if err := s.dns.Start(alloc, sets, resumePolicy.Domains); err != nil {
+			httpError(w, fmt.Errorf("egress DNS: %w", err), http.StatusInternalServerError)
+			return
+		}
 	}
 	postBoot := func() error { return s.postBootSetup(name, alloc, volumes, seccomp, resumePolicy) }
 	if len(volumes) > 0 {
@@ -722,6 +746,7 @@ func (s *Server) handleStopVM(w http.ResponseWriter, r *http.Request) {
 	// Remove port forwarding before stopping.
 	firecracker.RemovePortForwarding(s.executor, vm)
 	firecracker.RemoveEgressPolicy(s.executor, vm)
+	s.dns.Stop(vm.NetIndex)
 
 	if req.Force {
 		// Force kill — no graceful shutdown attempt.
@@ -874,6 +899,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 	if err == nil && (vm.Status == "running" || vm.Status == "paused") {
 		firecracker.RemovePortForwarding(s.executor, vm)
 		firecracker.RemoveEgressPolicy(s.executor, vm)
+		s.dns.Stop(vm.NetIndex)
 		if vm.Status == "paused" {
 			firecracker.Resume(s.executor, vm)
 		}
