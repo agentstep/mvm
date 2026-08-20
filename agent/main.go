@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/agentstep/mvm/agent/internal/container"
 	"github.com/agentstep/mvm/agent/internal/handler"
 	"github.com/agentstep/mvm/agent/internal/protocol"
 )
@@ -14,6 +15,14 @@ import (
 const vsockPort = 5123
 
 func main() {
+	// Dispatch the inner-container init before anything else: this process was
+	// re-exec'd into a fresh namespace and must not set up listeners, write the
+	// ready file, or otherwise behave like the outer agent. Never returns.
+	if container.IsInitProcess(os.Args) {
+		container.RunInit()
+		return
+	}
+
 	log.SetPrefix("[mvm-agent] ")
 	log.SetFlags(log.LstdFlags)
 
@@ -22,6 +31,20 @@ func main() {
 	// permanent zombies — one per detached `mvm exec -d` job, for the life of
 	// the VM. Must start before any connection is served so no exit is missed.
 	go handler.ReapForever()
+
+	// Dark launch: the inner container is created and supervised, but NOTHING is
+	// routed to it yet. Handlers still run in the root namespace exactly as
+	// before, so behaviour is unchanged; this exercises the spawn, the control
+	// socket and the respawn path under real conditions before anything depends
+	// on them. Failure is non-fatal for the same reason.
+	if os.Getenv("MVM_NO_CONTAINER") == "" {
+		cm := container.NewManager()
+		if err := cm.Start(); err != nil {
+			log.Printf("inner container unavailable (continuing without it): %v", err)
+		} else {
+			go cm.Supervise()
+		}
+	}
 
 	// Start TCP listener immediately (legacy host-side control path).
 	tcpLn, tcpErr := net.Listen("tcp", ":5123")
