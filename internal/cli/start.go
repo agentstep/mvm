@@ -618,7 +618,16 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		v.RootfsPath = vmRootfs
 		v.Backend = "applevz"
 		v.Secrets = secretNames
-		v.Spec = applevzSpec(ports, netPolicy, cpus, memoryMB, volumes, startup, secretNames)
+		// Rebuild the spec from the start flags, but carry declared services
+		// forward. They are declared imperatively via `mvm service add`, not
+		// passed as a start flag, so regenerating the spec wholesale would
+		// silently discard them — and a service that vanishes on restart is
+		// exactly the failure the persistence exists to prevent.
+		rebuilt := applevzSpec(ports, netPolicy, cpus, memoryMB, volumes, startup, secretNames)
+		if v.Spec != nil {
+			rebuilt.Services = v.Spec.Services
+		}
+		v.Spec = rebuilt
 	}); err != nil {
 		store.RemoveVM(name)
 		return nil, err
@@ -679,6 +688,24 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 		}
 
 		// Apply network policy via the agent.
+		// Replay declared services. Idempotent, so the same call serves a
+		// fresh boot and a restart of a stopped VM: anything already running is
+		// left alone, anything missing is started. This is what makes a service
+		// survive stop/start, not just a crash.
+		if existing, gerr := store.GetVM(name); gerr == nil && existing.Spec != nil && len(existing.Spec.Services) > 0 {
+			declared := make([]agentclient.ServiceState, 0, len(existing.Spec.Services))
+			for _, svc := range existing.Spec.Services {
+				declared = append(declared, agentclient.ServiceState{
+					Name: svc.Name, Run: svc.Run, Restart: svc.Restart,
+				})
+			}
+			if err := agent.ServiceReconcile(ctx, declared); err != nil {
+				logf("  Warning: replay services: %v\n", err)
+			} else {
+				logf("  Services: %d replayed\n", len(declared))
+			}
+		}
+
 		if err := applyVZNetworkPolicy(ctx, agent, netPolicy); err != nil {
 			logf("  Warning: apply network policy: %v\n", err)
 		}

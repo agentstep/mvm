@@ -145,6 +145,72 @@ func (c *Client) Bounce(ctx context.Context) error {
 	return nil
 }
 
+// ServiceAdd declares a service and starts supervising it.
+func (c *Client) ServiceAdd(ctx context.Context, name, run, workdir, restart string, env map[string]string) error {
+	return c.serviceCall(ctx, reqServiceAdd, &servicePayload{
+		Name: name, Run: run, WorkDir: workdir, Restart: restart, Env: env,
+	})
+}
+
+// ServiceRemove stops supervising a service and terminates it.
+func (c *Client) ServiceRemove(ctx context.Context, name string) error {
+	return c.serviceCall(ctx, reqServiceRm, &servicePayload{Name: name})
+}
+
+// ServiceRestart forces one service to restart now.
+func (c *Client) ServiceRestart(ctx context.Context, name string) error {
+	return c.serviceCall(ctx, reqServiceRst, &servicePayload{Name: name})
+}
+
+// ServiceReconcile replaces the declared set with the given services.
+//
+// Idempotent, which is what lets one call serve boot, resume, restore and
+// bounce: already-running services are left alone, missing ones are started,
+// and anything no longer declared is stopped.
+func (c *Client) ServiceReconcile(ctx context.Context, svcs []ServiceState) error {
+	payload := &servicePayload{Reconcile: true}
+	for _, s := range svcs {
+		payload.Services = append(payload.Services, servicePayload{
+			Name: s.Name, Run: s.Run, Restart: s.Restart,
+		})
+	}
+	return c.serviceCall(ctx, reqServiceAdd, payload)
+}
+
+// ServiceList reports every supervised service.
+func (c *Client) ServiceList(ctx context.Context) ([]ServiceState, error) {
+	req := &request{Type: reqServiceLs, ID: newID()}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Type == respError {
+		return nil, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	var out []ServiceState
+	if len(resp.Data) > 0 {
+		if err := json.Unmarshal(resp.Data, &out); err != nil {
+			return nil, fmt.Errorf("decode service list: %w", err)
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) serviceCall(ctx context.Context, verb string, p *servicePayload) error {
+	req := &request{Type: verb, ID: newID(), Service: p}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return err
+	}
+	if resp.Type == respError {
+		return fmt.Errorf("agent error: %s", resp.Error)
+	}
+	if resp.Type != respOK {
+		return fmt.Errorf("unexpected %s response type: %q", verb, resp.Type)
+	}
+	return nil
+}
+
 // Exec runs a shell command on the guest and returns its combined output
 // and exit code. stdin may be empty.
 //

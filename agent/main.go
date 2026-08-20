@@ -47,6 +47,7 @@ func main() {
 		} else {
 			go cm.Supervise()
 			containerMgr = cm
+			containerSup = container.NewSupervisor(cm)
 			log.Printf("routing user code into the inner container")
 		}
 	}
@@ -154,6 +155,10 @@ func acceptVsock() {
 // once during startup in the outer agent and stays nil in the inner init, which
 // is what stops a forwarded request from being forwarded again.
 var containerMgr *container.Manager
+
+// containerSup supervises declared services. Lives in the root namespace so it
+// survives a bounce of the container it supervises into.
+var containerSup *container.Supervisor
 
 func handleConnection(conn net.Conn) {
 	serveConn(conn, nil)
@@ -270,6 +275,12 @@ func serveConn(conn net.Conn, firstFrame []byte) {
 				resp = &protocol.Response{Type: protocol.RespOK, ID: req.ID}
 			}
 
+		// Service verbs are outer-only: the supervisor must outlive the
+		// namespace its processes run in.
+		case protocol.ReqServiceAdd, protocol.ReqServiceRm,
+			protocol.ReqServiceLs, protocol.ReqServiceRst:
+			resp = handleService(req)
+
 		case protocol.ReqMount:
 			resp = handler.HandleMount(req.Mount)
 			resp.ID = req.ID
@@ -288,4 +299,61 @@ func serveConn(conn net.Conn, firstFrame []byte) {
 			return
 		}
 	}
+}
+
+// handleService serves the service verbs from the root namespace.
+func handleService(req protocol.Request) *protocol.Response {
+	fail := func(msg string) *protocol.Response {
+		return &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: msg}
+	}
+	if containerSup == nil {
+		return fail("no inner container is running, so services cannot be supervised")
+	}
+	if req.Service == nil && req.Type != protocol.ReqServiceLs {
+		return fail("missing service request")
+	}
+
+	switch req.Type {
+	case protocol.ReqServiceLs:
+		data, err := json.Marshal(containerSup.List())
+		if err != nil {
+			return fail(err.Error())
+		}
+		return &protocol.Response{Type: protocol.RespOK, ID: req.ID, Data: data}
+
+	case protocol.ReqServiceAdd:
+		// A reconcile replaces the whole declared set, which is what the host
+		// sends after boot, resume or restore.
+		if req.Service.Reconcile {
+			declared := make([]container.Service, 0, len(req.Service.Services))
+			for _, s := range req.Service.Services {
+				declared = append(declared, container.Service{
+					Name: s.Name, Run: s.Run, WorkDir: s.WorkDir, Env: s.Env, Restart: s.Restart,
+				})
+			}
+			containerSup.Reconcile(declared)
+			return &protocol.Response{Type: protocol.RespOK, ID: req.ID}
+		}
+		if err := containerSup.Add(container.Service{
+			Name:    req.Service.Name,
+			Run:     req.Service.Run,
+			WorkDir: req.Service.WorkDir,
+			Env:     req.Service.Env,
+			Restart: req.Service.Restart,
+		}); err != nil {
+			return fail(err.Error())
+		}
+		return &protocol.Response{Type: protocol.RespOK, ID: req.ID}
+
+	case protocol.ReqServiceRm:
+		containerSup.Remove(req.Service.Name)
+		return &protocol.Response{Type: protocol.RespOK, ID: req.ID}
+
+	case protocol.ReqServiceRst:
+		if err := containerSup.Restart(req.Service.Name); err != nil {
+			return fail(err.Error())
+		}
+		return &protocol.Response{Type: protocol.RespOK, ID: req.ID}
+	}
+	return fail("unhandled service verb")
 }

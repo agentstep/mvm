@@ -27,6 +27,10 @@ const (
 	reqNetInfo    = "net_info"
 	reqMount      = "mount"
 	reqBounce     = "bounce"
+	reqServiceAdd = "service_add"
+	reqServiceRm  = "service_rm"
+	reqServiceLs  = "service_ls"
+	reqServiceRst = "service_restart"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
@@ -49,6 +53,28 @@ type request struct {
 	Pty     *ptyPayload     `json:"pty,omitempty"`
 	Forward *forwardPayload `json:"forward,omitempty"`
 	Mount   *mountPayload   `json:"mount,omitempty"`
+	Service *servicePayload `json:"service,omitempty"`
+}
+
+// servicePayload matches agent/internal/protocol.ServiceRequest.
+type servicePayload struct {
+	Name      string            `json:"name"`
+	Run       string            `json:"run,omitempty"`
+	WorkDir   string            `json:"workdir,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	Restart   string            `json:"restart,omitempty"`
+	Reconcile bool              `json:"reconcile,omitempty"`
+	Services  []servicePayload  `json:"services,omitempty"`
+}
+
+// ServiceState is one supervised service as reported by ServiceList.
+type ServiceState struct {
+	Name     string `json:"name"`
+	Run      string `json:"run"`
+	Restart  string `json:"restart,omitempty"`
+	Running  bool   `json:"running"`
+	Restarts int    `json:"restarts"`
+	LastExit int    `json:"last_exit"`
 }
 
 // mountPayload matches agent/internal/protocol.MountRequest.

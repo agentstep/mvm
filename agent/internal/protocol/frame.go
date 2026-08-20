@@ -21,6 +21,10 @@ const (
 	ReqNetInfo    = "net_info"
 	ReqMount      = "mount"
 	ReqBounce     = "bounce"
+	ReqServiceAdd = "service_add"
+	ReqServiceRm  = "service_rm"
+	ReqServiceLs  = "service_ls"
+	ReqServiceRst = "service_restart"
 )
 
 // Response types
@@ -43,6 +47,7 @@ type Request struct {
 	Network *NetworkRequest `json:"network,omitempty"`
 	Forward *ForwardRequest `json:"forward,omitempty"`
 	Mount   *MountRequest   `json:"mount,omitempty"`
+	Service *ServiceRequest `json:"service,omitempty"`
 }
 
 // MountRequest asks the agent to mount a filesystem in the guest.
@@ -62,6 +67,22 @@ type MountRequest struct {
 	FSType string `json:"fstype"`          // e.g. "virtiofs"
 	Data   string `json:"data,omitempty"`  // fs-specific options
 	MkDir  bool   `json:"mkdir,omitempty"` // create Target first
+}
+
+// ServiceRequest carries a service declaration or a reference to one.
+//
+// Services are supervised from the ROOT namespace and run inside the container,
+// which is what lets them survive a bounce: a supervisor inside the namespace
+// it supervises dies with it.
+type ServiceRequest struct {
+	Name    string            `json:"name"`
+	Run     string            `json:"run,omitempty"`
+	WorkDir string            `json:"workdir,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	Restart string            `json:"restart,omitempty"`
+	// Reconcile, when set with Services, replaces the whole declared set.
+	Reconcile bool             `json:"reconcile,omitempty"`
+	Services  []ServiceRequest `json:"services,omitempty"`
 }
 
 // ForwardRequest asks the agent to connect to a TCP port on the guest's own
