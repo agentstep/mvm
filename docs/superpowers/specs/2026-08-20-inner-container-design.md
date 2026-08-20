@@ -322,19 +322,46 @@ Routing is gated behind `MVM_CONTAINER_EXEC`. Unset — the default — the
 container is created and supervised but nothing is routed to it, so behaviour is
 byte-identical to before.
 
-**What blocks step 5.** Flipping the default requires the cross-backend parity
-suite in §11 to pass, and that requires the new agent to *be* the guest's agent
-— which means rebuilding `base.ext4`. The rootfs build path
-(`buildRootfsViaDocker`) needs Docker, which is not installed on this machine.
-Every verification above was therefore done by mounting the new binary into a
-guest via `-V` and running it as PID 1 inside a nested namespace. That exercises
-the real code paths, but it is not the same as the agent booting as the guest's
-own PID 1.
+**What blocks step 5: a real regression, now reproduced.**
 
-Specifically unverified until then: parity for the four routed handlers as
-invoked by the real `mvm exec` host path, volume behaviour after an inner-init
-respawn on both backends, `exec -u`, stdin piping, PTY resize, and the
-stop/pause/snapshot lifecycle with a container running.
+The rootfs tooling block is gone — `findOCIRuntime` builds with Apple
+`container` in ~40s. With a real rootfs, the agent runs as the guest's actual
+PID 1 and the parity gate immediately caught a bug the earlier harness could
+not.
+
+With `MVM_CONTAINER_EXEC=1` baked into `mvm-init`, the agent becomes
+unresponsive: `mvm exec` fails with `read response: read length: EOF`, first
+intermittently and then persistently. `ps` from a surviving exec showed
+`kthreadd` and `mvm-agent` as PID 1 — the *root* namespace — so exec was not
+running in the container despite routing being enabled. The handoff was failing
+and the local fallback running, and something on that path degrades the agent.
+
+**Primary suspect: vsock.** Every step-3 verification ran over **TCP** (the
+harness used `MVM_AGENT_PORT`), where `SendConn`/`RecvConn` work — proven by the
+namespace inodes. Production `mvm exec` uses **vsock**, and the agent's vsock
+listener is a custom implementation (`listenVsock`), not a `net.TCPConn`. Two
+things in the transport assume otherwise:
+
+- `SendConn` requires the connection to implement `syscall.Conn` to reach its
+  fd. A custom vsock conn may not.
+- `RecvConn` wraps the received fd with `net.FileConn`, which resolves the
+  socket family. Go's `net` package has no `AF_VSOCK` support, so this is
+  unlikely to produce a usable connection even if the fd transfers cleanly.
+
+If that is right, the fix is to stop routing through `net.Conn` at the boundary
+and pass/rebuild the fd without `net.FileConn` — but this is a hypothesis formed
+from the failure signature, not yet confirmed, and it must be verified before
+being acted on.
+
+**Also still unverified:** parity for the four routed handlers over vsock,
+volume behaviour after an inner-init respawn on both backends, `exec -u`, stdin
+piping, PTY resize, and the stop/pause/snapshot lifecycle with a container
+running.
+
+Routing remains off by default, so none of this affects normal operation. The
+default configuration was re-verified on the rebuilt rootfs: repeated execs
+stable, `/dev/shm` mounted automatically, and detached jobs leaving zero
+zombies.
 
 ## 13. Rollout
 
