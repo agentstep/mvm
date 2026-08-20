@@ -873,7 +873,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 	vm, err := s.store.GetVM(name)
 	if err == nil && (vm.Status == "running" || vm.Status == "paused") {
 		firecracker.RemovePortForwarding(s.executor, vm)
-	firecracker.RemoveEgressPolicy(s.executor, vm)
+		firecracker.RemoveEgressPolicy(s.executor, vm)
 		if vm.Status == "paused" {
 			firecracker.Resume(s.executor, vm)
 		}
