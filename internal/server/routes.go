@@ -240,12 +240,18 @@ func (s *Server) handleStatsVMs(w http.ResponseWriter, r *http.Request) {
 // port forwarding, network policy, volume copy-in, and seccomp from the
 // persisted spec. Returns the volume copy-in error if any; network/policy/
 // seccomp failures are logged but non-fatal (matching the prior inline behavior).
-func (s *Server) postBootSetup(name string, alloc state.NetAllocation, volumes []string, seccomp string) error {
+func (s *Server) postBootSetup(name string, alloc state.NetAllocation, volumes []string, seccomp string, policy state.ParsedNetPolicy) error {
 	if !firecracker.WaitForGuest(s.executor, alloc.GuestIP, 120*time.Second) {
 		log.Printf("VM %s: guest agent not reachable after 120s", name)
 		return fmt.Errorf("guest agent not reachable after 120s")
 	}
-	firecracker.SetupGuestNetworkViaAgent(s.executor, alloc.GuestIP, alloc.TAPIP)
+	// Under an allow: policy the guest must resolve through the egress proxy on
+	// its own gateway; the filter drops DNS to anywhere else.
+	resolverIP := "8.8.8.8"
+	if policy.Mode == state.NetPolicyAllow {
+		resolverIP = alloc.TAPIP
+	}
+	firecracker.SetupGuestNetworkViaAgent(s.executor, alloc.GuestIP, alloc.TAPIP, resolverIP)
 
 	postVM, err := s.store.GetVM(name)
 	if err != nil {
@@ -254,9 +260,6 @@ func (s *Server) postBootSetup(name string, alloc state.NetAllocation, volumes [
 	}
 	if err := firecracker.SetupPortForwarding(s.executor, postVM); err != nil {
 		log.Printf("VM %s: port forwarding setup failed: %v", name, err)
-	}
-	if err := firecracker.ApplyNetworkPolicyViaAgent(s.executor, postVM); err != nil {
-		log.Printf("VM %s: network policy setup failed: %v", name, err)
 	}
 	var volErr error
 	if len(volumes) > 0 {
@@ -327,6 +330,22 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	alloc := state.AllocateNet(netIndex)
 
+	// Install the host-side egress filter BEFORE the microVM boots. The guest
+	// runs as root and can flush any in-guest rule, so enforcement lives here in
+	// Lima; doing it pre-boot also closes the window in which a booting guest
+	// could reach the network before its policy landed.
+	policy, err := state.ParseNetPolicy(req.NetPolicy)
+	if err != nil {
+		s.store.RemoveVM(req.Name)
+		httpError(w, err, http.StatusBadRequest)
+		return
+	}
+	if err := firecracker.InstallEgressPolicy(s.executor, alloc, policy); err != nil {
+		s.store.RemoveVM(req.Name)
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
 	// If a custom image is specified, verify it exists.
 	if req.Image != "" {
 		imagePath := firecracker.CacheDir() + "/" + req.Image + ".ext4"
@@ -382,7 +401,7 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	// It returns the volume copy-in error (if any); network/policy/seccomp
 	// failures are logged but non-fatal, matching prior behavior.
 	postBoot := func() error {
-		return s.postBootSetup(req.Name, alloc, req.Volumes, req.Seccomp)
+		return s.postBootSetup(req.Name, alloc, req.Volumes, req.Seccomp, policy)
 	}
 
 	// When volumes are requested, the client execs into the guest the moment
@@ -460,7 +479,18 @@ func (s *Server) handleStartVM(w http.ResponseWriter, r *http.Request) {
 		volumes = started.Spec.Volumes
 		seccomp = started.Spec.Seccomp
 	}
-	postBoot := func() error { return s.postBootSetup(name, alloc, volumes, seccomp) }
+	// Re-derive the policy from persisted state and fail closed: a stored
+	// policy string that no longer parses must not silently downgrade to open.
+	resumePolicy, perr := state.ParseNetPolicy(started.NetPolicy)
+	if perr != nil {
+		log.Printf("VM %s: unparseable stored policy %q, failing closed to deny: %v", name, started.NetPolicy, perr)
+		resumePolicy = state.ParsedNetPolicy{Mode: state.NetPolicyDeny}
+	}
+	if err := firecracker.InstallEgressPolicy(s.executor, alloc, resumePolicy); err != nil {
+		httpError(w, fmt.Errorf("egress policy: %w", err), http.StatusInternalServerError)
+		return
+	}
+	postBoot := func() error { return s.postBootSetup(name, alloc, volumes, seccomp, resumePolicy) }
 	if len(volumes) > 0 {
 		if err := postBoot(); err != nil {
 			httpError(w, fmt.Errorf("volume setup: %w", err), http.StatusInternalServerError)
@@ -691,6 +721,7 @@ func (s *Server) handleStopVM(w http.ResponseWriter, r *http.Request) {
 
 	// Remove port forwarding before stopping.
 	firecracker.RemovePortForwarding(s.executor, vm)
+	firecracker.RemoveEgressPolicy(s.executor, vm)
 
 	if req.Force {
 		// Force kill — no graceful shutdown attempt.
@@ -842,6 +873,7 @@ func (s *Server) handleSnapshotRestore(w http.ResponseWriter, r *http.Request) {
 	vm, err := s.store.GetVM(name)
 	if err == nil && (vm.Status == "running" || vm.Status == "paused") {
 		firecracker.RemovePortForwarding(s.executor, vm)
+	firecracker.RemoveEgressPolicy(s.executor, vm)
 		if vm.Status == "paused" {
 			firecracker.Resume(s.executor, vm)
 		}

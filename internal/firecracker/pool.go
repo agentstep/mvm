@@ -202,7 +202,7 @@ func coldBootAndSnapshot(ex Executor, i int) error {
 	if !WaitForGuest(ex, alloc.GuestIP, 90*time.Second) {
 		return fmt.Errorf("agent not ready")
 	}
-	SetupGuestNetworkViaAgent(ex, alloc.GuestIP, alloc.TAPIP)
+	SetupGuestNetworkViaAgent(ex, alloc.GuestIP, alloc.TAPIP, "8.8.8.8")
 
 	// Pre-warm Claude CLI via agent — loads Node.js + all modules into VM memory
 	fmt.Println("  Pre-warming Claude CLI (loading Node.js modules into memory)...")

@@ -151,6 +151,25 @@ func runDoctor(limaClient *lima.Client, store *state.Store) error {
 		}
 	}
 
+	// 13. Egress enforcement prerequisites. A missing ipset silently degrades
+	// allow:<domains> to a total block, so surface it rather than letting a VM
+	// start with a filter that can never match.
+	if backend == "firecracker" {
+		if _, err := limaClient.Shell("command -v ipset >/dev/null && sudo ipset list >/dev/null"); err != nil {
+			fmt.Println("  ✗ ipset unavailable in the Lima VM — allow:<domains> policies will block all traffic")
+			fmt.Println("    fix: mvm init --backend firecracker (re-runs the host package install)")
+			issues++
+		} else {
+			fmt.Println("  ✓ ipset available (allow:<domains> egress policies)")
+		}
+	}
+
+	if backend == "applevz" {
+		fmt.Println("  ! applevz: --net-policy is enforced inside the guest, so a root process")
+		fmt.Println("    in the sandbox can remove it. Use --backend firecracker where the")
+		fmt.Println("    policy is a security boundary rather than a guardrail.")
+	}
+
 	fmt.Println()
 	if issues == 0 {
 		fmt.Println("All checks passed.")

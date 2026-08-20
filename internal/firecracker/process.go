@@ -98,10 +98,14 @@ func WaitForGuest(ex Executor, guestIP string, timeout time.Duration) bool {
 }
 
 // SetupGuestNetworkViaAgent configures networking via the agent.
-func SetupGuestNetworkViaAgent(ex Executor, guestIP, gatewayIP string) error {
+// resolverIP is the VM's own gateway under an allow: policy (where the egress
+// DNS proxy listens) and a public resolver otherwise. The allow: filter drops
+// DNS to anywhere but the gateway, so pointing the guest elsewhere would leave
+// it unable to resolve anything at all.
+func SetupGuestNetworkViaAgent(ex Executor, guestIP, gatewayIP, resolverIP string) error {
 	return agentExec(ex, guestIP, fmt.Sprintf(
-		"ip route add default via %s dev eth0 2>/dev/null; echo 'nameserver 8.8.8.8' > /etc/resolv.conf",
-		gatewayIP))
+		"ip route add default via %s dev eth0 2>/dev/null; echo 'nameserver %s' > /etc/resolv.conf",
+		gatewayIP, resolverIP))
 }
 
 // StopViaAgent tries graceful shutdown via agent, falls back to kill.
@@ -161,32 +165,6 @@ echo "Cleaned up"`, vm.PID, vm.SocketPath, RunDir(), vm.Name, vm.TAPDevice, VMDi
 	return err
 }
 
-// ApplyNetworkPolicyViaAgent sets iptables rules via the agent.
-func ApplyNetworkPolicyViaAgent(ex Executor, vm *state.VM) error {
-	if vm.NetPolicy == "" || vm.NetPolicy == "open" {
-		return nil
-	}
-
-	var cmds string
-	if vm.NetPolicy == "deny" {
-		cmds = "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; iptables -A OUTPUT -p udp --dport 53 -j ACCEPT; iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT; iptables -A OUTPUT -o lo -j ACCEPT; iptables -A OUTPUT -j DROP"
-	} else if strings.HasPrefix(vm.NetPolicy, "allow:") {
-		domains := strings.Split(strings.TrimPrefix(vm.NetPolicy, "allow:"), ",")
-		cmds = "iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT; iptables -A OUTPUT -p udp --dport 53 -j ACCEPT; iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT; iptables -A OUTPUT -o lo -j ACCEPT"
-		for _, domain := range domains {
-			domain = strings.TrimSpace(domain)
-			if domain != "" {
-				cmds += fmt.Sprintf("; for ip in $(getent hosts %s 2>/dev/null | awk '{print $1}'); do iptables -A OUTPUT -d $ip -j ACCEPT; done", domain)
-			}
-		}
-		cmds += "; iptables -A OUTPUT -j DROP"
-	} else {
-		return fmt.Errorf("unknown network policy: %s", vm.NetPolicy)
-	}
-
-	return agentExec(ex, vm.GuestIP, cmds)
-}
-
 // ApplySeccompViaAgent applies security profiles via the agent.
 func ApplySeccompViaAgent(ex Executor, vm *state.VM, profile string) error {
 	if profile == "" {
@@ -206,8 +184,8 @@ func ApplySeccompViaAgent(ex Executor, vm *state.VM, profile string) error {
 // DEPRECATED: this is the macOS-side fallback used when the in-Lima daemon
 // is unavailable. The daemon path now uses internal/agentclient with the
 // Firecracker vsock UDS bridge (see internal/server/routes.go). The remaining
-// callers here (SetupGuestNetworkViaAgent, StopViaAgent, ApplyNetworkPolicyViaAgent,
-// ApplySeccompViaAgent) will be migrated to agentclient in PR #2 once we add
+// callers here (SetupGuestNetworkViaAgent, StopViaAgent, ApplySeccompViaAgent)
+// will be migrated to agentclient in PR #2 once we add
 // a Lima-aware dialer that forwards the UDS through the daemon socket.
 func AgentExec(ex Executor, guestIP, command string) error {
 	return agentExec(ex, guestIP, command)

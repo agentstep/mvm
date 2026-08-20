@@ -178,6 +178,15 @@ func runInitFirecracker(limaClient *lima.Client, store *state.Store, cpus int, m
 	fmt.Println("  ✓ SSH keys ready")
 
 	fmt.Println("Configuring networking...")
+	// ipset backs allow: egress policies and conntrack provides the
+	// ESTABLISHED,RELATED match; without them a policy silently degrades to a
+	// total block. iptables is already needed for NAT.
+	installPkgs := fmt.Sprintf(
+		"sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends %s >/dev/null",
+		strings.Join(state.EgressHostPackages(), " "))
+	if _, err := limaClient.ShellScript(installPkgs); err != nil {
+		return fmt.Errorf("install egress host packages: %w", err)
+	}
 	if _, err := limaClient.ShellScript(state.SetupNATScript()); err != nil {
 		return fmt.Errorf("setup NAT: %w", err)
 	}

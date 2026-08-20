@@ -134,7 +134,7 @@ func runInstall(limaClient *lima.Client, store *state.Store, name, command strin
 		})
 
 		if firecracker.WaitForGuest(limaClient, vm.GuestIP, 60*time.Second) {
-			firecracker.SetupGuestNetworkViaAgent(limaClient, vm.GuestIP, vm.TAPIP)
+			firecracker.SetupGuestNetworkViaAgent(limaClient, vm.GuestIP, vm.TAPIP, "8.8.8.8")
 		}
 	}
 
