@@ -144,6 +144,14 @@ func runImageInspect(ctx context.Context, name string) error {
 		// documented pre-digest shape rather than a hard failure.
 		imgs, listErr := sc.ImageList(ctx)
 		if listErr != nil {
+			// Neither route exists, so the daemon predates images entirely.
+			// Say that rather than surfacing a bare "404 Not Found", which
+			// gives the user nothing to act on.
+			if server.IsRouteMissing(listErr) {
+				return fmt.Errorf("this daemon is too old to support images " +
+					"(neither the inspect nor the list endpoint exists). " +
+					"Upgrade it with: mvm system install")
+			}
 			return err
 		}
 		found, findErr := findImage(imgs, name)
