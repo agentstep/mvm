@@ -365,25 +365,37 @@ func applevzSpec(ports []state.PortMap, netPolicy string, cpus, memoryMB int, vo
 	return spec
 }
 
-// virtiofsMountCommands returns, in order, the shell command that mounts
-// each already-validated "hostPath:guestPath" volume inside the guest via
-// virtio-fs. Tags are assigned "vol0", "vol1", ... by position — this must
-// match vz/Sources/mvm-vz/Commands/Create.swift's share-parsing loop exactly,
-// since the tag is never threaded back through the mvm-vz status line; both
-// sides derive it independently from the same ordering.
-func virtiofsMountCommands(volumes []string) ([]string, error) {
-	var cmds []string
+// virtiofsMount describes one volume to mount inside the guest.
+type virtiofsMount struct {
+	Tag       string // virtio-fs tag: "vol0", "vol1", ...
+	GuestPath string
+}
+
+// virtiofsMounts returns, in order, the mounts for each already-validated
+// "hostPath:guestPath" volume. Tags are assigned "vol0", "vol1", ... by
+// position — this must match vz/Sources/mvm-vz/Commands/Create.swift's
+// share-parsing loop exactly, since the tag is never threaded back through the
+// mvm-vz status line; both sides derive it independently from the same ordering.
+//
+// These are structured values rather than shell strings because they are sent
+// as mount requests the agent performs in the root mount namespace. Previously
+// this built `mkdir -p X && mount -t virtiofs tagN X` and Exec'd it, which
+// worked but left the agent with no record of the mount — so nothing could
+// re-establish it, and once user code runs in an inner namespace such a mount
+// would land only there and vanish on respawn.
+func virtiofsMounts(volumes []string) ([]virtiofsMount, error) {
+	var mounts []virtiofsMount
 	for i, v := range volumes {
 		parts := strings.SplitN(v, ":", 2)
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("invalid volume format %q (expected hostPath:guestPath)", v)
 		}
-		guestPath := parts[1]
-		tag := fmt.Sprintf("vol%d", i)
-		cmds = append(cmds, fmt.Sprintf("mkdir -p %s && mount -t virtiofs %s %s",
-			shellQuote(guestPath), tag, shellQuote(guestPath)))
+		mounts = append(mounts, virtiofsMount{
+			Tag:       fmt.Sprintf("vol%d", i),
+			GuestPath: parts[1],
+		})
 	}
-	return cmds, nil
+	return mounts, nil
 }
 
 // resolveApplevzKernel picks the kernel to boot the applevz backend with.
@@ -673,13 +685,17 @@ func runStartAppleVZ(store *state.Store, name string, detach bool, ports []state
 
 		// Mount each -V share via virtio-fs. Depends on the tags assigned
 		// in vz/Sources/mvm-vz/Commands/Create.swift's share-parsing loop
-		// matching this exact order — see virtiofsMountCommands's comment.
-		if mountCmds, err := virtiofsMountCommands(volumes); err != nil {
+		// matching this exact order — see virtiofsMounts's comment.
+		//
+		// Sent as mount requests, not Exec'd shell: the agent performs these in
+		// the root mount namespace, which is rshared, so they propagate into the
+		// inner container user code runs in and survive a container respawn.
+		if mounts, err := virtiofsMounts(volumes); err != nil {
 			logf("  Warning: invalid volume spec: %v\n", err)
 		} else {
-			for _, mc := range mountCmds {
-				if _, err := agent.Exec(ctx, mc, ""); err != nil {
-					logf("  Warning: mount volume: %v\n", err)
+			for _, m := range mounts {
+				if err := agent.Mount(ctx, m.Tag, m.GuestPath, "virtiofs", "", true); err != nil {
+					logf("  Warning: mount volume %s at %s: %v\n", m.Tag, m.GuestPath, err)
 				}
 			}
 		}

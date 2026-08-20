@@ -19,6 +19,7 @@ const (
 	ReqSetupNet   = "setup_network"
 	ReqTCPForward = "tcp_forward"
 	ReqNetInfo    = "net_info"
+	ReqMount      = "mount"
 )
 
 // Response types
@@ -40,6 +41,26 @@ type Request struct {
 	File    *FileRequest    `json:"file,omitempty"`
 	Network *NetworkRequest `json:"network,omitempty"`
 	Forward *ForwardRequest `json:"forward,omitempty"`
+	Mount   *MountRequest   `json:"mount,omitempty"`
+}
+
+// MountRequest asks the agent to mount a filesystem in the guest.
+//
+// This replaces mounting via `exec "mkdir -p X && mount -t virtiofs tagN X"`.
+// That worked, but the mount was opaque shell text the agent had no record of,
+// so nothing could re-establish it — and once exec runs inside the inner
+// container, such a mount would land only in that namespace and silently
+// disappear when the container respawned, leaving an empty directory where a
+// volume used to be.
+//
+// Handled in the ROOT namespace, which (being rshared) propagates the mount
+// into the current inner container and any future one.
+type MountRequest struct {
+	Source string `json:"source"`          // e.g. a virtiofs tag
+	Target string `json:"target"`          // absolute path in the guest
+	FSType string `json:"fstype"`          // e.g. "virtiofs"
+	Data   string `json:"data,omitempty"`  // fs-specific options
+	MkDir  bool   `json:"mkdir,omitempty"` // create Target first
 }
 
 // ForwardRequest asks the agent to connect to a TCP port on the guest's own

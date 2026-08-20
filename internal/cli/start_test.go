@@ -38,10 +38,10 @@ func TestParsePorts(t *testing.T) {
 		{[]string{"127.0.0.1:8080:80"}, 1, false, "127.0.0.1", 8080, 80, "tcp"},
 		{[]string{"0.0.0.0:8080:80/udp"}, 1, false, "0.0.0.0", 8080, 80, "udp"},
 		{[]string{"192.168.1.5:53:53"}, 1, false, "192.168.1.5", 53, 53, "tcp"},
-		{[]string{":8080:80"}, 0, true, "", 0, 0, ""},         // empty host-ip
-		{[]string{"1:2:3:4"}, 0, true, "", 0, 0, ""},          // too many segments
-		{[]string{"127.0.0.1:abc:80"}, 0, true, "", 0, 0, ""}, // bad host port with host-ip present
-		{[]string{"$(id):8080:80"}, 0, true, "", 0, 0, ""},    // injection host-ip (would hit sudo iptables)
+		{[]string{":8080:80"}, 0, true, "", 0, 0, ""},          // empty host-ip
+		{[]string{"1:2:3:4"}, 0, true, "", 0, 0, ""},           // too many segments
+		{[]string{"127.0.0.1:abc:80"}, 0, true, "", 0, 0, ""},  // bad host port with host-ip present
+		{[]string{"$(id):8080:80"}, 0, true, "", 0, 0, ""},     // injection host-ip (would hit sudo iptables)
 		{[]string{"not-an-ip:8080:80"}, 0, true, "", 0, 0, ""}, // non-IP host address
 		{[]string{"8080:80/tcp;rm"}, 0, true, "", 0, 0, ""},    // injection proto
 	}
@@ -159,37 +159,53 @@ func TestParseVolumes(t *testing.T) {
 	}
 }
 
-// === virtiofsMountCommands ===
+// === virtiofsMounts ===
 
-func TestVirtiofsMountCommands(t *testing.T) {
-	cmds, err := virtiofsMountCommands([]string{"/host/a:/data", "/host/b:/app/lib"})
+func TestVirtiofsMounts(t *testing.T) {
+	mounts, err := virtiofsMounts([]string{"/host/a:/data", "/host/b:/app/lib"})
 	if err != nil {
-		t.Fatalf("virtiofsMountCommands: %v", err)
+		t.Fatalf("virtiofsMounts: %v", err)
 	}
-	if len(cmds) != 2 {
-		t.Fatalf("got %d commands, want 2", len(cmds))
+	if len(mounts) != 2 {
+		t.Fatalf("got %d mounts, want 2", len(mounts))
 	}
 	// Tag order (vol0, vol1, ...) must match Create.swift's share-parsing
-	// loop exactly — see the comment there.
-	if !strings.Contains(cmds[0], "vol0") || !strings.Contains(cmds[0], "/data") {
-		t.Errorf("cmds[0] = %q, want references to vol0 and /data", cmds[0])
+	// loop exactly — see the comment there. The tag is never threaded back
+	// through the mvm-vz status line, so both sides derive it independently
+	// from position and a mismatch would mount the wrong host directory.
+	if mounts[0].Tag != "vol0" || mounts[0].GuestPath != "/data" {
+		t.Errorf("mounts[0] = %+v, want {vol0 /data}", mounts[0])
 	}
-	if !strings.Contains(cmds[1], "vol1") || !strings.Contains(cmds[1], "/app/lib") {
-		t.Errorf("cmds[1] = %q, want references to vol1 and /app/lib", cmds[1])
-	}
-}
-
-func TestVirtiofsMountCommandsEmpty(t *testing.T) {
-	cmds, err := virtiofsMountCommands(nil)
-	if err != nil || len(cmds) != 0 {
-		t.Errorf("virtiofsMountCommands(nil) = %v, %v; want no commands, no error", cmds, err)
+	if mounts[1].Tag != "vol1" || mounts[1].GuestPath != "/app/lib" {
+		t.Errorf("mounts[1] = %+v, want {vol1 /app/lib}", mounts[1])
 	}
 }
 
-func TestVirtiofsMountCommandsInvalidFormat(t *testing.T) {
-	_, err := virtiofsMountCommands([]string{"no-colon-here"})
+func TestVirtiofsMountsEmpty(t *testing.T) {
+	mounts, err := virtiofsMounts(nil)
+	if err != nil || len(mounts) != 0 {
+		t.Errorf("virtiofsMounts(nil) = %v, %v; want no mounts, no error", mounts, err)
+	}
+}
+
+func TestVirtiofsMountsInvalidFormat(t *testing.T) {
+	_, err := virtiofsMounts([]string{"no-colon-here"})
 	if err == nil {
 		t.Error("want error for a volume missing the guest-path colon")
+	}
+}
+
+// TestVirtiofsMountsGuestPathIsNotShellQuoted pins the change in kind: these
+// are structured values sent as mount requests, not fragments of a shell
+// command. A quoted path would be taken literally by the kernel and the mount
+// would land at a directory whose name contains quote characters.
+func TestVirtiofsMountsGuestPathIsNotShellQuoted(t *testing.T) {
+	mounts, err := virtiofsMounts([]string{"/host/a:/data"})
+	if err != nil {
+		t.Fatalf("virtiofsMounts: %v", err)
+	}
+	if strings.ContainsAny(mounts[0].GuestPath, "'\"") {
+		t.Errorf("GuestPath = %q, must be the raw path with no shell quoting", mounts[0].GuestPath)
 	}
 }
 

@@ -430,6 +430,12 @@ ln -sf /dev/pts/ptmx /dev/ptmx
 # guest RAM through tmpfs.
 mkdir -p /dev/shm
 mount -t tmpfs -o rw,nosuid,nodev,size=50%%,mode=1777 tmpfs /dev/shm 2>/dev/null
+# Make the root mount tree shared so mounts performed here later (volumes, in
+# particular) propagate into the agent's inner container, which mounts itself
+# rslave. Without this the propagation type is private in both directions, and
+# a volume mounted after the container started would be invisible inside it —
+# and would silently vanish from a respawned container.
+mount --make-rshared / 2>/dev/null
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 exec /opt/mvm-agent
 MVMINIT

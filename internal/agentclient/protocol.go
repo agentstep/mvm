@@ -25,6 +25,7 @@ const (
 	reqPoweroff   = "poweroff"
 	reqTCPForward = "tcp_forward"
 	reqNetInfo    = "net_info"
+	reqMount      = "mount"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
@@ -46,6 +47,16 @@ type request struct {
 	Exec    *execPayload    `json:"exec,omitempty"`
 	Pty     *ptyPayload     `json:"pty,omitempty"`
 	Forward *forwardPayload `json:"forward,omitempty"`
+	Mount   *mountPayload   `json:"mount,omitempty"`
+}
+
+// mountPayload matches agent/internal/protocol.MountRequest.
+type mountPayload struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	FSType string `json:"fstype"`
+	Data   string `json:"data,omitempty"`
+	MkDir  bool   `json:"mkdir,omitempty"`
 }
 
 // forwardPayload matches agent/internal/protocol.ForwardRequest.

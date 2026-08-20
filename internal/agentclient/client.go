@@ -90,6 +90,39 @@ func (c *Client) NetInfo(ctx context.Context) (*NetInfo, error) {
 	return &info, nil
 }
 
+// Mount mounts a filesystem inside the guest.
+//
+// Use this rather than Exec'ing a `mount` shell string. The agent performs it
+// in the root mount namespace, which is rshared, so the mount propagates into
+// the inner container that user code runs in — and into any container spawned
+// after a respawn. A mount performed via Exec would land inside whichever
+// namespace ran the command and would silently disappear when that namespace
+// was replaced, leaving an empty directory where a volume used to be.
+func (c *Client) Mount(ctx context.Context, source, target, fstype, data string, mkdir bool) error {
+	req := &request{
+		Type: reqMount,
+		ID:   newID(),
+		Mount: &mountPayload{
+			Source: source,
+			Target: target,
+			FSType: fstype,
+			Data:   data,
+			MkDir:  mkdir,
+		},
+	}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return err
+	}
+	if resp.Type == respError {
+		return fmt.Errorf("agent error: %s", resp.Error)
+	}
+	if resp.Type != respOK {
+		return fmt.Errorf("unexpected mount response type: %q", resp.Type)
+	}
+	return nil
+}
+
 // Exec runs a shell command on the guest and returns its combined output
 // and exit code. stdin may be empty.
 //

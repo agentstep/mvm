@@ -206,6 +206,14 @@ func handleConnection(conn net.Conn) {
 			resp = handler.HandleNetInfo()
 			resp.ID = req.ID
 
+		// Handled in the root namespace on purpose: the root mount tree is
+		// rshared, so this propagates into the inner container and into any
+		// container spawned later. Mounting inside the container instead would
+		// confine it there and lose it on respawn.
+		case protocol.ReqMount:
+			resp = handler.HandleMount(req.Mount)
+			resp.ID = req.ID
+
 		case protocol.ReqPoweroff:
 			resp = handler.HandlePoweroff()
 			resp.ID = req.ID
