@@ -307,7 +307,36 @@ which is shared-superblock file writes. Host-side stats read
 `mount -o remount,ro /` (`security.go:24`) is a superblock-level remount and
 still applies globally from inside — parity holds, but the suite asserts it.
 
-## 12. Rollout
+## 12. Implementation status (2026-08-20)
+
+| Step | State | Evidence |
+|---|---|---|
+| 0. Prerequisite defects | **done** | Reaper verified live: 5 zombies without it, 0 with it, as real PID 1 |
+| 1. Dark launch | **done** | Namespace inodes differ for pid/mnt/ipc/uts, shared for net; kill -9 respawned |
+| 2. Mount propagation | **done** | Outer tmpfs mounted *after* container start is visible inside, and survives respawn |
+| 3. fd passing + routing | **done** | Routed exec reports the inner pid/mnt namespaces, `pid=10` |
+| 4. Route stream/file/pty | **code complete** | PTY verified: inner ns, `tty` → `/dev/pts/0`, exit code 7 propagated |
+| 5. Flip the default | **blocked** | See below |
+
+Routing is gated behind `MVM_CONTAINER_EXEC`. Unset — the default — the
+container is created and supervised but nothing is routed to it, so behaviour is
+byte-identical to before.
+
+**What blocks step 5.** Flipping the default requires the cross-backend parity
+suite in §11 to pass, and that requires the new agent to *be* the guest's agent
+— which means rebuilding `base.ext4`. The rootfs build path
+(`buildRootfsViaDocker`) needs Docker, which is not installed on this machine.
+Every verification above was therefore done by mounting the new binary into a
+guest via `-V` and running it as PID 1 inside a nested namespace. That exercises
+the real code paths, but it is not the same as the agent booting as the guest's
+own PID 1.
+
+Specifically unverified until then: parity for the four routed handlers as
+invoked by the real `mvm exec` host path, volume behaviour after an inner-init
+respawn on both backends, `exec -u`, stdin piping, PTY resize, and the
+stop/pause/snapshot lifecycle with a container running.
+
+## 13. Rollout
 
 Not a big-bang refactor. Each step is shippable and parity-diffable.
 
