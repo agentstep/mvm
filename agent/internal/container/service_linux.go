@@ -69,6 +69,7 @@ type supervised struct {
 	restarts int
 	lastExit int
 	stop     chan struct{}
+	logs     *logBuffer
 }
 
 // NewSupervisor returns a supervisor driving the given container.
@@ -84,7 +85,7 @@ func (s *Supervisor) Add(svc Service) error {
 	}
 	s.Remove(svc.Name)
 
-	rec := &supervised{svc: svc, stop: make(chan struct{})}
+	rec := &supervised{svc: svc, stop: make(chan struct{}), logs: newLogBuffer()}
 	s.mu.Lock()
 	s.services[svc.Name] = rec
 	s.mu.Unlock()
@@ -120,6 +121,23 @@ func (s *Supervisor) List() []ServiceState {
 	return out
 }
 
+// Logs returns the most recent output of one service. n <= 0 means everything
+// retained.
+//
+// Logs survive a restart of the service and a bounce of the container: the
+// buffer belongs to the supervisor in the root namespace, not to the process,
+// so the output explaining why something died is still there afterwards. That
+// is the whole reason this lives out here.
+func (s *Supervisor) Logs(name string, n int) ([]LogLine, error) {
+	s.mu.Lock()
+	rec, ok := s.services[name]
+	s.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no service named %q", name)
+	}
+	return rec.logs.Tail(n), nil
+}
+
 // Restart forces one service to restart now.
 func (s *Supervisor) Restart(name string) error {
 	s.mu.Lock()
@@ -128,7 +146,19 @@ func (s *Supervisor) Restart(name string) error {
 	if !ok {
 		return fmt.Errorf("no service named %q", name)
 	}
-	return s.Add(rec.svc) // Add removes then re-adds, which is a restart
+	// Add() replaces the record, so carry the log buffer over — the output
+	// explaining why a service needed restarting is exactly what someone will
+	// look for immediately afterwards.
+	prev := rec.logs
+	if err := s.Add(rec.svc); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if fresh, ok := s.services[name]; ok {
+		fresh.logs = prev
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // Reconcile brings the container in line with a declared service list.
@@ -264,8 +294,10 @@ func (s *Supervisor) runOnce(rec *supervised) (int, error) {
 	rec.running = true
 	s.mu.Unlock()
 
-	// Drain frames until the exit frame. Output is discarded for now — per
-	// service log capture is its own piece of work.
+	// Drain frames until the exit frame, capturing output as it arrives. The
+	// buffer is bounded, so a service that logs in a loop cannot grow without
+	// limit — which matters because the rootfs is the VM's durable state and
+	// filling it would break far more than logging.
 	for {
 		var resp protocol.Response
 		if err := protocol.ReadFrame(ours, &resp); err != nil {
@@ -273,7 +305,12 @@ func (s *Supervisor) runOnce(rec *supervised) (int, error) {
 			// exit so the restart policy applies.
 			return -1, nil
 		}
-		if resp.Type == protocol.RespExit {
+		switch resp.Type {
+		case protocol.RespStdout:
+			rec.logs.Append("stdout", resp.Data)
+		case protocol.RespStderr:
+			rec.logs.Append("stderr", resp.Data)
+		case protocol.RespExit:
 			return resp.ExitCode, nil
 		}
 	}

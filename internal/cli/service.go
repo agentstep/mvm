@@ -29,6 +29,7 @@ the VM, so it is also replayed after stop/start.`,
 		newServiceRmCmd(store),
 		newServiceLsCmd(store),
 		newServiceRestartCmd(store),
+		newServiceLogsCmd(store),
 	)
 	return cmd
 }
@@ -207,4 +208,44 @@ func newServiceLsCmd(store *state.Store) *cobra.Command {
 			return w.Flush()
 		},
 	}
+}
+
+func newServiceLogsCmd(store *state.Store) *cobra.Command {
+	var tail int
+	cmd := &cobra.Command{
+		Use:   "logs <vm> <name>",
+		Short: "Show recent output from a service",
+		Long: `Print what a service has written to stdout and stderr.
+
+Output is retained outside the container, so it survives a restart of the
+service and a ` + "`mvm bounce`" + ` — the output explaining why something died is still
+there afterwards. Retention is capped, so only recent output is kept.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			agent, err := serviceAgent(store, args[0])
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			lines, err := agent.ServiceLogs(ctx, args[1], tail)
+			if err != nil {
+				return err
+			}
+			if len(lines) == 0 {
+				fmt.Printf("No output retained for '%s'.\n", args[1])
+				return nil
+			}
+			for _, l := range lines {
+				marker := " "
+				if l.Stream == "stderr" {
+					marker = "!"
+				}
+				fmt.Printf("%s %s %s\n", l.At.Format("15:04:05"), marker, l.Text)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().IntVarP(&tail, "tail", "n", 100, "number of lines to show (0 for all retained)")
+	return cmd
 }

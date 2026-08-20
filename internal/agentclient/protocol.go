@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 )
 
 // Wire-format request types — must match agent/internal/protocol.
@@ -31,6 +32,7 @@ const (
 	reqServiceRm  = "service_rm"
 	reqServiceLs  = "service_ls"
 	reqServiceRst = "service_restart"
+	reqServiceLog = "service_logs"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
@@ -63,6 +65,7 @@ type servicePayload struct {
 	WorkDir   string            `json:"workdir,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
 	Restart   string            `json:"restart,omitempty"`
+	Tail      int               `json:"tail,omitempty"`
 	Reconcile bool              `json:"reconcile,omitempty"`
 	Services  []servicePayload  `json:"services,omitempty"`
 }
@@ -75,6 +78,13 @@ type ServiceState struct {
 	Running  bool   `json:"running"`
 	Restarts int    `json:"restarts"`
 	LastExit int    `json:"last_exit"`
+}
+
+// LogLine is one captured line of service output.
+type LogLine struct {
+	At     time.Time `json:"at"`
+	Stream string    `json:"stream"`
+	Text   string    `json:"text"`
 }
 
 // mountPayload matches agent/internal/protocol.MountRequest.

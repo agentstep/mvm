@@ -278,7 +278,7 @@ func serveConn(conn net.Conn, firstFrame []byte) {
 		// Service verbs are outer-only: the supervisor must outlive the
 		// namespace its processes run in.
 		case protocol.ReqServiceAdd, protocol.ReqServiceRm,
-			protocol.ReqServiceLs, protocol.ReqServiceRst:
+			protocol.ReqServiceLs, protocol.ReqServiceRst, protocol.ReqServiceLog:
 			resp = handleService(req)
 
 		case protocol.ReqMount:
@@ -348,6 +348,17 @@ func handleService(req protocol.Request) *protocol.Response {
 	case protocol.ReqServiceRm:
 		containerSup.Remove(req.Service.Name)
 		return &protocol.Response{Type: protocol.RespOK, ID: req.ID}
+
+	case protocol.ReqServiceLog:
+		lines, err := containerSup.Logs(req.Service.Name, req.Service.Tail)
+		if err != nil {
+			return fail(err.Error())
+		}
+		data, err := json.Marshal(lines)
+		if err != nil {
+			return fail(err.Error())
+		}
+		return &protocol.Response{Type: protocol.RespOK, ID: req.ID, Data: data}
 
 	case protocol.ReqServiceRst:
 		if err := containerSup.Restart(req.Service.Name); err != nil {

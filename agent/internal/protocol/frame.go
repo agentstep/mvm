@@ -25,6 +25,7 @@ const (
 	ReqServiceRm  = "service_rm"
 	ReqServiceLs  = "service_ls"
 	ReqServiceRst = "service_restart"
+	ReqServiceLog = "service_logs"
 )
 
 // Response types
@@ -80,6 +81,7 @@ type ServiceRequest struct {
 	WorkDir string            `json:"workdir,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 	Restart string            `json:"restart,omitempty"`
+	Tail    int               `json:"tail,omitempty"` // logs: line count, 0 = all
 	// Reconcile, when set with Services, replaces the whole declared set.
 	Reconcile bool             `json:"reconcile,omitempty"`
 	Services  []ServiceRequest `json:"services,omitempty"`

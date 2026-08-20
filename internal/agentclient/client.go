@@ -177,6 +177,30 @@ func (c *Client) ServiceReconcile(ctx context.Context, svcs []ServiceState) erro
 	return c.serviceCall(ctx, reqServiceAdd, payload)
 }
 
+// ServiceLogs returns the most recent output of one service. tail <= 0 means
+// everything retained.
+//
+// The buffer belongs to the supervisor outside the container, so logs survive a
+// restart of the service and a bounce — the output explaining why something
+// died is still there afterwards.
+func (c *Client) ServiceLogs(ctx context.Context, name string, tail int) ([]LogLine, error) {
+	req := &request{Type: reqServiceLog, ID: newID(), Service: &servicePayload{Name: name, Tail: tail}}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Type == respError {
+		return nil, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	var out []LogLine
+	if len(resp.Data) > 0 {
+		if err := json.Unmarshal(resp.Data, &out); err != nil {
+			return nil, fmt.Errorf("decode service logs: %w", err)
+		}
+	}
+	return out, nil
+}
+
 // ServiceList reports every supervised service.
 func (c *Client) ServiceList(ctx context.Context) ([]ServiceState, error) {
 	req := &request{Type: reqServiceLs, ID: newID()}
