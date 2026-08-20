@@ -113,12 +113,22 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on %s: %w", cfg.SocketPath, err)
 	}
-	// 0600, not 0666: the daemon shells out as root, so a world-writable
-	// control socket lets any local user take over the host. The unix handler
-	// has no other auth — these socket permissions ARE the auth. The macOS
-	// Lima socket-forwarder and the CLI run as the same user, so owner-only
-	// access is sufficient there.
-	os.Chmod(cfg.SocketPath, 0o600)
+	// Never world-accessible: the daemon shells out as root, so a writable
+	// control socket hands the host to whoever can open it. The unix handler
+	// has no other auth — these permissions ARE the auth.
+	//
+	// 0600 alone is not sufficient, though, and the old comment here was wrong
+	// about why. It assumed the socket-forwarder and the daemon run as the same
+	// user. Under systemd the daemon runs as root while Lima's SSH forwarder
+	// runs as the unprivileged Lima user, so a root-owned 0600 socket is
+	// unreachable and `mvm` on macOS reports "daemon not running" against a
+	// daemon that is perfectly healthy.
+	//
+	// So: 0660 owned by the console user, letting exactly that one account
+	// through and nobody else.
+	if err := secureSocket(cfg.SocketPath); err != nil {
+		log.Printf("warning: %v", err)
+	}
 
 	s := &Server{
 		store:        cfg.Store,

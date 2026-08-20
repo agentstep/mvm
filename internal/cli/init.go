@@ -210,28 +210,22 @@ func runInitFirecracker(limaClient *lima.Client, store *state.Store, cpus int, m
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			fmt.Printf("  Warning: daemon build failed: %s\n", out)
 		} else {
-			exec.Command("limactl", "copy", daemonLinux, "mvm:/opt/mvm/mvm-daemon").Run()
-			limaClient.Shell("sudo chmod +x /opt/mvm/mvm-daemon")
-			// Install systemd service
-			limaClient.Shell(`cat << UNIT | sudo tee /etc/systemd/system/mvm-daemon.service >/dev/null
-[Unit]
-Description=MVM Daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/opt/mvm/mvm-daemon system start
-Restart=always
-RestartSec=2
-Environment=HOME=$HOME
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-sudo systemctl daemon-reload
-sudo systemctl enable mvm-daemon.service >/dev/null 2>&1
-sudo systemctl start mvm-daemon.service`)
+			// Stop first: replacing a running executable fails with ETXTBSY,
+			// and the old daemon keeps serving afterwards so the deploy looks
+			// like it worked.
+			limaClient.Shell("sudo systemctl stop mvm-daemon 2>/dev/null || true")
+			exec.Command("limactl", "copy", daemonLinux, "mvm:"+state.DaemonBinaryPath).Run()
+			limaClient.Shell("sudo chmod +x " + state.DaemonBinaryPath)
+			// Rewritten every deploy: the unit encodes the launch command, and a
+			// stale one crash-loops indistinguishably from a broken binary.
+			home, _ := limaClient.Shell("echo $HOME")
+			home = strings.TrimSpace(home)
+			if home == "" {
+				home = "/home/" + os.Getenv("USER") + ".linux"
+			}
+			if _, err := limaClient.ShellScript(state.InstallDaemonUnitScript(home)); err != nil {
+				fmt.Printf("  Warning: install daemon unit: %v\n", err)
+			}
 			fmt.Println("  ✓ Daemon installed and started")
 		}
 		os.Remove(daemonLinux)
