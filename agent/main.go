@@ -17,6 +17,12 @@ func main() {
 	log.SetPrefix("[mvm-agent] ")
 	log.SetFlags(log.LstdFlags)
 
+	// The agent is PID 1, so every orphaned process in the guest reparents to
+	// it. Until this existed nothing ever called wait4, so those orphans became
+	// permanent zombies — one per detached `mvm exec -d` job, for the life of
+	// the VM. Must start before any connection is served so no exit is missed.
+	go handler.ReapForever()
+
 	// Start TCP listener immediately (legacy host-side control path).
 	tcpLn, tcpErr := net.Listen("tcp", ":5123")
 	if tcpErr != nil {
@@ -29,68 +35,81 @@ func main() {
 	// subnet. vsock (the primary path) has no IP and is unaffected. If the
 	// gateway can't be determined the guest has no routing, so other VMs can't
 	// reach it either — allow in that case to preserve functionality.
+	//
+	// This filter is the ONLY thing enforcing that restriction, so there must be
+	// exactly one accept loop on tcpLn. There used to be two — this one, and the
+	// main loop below via `ln = tcpLn` — racing for each connection, so roughly
+	// half of all TCP connections were handed straight to handleConnection with
+	// no gateway check at all. The main loop now blocks forever instead.
 	gateway := handler.DefaultGatewayIP()
-	go func() {
-		for {
-			conn, err := tcpLn.Accept()
-			if err != nil {
-				continue
-			}
-			if gateway != "" {
-				if ta, ok := conn.RemoteAddr().(*net.TCPAddr); !ok || ta.IP.String() != gateway {
-					conn.Close()
-					continue
-				}
-			}
-			go handleConnection(conn)
-		}
-	}()
+	go acceptTCP(tcpLn, gateway)
 
 	// Try vsock in background — upgrade to vsock when driver is ready.
 	// Poll with backoff: the vsock driver is usually probe-ready within tens
 	// of ms of boot, so start tight (5ms) to bind ASAP, then back off toward
 	// 250ms so a vsock-less guest doesn't busy-spin. Same ~15s overall budget.
-	var ln net.Listener
-	go func() {
-		delay := 5 * time.Millisecond
-		const maxDelay = 250 * time.Millisecond
-		deadline := time.Now().Add(15 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, err := os.Stat("/sys/class/misc/vsock"); err == nil {
-				if vsockLn, err := listenVsock(vsockPort); err == nil {
-					log.Printf("vsock listener ready")
-					for {
-						conn, err := vsockLn.Accept()
-						if err != nil {
-							continue
-						}
-						go handleConnection(conn)
-					}
-				}
-			}
-			time.Sleep(delay)
-			if delay < maxDelay {
-				delay *= 2
-				if delay > maxDelay {
-					delay = maxDelay
-				}
-			}
-		}
-		log.Printf("vsock not available, TCP-only mode")
-	}()
-	ln = tcpLn
+	go acceptVsock()
 
 	log.Printf("listening on port %d", vsockPort)
 	os.WriteFile("/run/mvm-agent.ready", []byte("ready"), 0o644)
 
+	// Both listeners are served by their own goroutine; park here. This used to
+	// be a second accept loop on tcpLn, which is what created the race described
+	// above.
+	select {}
+}
+
+// acceptTCP serves the legacy TCP control path, admitting only connections from
+// the guest's default gateway (the host). See the comment at the call site: this
+// check is the only barrier against another VM on the same host reaching this
+// guest's unauthenticated agent port, so it must not be bypassed.
+//
+// An empty gateway means the guest has no routing, in which case no other VM can
+// reach it either, so connections are admitted to preserve functionality.
+func acceptTCP(ln net.Listener, gateway string) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Printf("accept error: %v", err)
 			continue
+		}
+		if gateway != "" {
+			if ta, ok := conn.RemoteAddr().(*net.TCPAddr); !ok || ta.IP.String() != gateway {
+				conn.Close()
+				continue
+			}
 		}
 		go handleConnection(conn)
 	}
+}
+
+// acceptVsock waits for the vsock driver to appear, then serves the primary
+// control path. vsock carries no IP, so it needs no peer filtering.
+func acceptVsock() {
+	delay := 5 * time.Millisecond
+	const maxDelay = 250 * time.Millisecond
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat("/sys/class/misc/vsock"); err == nil {
+			if vsockLn, err := listenVsock(vsockPort); err == nil {
+				log.Printf("vsock listener ready")
+				for {
+					conn, err := vsockLn.Accept()
+					if err != nil {
+						continue
+					}
+					go handleConnection(conn)
+				}
+			}
+		}
+		time.Sleep(delay)
+		if delay < maxDelay {
+			delay *= 2
+			if delay > maxDelay {
+				delay = maxDelay
+			}
+		}
+	}
+	log.Printf("vsock not available, TCP-only mode")
 }
 
 func handleConnection(conn net.Conn) {

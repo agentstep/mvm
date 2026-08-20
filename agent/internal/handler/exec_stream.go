@@ -61,18 +61,18 @@ func HandleExecStream(w io.Writer, req *protocol.ExecRequest, id string) {
 
 	wg.Wait()
 
-	exitCode := 0
-	if err := cmd.Wait(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
+	// WaitSession, not cmd.Wait(): the reaper may collect this child first, in
+	// which case Wait() returns ECHILD and the real status is in the registry.
+	// This also used to leave exitCode at 0 on any non-ExitError, reporting
+	// success for a command whose status was never collected.
+	exitCode, diagnostic := WaitSession(cmd)
 
 	mu.Lock()
 	protocol.WriteFrame(w, &protocol.Response{
 		Type:     protocol.RespExit,
 		ID:       id,
 		ExitCode: exitCode,
+		Error:    diagnostic,
 	})
 	mu.Unlock()
 }

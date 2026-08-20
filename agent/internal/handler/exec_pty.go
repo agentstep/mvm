@@ -185,13 +185,11 @@ func HandleExecPty(conn io.ReadWriter, req *protocol.ExecPtyRequest, id string) 
 		}
 	}()
 
-	// Wait for the command to finish
-	exitCode := 0
-	if err := cmd.Wait(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		}
-	}
+	// WaitSession, not cmd.Wait(): the reaper may collect this child first, in
+	// which case Wait() returns ECHILD and the real status is in the registry.
+	// This also used to leave exitCode at 0 on any non-ExitError, reporting
+	// success for a command whose status was never collected.
+	exitCode, ptyDiagnostic := WaitSession(cmd)
 
 	// Wait for the PTY reader to drain
 	// Close master to signal EOF to the reader goroutine
@@ -204,6 +202,7 @@ func HandleExecPty(conn io.ReadWriter, req *protocol.ExecPtyRequest, id string) 
 		Type:     protocol.RespExit,
 		ID:       id,
 		ExitCode: exitCode,
+		Error:    ptyDiagnostic,
 	})
 	mu.Unlock()
 	if err != nil {

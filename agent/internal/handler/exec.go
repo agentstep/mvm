@@ -32,17 +32,15 @@ func HandleExec(req *protocol.ExecRequest) *protocol.Response {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return &protocol.Response{
-				Type:  protocol.RespError,
-				Error: err.Error(),
-			}
-		}
+	// Start+WaitSession rather than Run(): with a reaper collecting children,
+	// Run()'s internal Wait() can lose the race and return ECHILD, discarding a
+	// status the registry actually has.
+	if err := cmd.Start(); err != nil {
+		return &protocol.Response{Type: protocol.RespError, Error: err.Error()}
+	}
+	exitCode, diagnostic := WaitSession(cmd)
+	if diagnostic != "" && exitCode == ExitWaitFailed {
+		return &protocol.Response{Type: protocol.RespError, Error: diagnostic}
 	}
 
 	output := stdout.Bytes()
