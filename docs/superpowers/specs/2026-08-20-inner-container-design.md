@@ -315,8 +315,8 @@ still applies globally from inside — parity holds, but the suite asserts it.
 | 1. Dark launch | **done** | Namespace inodes differ for pid/mnt/ipc/uts, shared for net; kill -9 respawned |
 | 2. Mount propagation | **done** | Outer tmpfs mounted *after* container start is visible inside, and survives respawn |
 | 3. fd passing + routing | **done** | Routed exec reports the inner pid/mnt namespaces, `pid=10` |
-| 4. Route stream/file/pty | **code complete** | PTY verified: inner ns, `tty` → `/dev/pts/0`, exit code 7 propagated |
-| 5. Flip the default | **blocked** | See below |
+| 4. Route stream/file/pty | **done** | PTY verified: inner ns, `tty` → `/dev/pts/0`, exit code 7 propagated |
+| 5. Flip the default | **done** | Routing on by default; full parity battery green over vsock |
 
 Routing is gated behind `MVM_CONTAINER_EXEC`. Unset — the default — the
 container is created and supervised but nothing is routed to it, so behaviour is

@@ -103,11 +103,10 @@ func RecvConn(ctrl *net.UnixConn) (net.Conn, []byte, error) {
 		syscall.Close(fd)
 		return nil, nil, fmt.Errorf("fd %d is not valid", fd)
 	}
-	// FileConn dups the descriptor, so the original must be closed or it leaks
-	// for the life of the process.
-	conn, err := net.FileConn(f)
-	f.Close()
+
+	conn, err := fileToConn(f)
 	if err != nil {
+		f.Close()
 		return nil, nil, fmt.Errorf("wrap passed fd: %w", err)
 	}
 
@@ -118,3 +117,44 @@ func RecvConn(ctrl *net.UnixConn) (net.Conn, []byte, error) {
 	}
 	return conn, h.Request, nil
 }
+
+// fileToConn turns a received socket fd into a net.Conn.
+//
+// net.FileConn is tried first because it yields a real *net.TCPConn/*net.UnixConn
+// with working addresses. But it resolves the socket family and only handles
+// AF_INET, AF_INET6 and AF_UNIX — AF_VSOCK falls through to EPROTONOSUPPORT.
+//
+// That is not a corner case here: vsock is the PRIMARY transport for `mvm exec`
+// (TCP is the legacy path). Routing was verified over TCP, where FileConn works,
+// which is exactly why this went unnoticed until the agent ran as the guest's
+// real PID 1 and every exec started failing with EOF.
+//
+// The fallback wraps the descriptor directly. A socket fd supports read(2) and
+// write(2) regardless of family, and os.File provides deadlines for any
+// pollable fd, so this satisfies net.Conn for families net does not know about.
+func fileToConn(f *os.File) (net.Conn, error) {
+	if conn, err := net.FileConn(f); err == nil {
+		// FileConn dups the descriptor, so the original must be released.
+		f.Close()
+		return conn, nil
+	}
+	return &fdConn{File: f}, nil
+}
+
+// fdConn adapts an *os.File holding a socket to net.Conn. Read, Write, Close
+// and the deadline methods come from *os.File; only the address accessors need
+// supplying, and no handler on the inner side inspects them (the cross-VM peer
+// check runs in the outer agent, before handoff).
+type fdConn struct {
+	*os.File
+}
+
+func (c *fdConn) LocalAddr() net.Addr  { return fdAddr{} }
+func (c *fdConn) RemoteAddr() net.Addr { return fdAddr{} }
+
+// fdAddr is a placeholder address for a connection whose family net does not
+// model. It reports the family honestly rather than pretending to be TCP.
+type fdAddr struct{}
+
+func (fdAddr) Network() string { return "fd" }
+func (fdAddr) String() string  { return "passed-fd" }

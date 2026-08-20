@@ -34,26 +34,20 @@ func main() {
 	// the VM. Must start before any connection is served so no exit is missed.
 	go handler.ReapForever()
 
-	// Dark launch: the inner container is created and supervised, but NOTHING is
-	// routed to it yet. Handlers still run in the root namespace exactly as
-	// before, so behaviour is unchanged; this exercises the spawn, the control
-	// socket and the respawn path under real conditions before anything depends
-	// on them. Failure is non-fatal for the same reason.
+	// User code runs in an inner namespace so the agent supervises from outside
+	// what it supervises. Failure to create it is non-fatal: handlers fall back
+	// to the root namespace, which is exactly how the agent behaved before this
+	// existed, so a kernel without the namespaces degrades rather than breaks.
+	//
+	// Set MVM_NO_CONTAINER=1 to disable entirely.
 	if os.Getenv("MVM_NO_CONTAINER") == "" {
 		cm := container.NewManager()
 		if err := cm.Start(); err != nil {
 			log.Printf("inner container unavailable (continuing without it): %v", err)
 		} else {
 			go cm.Supervise()
-			// Only now is routing enabled. Until MVM_CONTAINER_EXEC is set,
-			// user code still runs in the root namespace exactly as before —
-			// the container is created and supervised but nothing is sent to
-			// it, so the spawn and respawn paths are exercised in production
-			// before anything depends on them.
-			if os.Getenv("MVM_CONTAINER_EXEC") != "" {
-				containerMgr = cm
-				log.Printf("routing user code into the inner container")
-			}
+			containerMgr = cm
+			log.Printf("routing user code into the inner container")
 		}
 	}
 
