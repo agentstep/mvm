@@ -33,27 +33,33 @@ or network state reset too.`,
 }
 
 func runBounce(store *state.Store, name string) error {
-	v, err := store.GetVM(name)
+	// applevz has no daemon, so the CLI dials the guest agent directly.
+	// Firecracker goes through the daemon like every other verb, which is also
+	// what makes this work against a remote daemon over MVM_REMOTE.
+	v, lookupErr := store.GetVM(name)
+	if lookupErr == nil && v.Backend == "applevz" {
+		if v.Status != "running" {
+			return fmt.Errorf("VM %q is %s (bounce needs a running VM)", name, v.Status)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if err := vm.NewAppleVZBackend(mvmDir).AgentClient(name).Bounce(ctx); err != nil {
+			return fmt.Errorf("bounce %q: %w", name, err)
+		}
+		fmt.Printf("  Bounced '%s' — processes restarted, files and network untouched\n", name)
+		return nil
+	}
+
+	sc, err := requireDaemon()
 	if err != nil {
+		if lookupErr != nil {
+			return lookupErr
+		}
 		return err
 	}
-	if v.Status != "running" {
-		return fmt.Errorf("VM %q is %s (bounce needs a running VM)", name, v.Status)
-	}
-
-	// applevz has no daemon, so the CLI talks to the guest agent directly. The
-	// Firecracker path goes through the daemon like every other verb.
-	if v.Backend != "applevz" {
-		return fmt.Errorf("mvm bounce currently supports the applevz backend only")
-	}
-
-	vzBackend := vm.NewAppleVZBackend(mvmDir)
-	agent := vzBackend.AgentClient(name)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	if err := agent.Bounce(ctx); err != nil {
+	if err := sc.Bounce(ctx, name); err != nil {
 		return fmt.Errorf("bounce %q: %w", name, err)
 	}
 	fmt.Printf("  Bounced '%s' — processes restarted, files and network untouched\n", name)
