@@ -26,6 +26,8 @@ const (
 	ReqServiceLs  = "service_ls"
 	ReqServiceRst = "service_restart"
 	ReqServiceLog = "service_logs"
+	ReqListDir    = "list_dir"
+	ReqDeleteFile = "delete_file"
 )
 
 // Response types

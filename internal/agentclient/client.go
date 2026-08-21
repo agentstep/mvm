@@ -145,6 +145,70 @@ func (c *Client) Bounce(ctx context.Context) error {
 	return nil
 }
 
+// ReadFile reads a file from inside the guest.
+//
+// The agent has had file handlers since the beginning; nothing on the host ever
+// called them, so every read went through exec and a shell. This is the direct
+// path: no shell quoting, no output parsing, and binary-safe.
+func (c *Client) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	req := &request{Type: reqReadFile, ID: newID(), File: &filePayload{Path: path}}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Type == respError {
+		return nil, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	return resp.Data, nil
+}
+
+// WriteFile writes a file inside the guest, creating parent directories.
+// mode 0 means 0644.
+func (c *Client) WriteFile(ctx context.Context, path string, content []byte, mode uint32) error {
+	req := &request{Type: reqWriteFile, ID: newID(),
+		File: &filePayload{Path: path, Content: content, Mode: mode}}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return err
+	}
+	if resp.Type == respError {
+		return fmt.Errorf("agent error: %s", resp.Error)
+	}
+	return nil
+}
+
+// ListDir lists a directory inside the guest.
+func (c *Client) ListDir(ctx context.Context, path string) ([]DirEntry, error) {
+	req := &request{Type: reqListDir, ID: newID(), File: &filePayload{Path: path}}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Type == respError {
+		return nil, fmt.Errorf("agent error: %s", resp.Error)
+	}
+	var out []DirEntry
+	if len(resp.Data) > 0 {
+		if err := json.Unmarshal(resp.Data, &out); err != nil {
+			return nil, fmt.Errorf("decode listing: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// DeleteFile removes a file or empty directory inside the guest.
+func (c *Client) DeleteFile(ctx context.Context, path string) error {
+	req := &request{Type: reqDeleteFile, ID: newID(), File: &filePayload{Path: path}}
+	var resp response
+	if err := c.exchange(ctx, req, &resp); err != nil {
+		return err
+	}
+	if resp.Type == respError {
+		return fmt.Errorf("agent error: %s", resp.Error)
+	}
+	return nil
+}
+
 // ServiceAdd declares a service and starts supervising it.
 func (c *Client) ServiceAdd(ctx context.Context, name, run, workdir, restart string, env map[string]string) error {
 	return c.serviceCall(ctx, reqServiceAdd, &servicePayload{

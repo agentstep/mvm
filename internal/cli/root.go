@@ -84,6 +84,8 @@ func newRootCmd(version, commit, date string) *cobra.Command {
 		newPreviewCmd(store),
 		newBounceCmd(store),
 		newServiceCmd(store),
+		newCpCmd(store),
+		newDirCmd(store),
 		newBuildCmd(store),
 		newImageCmd(store),
 		newNetworkCmd(store),

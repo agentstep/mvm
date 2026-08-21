@@ -25,6 +25,8 @@ var insideVerbs = map[string]bool{
 	protocol.ReqExecPty:    true,
 	protocol.ReqWriteFile:  true,
 	protocol.ReqReadFile:   true,
+	protocol.ReqListDir:    true,
+	protocol.ReqDeleteFile: true,
 }
 
 // RouteInside reports whether a request type is served by the inner container.

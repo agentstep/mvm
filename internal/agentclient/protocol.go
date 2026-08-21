@@ -33,6 +33,10 @@ const (
 	reqServiceLs  = "service_ls"
 	reqServiceRst = "service_restart"
 	reqServiceLog = "service_logs"
+	reqReadFile   = "read_file"
+	reqWriteFile  = "write_file"
+	reqListDir    = "list_dir"
+	reqDeleteFile = "delete_file"
 )
 
 // Wire-format response types — must match agent/internal/protocol.
@@ -56,6 +60,7 @@ type request struct {
 	Forward *forwardPayload `json:"forward,omitempty"`
 	Mount   *mountPayload   `json:"mount,omitempty"`
 	Service *servicePayload `json:"service,omitempty"`
+	File    *filePayload    `json:"file,omitempty"`
 }
 
 // servicePayload matches agent/internal/protocol.ServiceRequest.
@@ -78,6 +83,21 @@ type ServiceState struct {
 	Running  bool   `json:"running"`
 	Restarts int    `json:"restarts"`
 	LastExit int    `json:"last_exit"`
+}
+
+// filePayload matches agent/internal/protocol.FileRequest.
+type filePayload struct {
+	Path    string `json:"path"`
+	Content []byte `json:"content,omitempty"`
+	Mode    uint32 `json:"mode,omitempty"`
+}
+
+// DirEntry describes one entry in a guest directory listing.
+type DirEntry struct {
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	Mode  string `json:"mode"`
+	IsDir bool   `json:"is_dir"`
 }
 
 // LogLine is one captured line of service output.

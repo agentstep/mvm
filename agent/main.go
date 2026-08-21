@@ -244,6 +244,22 @@ func serveConn(conn net.Conn, firstFrame []byte) {
 				resp.ID = req.ID
 			}
 
+		case protocol.ReqListDir:
+			if req.File == nil {
+				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: "missing file request"}
+			} else {
+				resp = handler.HandleListDir(req.File)
+				resp.ID = req.ID
+			}
+
+		case protocol.ReqDeleteFile:
+			if req.File == nil {
+				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: "missing file request"}
+			} else {
+				resp = handler.HandleDeleteFile(req.File)
+				resp.ID = req.ID
+			}
+
 		case protocol.ReqSetupNet:
 			if req.Network == nil {
 				resp = &protocol.Response{Type: protocol.RespError, ID: req.ID, Error: "missing network request"}
