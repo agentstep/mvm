@@ -63,6 +63,48 @@ mv "/tmp/release-${FC_VER}-${ARCH}/firecracker-${FC_VER}-${ARCH}" /usr/local/bin
 
 chmod +x /usr/local/bin/mvm /usr/local/bin/firecracker /usr/local/bin/mvm-agent /usr/local/bin/mvm-uffd
 
+# --- Verify the release supports the command the unit will run ---------------
+#
+# DAEMON_CMD is defined ONCE and used for both this check and the systemd unit
+# below, so the two cannot drift apart.
+#
+# They already did, once, and it shipped: the unit was updated to `mvm system
+# start` when the CLI moved serve/doctor/version under a `system` noun, but the
+# published release still only had `serve`. The daemon exited immediately with
+# "unknown command", Restart=always looped it, systemd sat in `activating`
+# forever — and this script printed a cheerful "installed!" banner with an
+# endpoint that could never answer. The install looked like it worked.
+#
+# This script writes the unit but downloads the binary from releases/latest, so
+# they version independently. Checking here turns a silent crash loop into a
+# clear failure at the moment the cause is still obvious.
+DAEMON_CMD="system start"
+
+if ! /usr/local/bin/mvm $DAEMON_CMD --help >/dev/null 2>&1; then
+  INSTALLED_VER="$(/usr/local/bin/mvm --version 2>/dev/null || echo unknown)"
+  cat >&2 <<EOF
+
+ERROR: the downloaded mvm release does not support "mvm $DAEMON_CMD".
+
+  installed version: $INSTALLED_VER
+  source:            https://github.com/${MVM_REPO}/releases/latest
+
+This install script and the published release have drifted: the daemon unit
+would be written to run "mvm $DAEMON_CMD", which this binary does not accept, so
+the service would crash-loop instead of starting.
+
+Fix by publishing a release that includes the current CLI surface, or install a
+matching build manually:
+
+  MVM_REPO=<owner>/<fork>  # to pull from a fork that is up to date
+  # or place a matching mvm binary at /usr/local/bin/mvm and re-run
+
+Stopping now rather than leaving a daemon that never starts.
+EOF
+  exit 1
+fi
+echo "Release supports 'mvm $DAEMON_CMD'"
+
 # --- Create directories ---
 
 mkdir -p /var/mvm/{cache,vms,keys,pool}
@@ -370,7 +412,10 @@ systemctl enable mvm-nat.service >/dev/null 2>&1
 
 # --- Install systemd unit for the daemon ---
 
-cat > /etc/systemd/system/mvm-daemon.service <<'EOF'
+# Unquoted heredoc so $DAEMON_CMD expands: the unit and the preflight check
+# above must run the same command, and the only way to guarantee that is to
+# interpolate the one variable rather than write the string twice.
+cat > /etc/systemd/system/mvm-daemon.service <<EOF
 [Unit]
 Description=mvm sandbox daemon
 Documentation=https://github.com/agentstep/mvm
@@ -379,8 +424,14 @@ Wants=mvm-nat.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mvm system start --listen 0.0.0.0:19876 --tls-cert /etc/mvm/cert.pem --tls-key /etc/mvm/key.pem --api-key-file /etc/mvm/api-key
+ExecStart=/usr/local/bin/mvm $DAEMON_CMD --listen 0.0.0.0:19876 --tls-cert /etc/mvm/cert.pem --tls-key /etc/mvm/key.pem --api-key-file /etc/mvm/api-key
 Environment=MVM_DATA_DIR=/var/mvm
+# This box has no separate console user — root is the only account, and remote
+# clients come in over TCP+TLS, not the unix socket. Pinning the owner home to
+# /root keeps the control socket 0600 root-only. (Lima is the opposite case:
+# there the daemon is root but the socket forwarder is not, so the socket has
+# to be handed to that user.)
+Environment=MVM_SOCKET_OWNER_HOME=/root
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
