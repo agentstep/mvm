@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -42,5 +44,42 @@ func TestThresholdsAreIndependent(t *testing.T) {
 	}
 	if _, ok := parseThreshold(""); ok {
 		t.Fatal("an unset archive threshold must not enable archiving")
+	}
+}
+
+// The restore path's real hazard is not the restore — it is that RestoreVMSnapshot works by
+// removing the VM entry and reserving a fresh one, dropping everything the record carried. A VM
+// that comes back without its thresholds never tiers again; without its secrets or ports it is the
+// same VM by name and quietly not the same VM.
+//
+// This asserts the preserved set matches the fields restoreArchivedVM copies back, so adding a
+// field to state.VM without adding it there fails here rather than in production.
+func TestArchivedRestorePreservesConfigFields(t *testing.T) {
+	preserved := []string{
+		"IdleTimeout", "ArchiveAfter", "Spec", "Secrets",
+		"Ports", "NetPolicy", "Backend", "Cpus", "MemoryMB",
+	}
+
+	src, err := os.ReadFile("tiering.go")
+	if err != nil {
+		t.Fatalf("read tiering.go: %v", err)
+	}
+	body := string(src)
+	for _, f := range preserved {
+		if !strings.Contains(body, "v."+f+" = preserved."+f) {
+			t.Errorf("restoreArchivedVM does not restore %s — a VM would come back missing it", f)
+		}
+	}
+
+	// And the two that must NOT be carried over, because the VM is running again.
+	for _, cleared := range []string{`v.ArchivedSnapshot = ""`, "v.StoppedAt = nil"} {
+		if !strings.Contains(body, cleared) {
+			t.Errorf("restoreArchivedVM should clear via %q — a restored VM still marked archived would be re-restored forever", cleared)
+		}
+	}
+
+	// Activity must be stamped, or the next sweep archives it straight back.
+	if !strings.Contains(body, "v.LastActivity = &now") {
+		t.Error("restoreArchivedVM must stamp LastActivity, or the sweep re-archives the VM immediately")
 	}
 }

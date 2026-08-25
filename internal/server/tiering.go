@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/agentstep/mvm/internal/firecracker"
@@ -101,4 +104,83 @@ func parseThreshold(v string) (time.Duration, bool) {
 		return 0, false
 	}
 	return d, true
+}
+
+// restoreArchivedVM brings an archived VM back from its checkpoint, in place.
+//
+// This is what makes archiving invisible to callers. Without it, tiering is only safe if every
+// caller knows to restore first — which turns a memory optimisation into an API contract change.
+//
+// PRESERVING CONFIG IS THE WHOLE DIFFICULTY. RestoreVMSnapshot works by removing the VM entry and
+// reserving a fresh one with a new network allocation, so everything the record carried is dropped:
+// the two idle thresholds, the declarative spec, attached secrets, port maps, the egress policy,
+// its CPU and memory shape. Restoring without putting them back would silently return a VM that
+// never tiers again, has no secrets, and forwards no ports — the same VM by name, quietly not the
+// same VM. So the config is captured before the restore and written back after it.
+func (s *Server) restoreArchivedVM(vm *state.VM) error {
+	if vm.ArchivedSnapshot == "" {
+		return fmt.Errorf("VM %q is archived but records no snapshot — its memory is gone and nothing says where the state went", vm.Name)
+	}
+
+	snapDir := filepath.Join(snapshotsBaseDir(), vm.ArchivedSnapshot)
+	if _, err := os.Stat(filepath.Join(snapDir, "meta.json")); err != nil {
+		return fmt.Errorf("archive %q for VM %q not found: %w", vm.ArchivedSnapshot, vm.Name, err)
+	}
+
+	// Captured BEFORE the restore, because reserving a fresh entry discards all of it.
+	preserved := *vm
+	name := vm.Name
+
+	s.store.RemoveVM(name)
+	netIndex, err := s.store.ReserveVM(&state.VM{
+		Name:      name,
+		Status:    "restoring",
+		CreatedAt: preserved.CreatedAt,
+	})
+	if err != nil {
+		return fmt.Errorf("reserve %q for restore: %w", name, err)
+	}
+	alloc := state.AllocateNet(netIndex)
+
+	pid, socketPath, uffdPid, err := firecracker.RestoreVMSnapshot(s.executor, name, snapDir, alloc)
+	if err != nil {
+		// Leave the record behind rather than removing it: the checkpoint on disk is still valid,
+		// so a later attempt can succeed. Removing the entry would strand a recoverable sandbox.
+		s.store.UpdateVM(name, func(v *state.VM) {
+			v.Status = "archived"
+			v.ArchivedSnapshot = preserved.ArchivedSnapshot
+		})
+		return fmt.Errorf("restore %q from %q: %w", name, preserved.ArchivedSnapshot, err)
+	}
+
+	now := time.Now()
+	s.store.UpdateVM(name, func(v *state.VM) {
+		v.Status = "running"
+		v.GuestIP = alloc.GuestIP
+		v.TAPIP = alloc.TAPIP
+		v.TAPDevice = alloc.TAPDev
+		v.GuestMAC = alloc.GuestMAC
+		v.SocketPath = socketPath
+		v.PID = pid
+		v.UFFDPid = uffdPid
+		v.RootfsPath = firecracker.VMDir(name) + "/rootfs.ext4"
+
+		// Put back everything the fresh reservation dropped.
+		v.IdleTimeout = preserved.IdleTimeout
+		v.ArchiveAfter = preserved.ArchiveAfter
+		v.Spec = preserved.Spec
+		v.Secrets = preserved.Secrets
+		v.Ports = preserved.Ports
+		v.NetPolicy = preserved.NetPolicy
+		v.Backend = preserved.Backend
+		v.Cpus = preserved.Cpus
+		v.MemoryMB = preserved.MemoryMB
+
+		// It is running again, so it is no longer archived, and this access is activity — without
+		// resetting the clock the next sweep would archive it straight back.
+		v.ArchivedSnapshot = ""
+		v.StoppedAt = nil
+		v.LastActivity = &now
+	})
+	return nil
 }

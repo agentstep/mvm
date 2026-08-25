@@ -659,6 +659,22 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.store.UpdateVM(name, func(v *state.VM) { v.Status = "running" })
+	} else if vm.Status == "archived" {
+		// Same idea one tier down: an archived VM has been checkpointed to disk and its memory
+		// released, so restoring is slower than a resume but equally invisible to the caller. If
+		// this were a 409 instead, tiering would stop being a memory optimisation and become a
+		// contract change every client had to learn.
+		if err := s.restoreArchivedVM(vm); err != nil {
+			httpError(w, fmt.Errorf("auto-restore failed: %w", err), http.StatusInternalServerError)
+			return
+		}
+		// The record was replaced by the restore; re-read it so the exec below uses the new
+		// network allocation and PID rather than the stale ones.
+		vm, err = s.store.GetVM(name)
+		if err != nil {
+			httpError(w, fmt.Errorf("VM %q vanished after restore: %w", name, err), http.StatusInternalServerError)
+			return
+		}
 	} else if vm.Status != "running" {
 		httpError(w, fmt.Errorf("VM %q is %s", name, vm.Status), http.StatusConflict)
 		return
