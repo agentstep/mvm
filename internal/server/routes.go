@@ -647,6 +647,16 @@ func (s *Server) handleStartVM(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// errNotRunning distinguishes "the VM is in a status exec cannot use" (409) from a genuine failure
+// while waking it (500). Both surface from the same locked section, so the caller needs the type to
+// pick a status code.
+type errNotRunning struct {
+	name   string
+	status string
+}
+
+func (e errNotRunning) Error() string { return fmt.Sprintf("VM %q is %s", e.name, e.status) }
+
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
@@ -681,6 +691,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		}
 		now := time.Now()
 		s.store.UpdateVM(name, func(v *state.VM) { v.LastActivity = &now })
+		// applevz is not swept today, but the completion stamp is what makes idle age mean idle
+		// age rather than command runtime — worth having before the sweep learns this backend.
+		defer s.ops.beginExec(name, s.store)()
 
 		home, herr := os.UserHomeDir()
 		if herr != nil {
@@ -694,31 +707,63 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-resume paused VMs so idle-pause doesn't break exec.
-	if vm.Status == "paused" {
-		if err := firecracker.Resume(s.executor, vm); err != nil {
-			httpError(w, fmt.Errorf("auto-resume failed: %w", err), http.StatusInternalServerError)
-			return
+	// Wake the VM and mark the exec in flight as ONE atomic step, under the VM's transition lock.
+	//
+	// Without the lock the tiering sweep can pause or archive the VM in the window between waking
+	// it and running the command — the caller then gets a failure from a VM the daemon itself just
+	// froze. Marking in-flight inside the same critical section closes the window completely: the
+	// sweep re-checks busy while holding this lock, so it either sees the marker or has already
+	// finished its own transition before this one begins.
+	//
+	// The lock is released before the command runs. A five-minute exec must not block the sweep
+	// from touching other VMs, and the in-flight marker — not the lock — is what keeps THIS VM
+	// safe for the duration.
+	if lerr := s.ops.with(name, func() error {
+		// Re-read inside the lock: the status read before it may predate a sweep transition.
+		current, gerr := s.store.GetVM(name)
+		if gerr != nil {
+			return gerr
 		}
-		s.store.UpdateVM(name, func(v *state.VM) { v.Status = "running" })
-	} else if vm.Status == "archived" {
-		// Same idea one tier down: an archived VM has been checkpointed to disk and its memory
-		// released, so restoring is slower than a resume but equally invisible to the caller. If
-		// this were a 409 instead, tiering would stop being a memory optimisation and become a
-		// contract change every client had to learn.
-		if err := s.restoreArchivedVM(vm); err != nil {
-			httpError(w, fmt.Errorf("auto-restore failed: %w", err), http.StatusInternalServerError)
-			return
+		switch current.Status {
+		case "paused":
+			// Auto-resume paused VMs so idle-pause doesn't break exec.
+			if err := firecracker.Resume(s.executor, current); err != nil {
+				return fmt.Errorf("auto-resume failed: %w", err)
+			}
+			s.store.UpdateVM(name, func(v *state.VM) { v.Status = "running" })
+		case "archived":
+			// Same idea one tier down: an archived VM has been checkpointed to disk and its memory
+			// released, so restoring is slower than a resume but equally invisible to the caller.
+			// If this were a 409 instead, tiering would stop being a memory optimisation and
+			// become a contract change every client had to learn.
+			if err := s.restoreArchivedVM(current); err != nil {
+				return fmt.Errorf("auto-restore failed: %w", err)
+			}
+		case "running":
+		default:
+			return errNotRunning{name: name, status: current.Status}
 		}
-		// The record was replaced by the restore; re-read it so the exec below uses the new
-		// network allocation and PID rather than the stale ones.
-		vm, err = s.store.GetVM(name)
-		if err != nil {
-			httpError(w, fmt.Errorf("VM %q vanished after restore: %w", name, err), http.StatusInternalServerError)
-			return
+		return nil
+	}); lerr != nil {
+		var nr errNotRunning
+		if errors.As(lerr, &nr) {
+			httpError(w, lerr, http.StatusConflict)
+		} else {
+			httpError(w, lerr, http.StatusInternalServerError)
 		}
-	} else if vm.Status != "running" {
-		httpError(w, fmt.Errorf("VM %q is %s", name, vm.Status), http.StatusConflict)
+		return
+	}
+
+	// Held for the whole command. done() clears it and stamps LastActivity at COMPLETION —
+	// stamping only at the start makes a long command look idle for its entire duration.
+	done := s.ops.beginExec(name, s.store)
+	defer done()
+
+	// The record may have been replaced by a restore; re-read it so the exec below uses the new
+	// network allocation and PID rather than the stale ones.
+	vm, err = s.store.GetVM(name)
+	if err != nil {
+		httpError(w, fmt.Errorf("VM %q vanished after wake: %w", name, err), http.StatusInternalServerError)
 		return
 	}
 

@@ -46,6 +46,10 @@ type Server struct {
 	// digestKey, values are strings. A sync.Map (rather than a plain map plus
 	// mutex) because the access pattern is write-once-read-many per image.
 	digestCache sync.Map
+
+	// ops serialises per-VM state transitions and tracks in-flight execs, so the unattended
+	// tiering sweep cannot interleave with a handler on the same VM. See vmops.go.
+	ops *vmOps
 }
 
 type Config struct {
@@ -140,6 +144,7 @@ func New(cfg Config) (*Server, error) {
 		sockPath:     cfg.SocketPath,
 		pidPath:      cfg.PIDPath,
 		cfg:          cfg,
+		ops:          newVMOps(),
 	}
 
 	mux := s.buildMux()

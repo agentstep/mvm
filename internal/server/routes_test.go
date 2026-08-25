@@ -113,6 +113,7 @@ func testServer(t *testing.T) (*Server, *state.Store) {
 	s := &Server{
 		store:    store,
 		executor: ex,
+		ops:      newVMOps(),
 	}
 	return s, store
 }
@@ -338,7 +339,7 @@ func TestHandleCreateVMSyncVolumeFailureTearsDown(t *testing.T) {
 	// "OK" satisfies WaitForGuest's nc probe so the synchronous post-boot path
 	// runs immediately instead of blocking on the 120s guest-boot timeout.
 	ex := &mockExecutor{runFunc: func(command string) (string, error) { return "OK", nil }}
-	s := &Server{store: store, executor: ex}
+	s := &Server{store: store, executor: ex, ops: newVMOps()}
 
 	// A volume whose host path does not exist makes SetupVolumeMounts fail fast
 	// (buildTarArchive can't stat it) — standing in for any copy-in failure.

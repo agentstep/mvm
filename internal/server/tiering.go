@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -74,6 +75,15 @@ func (s *Server) tierOnce(now time.Time) {
 			continue
 		}
 
+		// A command is running inside it. LastActivity is stamped when an exec starts, and exec
+		// allows five minutes, so an idle_timeout below that would otherwise freeze a build or an
+		// install while it is still working — indistinguishable, from inside the guest, from the
+		// host hanging. beginExec/busy is what tells the sweep the difference between a VM nobody
+		// is using and one in the middle of a long command.
+		if s.ops.busy(vm.Name) {
+			continue
+		}
+
 		// A VM that has never reported activity has no idle age to measure. Falling back to
 		// CreatedAt would archive a freshly created VM that simply has not been used yet.
 		if vm.LastActivity == nil {
@@ -85,19 +95,44 @@ func (s *Server) tierOnce(now time.Time) {
 		case "running":
 			d, ok := parseThreshold(vm.IdleTimeout)
 			if ok && idle >= d {
-				if err := firecracker.Pause(s.executor, vm); err != nil {
-					log.Printf("tiering: pause %s: %v", vm.Name, err)
+				// Under the VM's transition lock, and re-checking busy inside it: an exec that
+				// started between the check above and here holds the lock through its own restore
+				// step, so this blocks rather than pausing a VM a request just woke.
+				err := s.ops.with(vm.Name, func() error {
+					if s.ops.busy(vm.Name) {
+						return errVMBusy
+					}
+					if err := firecracker.Pause(s.executor, vm); err != nil {
+						return err
+					}
+					s.store.UpdateVM(vm.Name, func(v *state.VM) { v.Status = "paused" })
+					return nil
+				})
+				if err != nil {
+					if err != errVMBusy {
+						log.Printf("tiering: pause %s: %v", vm.Name, err)
+					}
 					continue
 				}
-				s.store.UpdateVM(vm.Name, func(v *state.VM) { v.Status = "paused" })
 				log.Printf("tiering: paused %s after %s idle (vCPUs frozen, %dMB still held)", vm.Name, idle.Round(time.Second), vm.MemoryMB)
 			}
 
 		case "paused":
 			d, ok := parseThreshold(vm.ArchiveAfter)
 			if ok && idle >= d {
-				if _, err := s.archiveVM(vm); err != nil {
-					log.Printf("tiering: archive %s: %v", vm.Name, err)
+				// Archive is the destructive tier — it snapshots and then kills — so it must never
+				// interleave with a restore or an exec on the same VM.
+				err := s.ops.with(vm.Name, func() error {
+					if s.ops.busy(vm.Name) {
+						return errVMBusy
+					}
+					_, aerr := s.archiveVM(vm)
+					return aerr
+				})
+				if err != nil {
+					if err != errVMBusy {
+						log.Printf("tiering: archive %s: %v", vm.Name, err)
+					}
 					continue
 				}
 				log.Printf("tiering: archived %s after %s idle (%dMB released)", vm.Name, idle.Round(time.Second), vm.MemoryMB)
@@ -109,6 +144,10 @@ func (s *Server) tierOnce(now time.Time) {
 // parseThreshold reads a duration like "5m". An empty or unparseable value disables the tier
 // rather than falling back to a default: silently applying a threshold nobody asked for is how a
 // running sandbox disappears.
+// errVMBusy means a command started on the VM between the sweep's check and its transition. Not a
+// failure — the VM is in use, which is the whole reason not to tier it — so it is not logged.
+var errVMBusy = errors.New("vm busy")
+
 func parseThreshold(v string) (time.Duration, bool) {
 	if v == "" {
 		return 0, false
