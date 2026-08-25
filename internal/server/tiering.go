@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/agentstep/mvm/internal/egressdns"
 	"github.com/agentstep/mvm/internal/firecracker"
 	"github.com/agentstep/mvm/internal/state"
 )
@@ -119,6 +120,21 @@ func parseThreshold(v string) (time.Duration, bool) {
 	return d, true
 }
 
+// policyForRestore decides what egress policy a returning VM gets.
+//
+// Its whole job is the failure case. The stored NetPolicy string is the only surviving record of
+// what the VM was created with, and if it no longer parses there are two options: hand back a VM
+// with no filter, or hand back a closed one. Open is unrecoverable — untrusted guest code is
+// already running by the time anyone notices — so this fails closed, matching handleStartVM.
+func policyForRestore(name, stored string) state.ParsedNetPolicy {
+	policy, err := state.ParseNetPolicy(stored)
+	if err != nil {
+		log.Printf("tiering: VM %s has unparseable stored policy %q, failing closed to deny: %v", name, stored, err)
+		return state.ParsedNetPolicy{Mode: state.NetPolicyDeny}
+	}
+	return policy
+}
+
 // restoreArchivedVM brings an archived VM back from its checkpoint, in place.
 //
 // This is what makes archiving invisible to callers. Without it, tiering is only safe if every
@@ -166,6 +182,31 @@ func (s *Server) restoreArchivedVM(vm *state.VM) error {
 		return fmt.Errorf("restore %q from %q: %w", name, preserved.ArchivedSnapshot, err)
 	}
 
+	// REINSTALL ENFORCEMENT, not just the metadata.
+	//
+	// archiveVM tore down the host-side egress rules and the DNS allowlist resolver on the way out
+	// (RemoveEgressPolicy + dns.Stop). Copying the NetPolicy STRING back into the record below
+	// restores what `inspect` reports and none of what actually constrains the guest — so a sandbox
+	// created with `deny` or `allow:github.com` would come back with unrestricted egress while
+	// still claiming to be restricted. On a host running untrusted code that is a containment
+	// breach, and a silent one.
+	//
+	// Fails closed exactly as handleStartVM does: a stored policy string that no longer parses
+	// becomes deny, never open.
+	policy := policyForRestore(name, preserved.NetPolicy)
+	if err := firecracker.InstallEgressPolicy(s.executor, alloc, policy); err != nil {
+		return fmt.Errorf("restore %q: egress policy not reinstalled, refusing to hand back an unconstrained VM: %w", name, err)
+	}
+	if policy.Mode == state.NetPolicyAllow {
+		sets := egressdns.SetPair{
+			V4: firecracker.EgressIPSetName(alloc.Index),
+			V6: firecracker.EgressIPSetName6(alloc.Index),
+		}
+		if err := s.dns.Start(alloc, sets, policy.Domains); err != nil {
+			return fmt.Errorf("restore %q: egress DNS not restarted, refusing to hand back an unconstrained VM: %w", name, err)
+		}
+	}
+
 	now := time.Now()
 	s.store.UpdateVM(name, func(v *state.VM) {
 		v.Status = "running"
@@ -195,5 +236,18 @@ func (s *Server) restoreArchivedVM(vm *state.VM) error {
 		v.StoppedAt = nil
 		v.LastActivity = &now
 	})
+
+	// Published-port DNAT was removed by archiveVM too, and the rules reference the TAP/IP of the
+	// OLD allocation, so they have to be reinstalled against the new one. Non-fatal: the VM is
+	// running and constrained, and a missing port forward is a connectivity problem, not a
+	// containment one.
+	if len(preserved.Ports) > 0 {
+		restored, err := s.store.GetVM(name)
+		if err == nil {
+			if perr := firecracker.SetupPortForwarding(s.executor, restored); perr != nil {
+				log.Printf("tiering: VM %s restored but port forwarding failed: %v", name, perr)
+			}
+		}
+	}
 	return nil
 }

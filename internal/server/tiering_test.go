@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/agentstep/mvm/internal/state"
 )
 
 // parseThreshold decides whether a tier applies at all. It returning a default on bad input is how
@@ -81,5 +83,81 @@ func TestArchivedRestorePreservesConfigFields(t *testing.T) {
 	// Activity must be stamped, or the next sweep archives it straight back.
 	if !strings.Contains(body, "v.LastActivity = &now") {
 		t.Error("restoreArchivedVM must stamp LastActivity, or the sweep re-archives the VM immediately")
+	}
+}
+
+// A VM comes back from archive with its enforcement REINSTALLED, not just its metadata restored.
+//
+// archiveVM tears down the host-side egress rules and the DNS allowlist resolver on the way out.
+// Restore copies the NetPolicy string back onto the record, which is what `inspect` reports — so a
+// restore that skips reinstallation produces a sandbox with unrestricted egress that still claims
+// to be restricted. That is a containment breach on a host running untrusted code, and a silent
+// one: nothing in the API surface distinguishes it from a correctly restored VM.
+func TestRestoreReinstallsEnforcement(t *testing.T) {
+	src, err := os.ReadFile("tiering.go")
+	if err != nil {
+		t.Fatalf("read tiering.go: %v", err)
+	}
+	body := string(src)
+
+	for _, call := range []struct{ fn, why string }{
+		{"firecracker.InstallEgressPolicy", "egress rules are gone after archive; without this the VM returns with open network"},
+		{"s.dns.Start", "the allowlist resolver is stopped on archive; without this an allow: policy resolves nothing and the ipset stays empty"},
+		{"firecracker.SetupPortForwarding", "published-port DNAT is removed on archive and references the old TAP, so it must be reinstalled against the new allocation"},
+	} {
+		if !strings.Contains(body, call.fn) {
+			t.Errorf("restoreArchivedVM never calls %s — %s", call.fn, call.why)
+		}
+	}
+
+	// Reinstalling after handing the VM back would leave a window where the guest is running
+	// unfiltered. The install must precede the status flip to "running".
+	install := strings.Index(body, "firecracker.InstallEgressPolicy")
+	running := strings.Index(body, `v.Status = "running"`)
+	if install == -1 || running == -1 {
+		t.Fatal("expected both an egress install and a status flip in restoreArchivedVM")
+	}
+	if install > running {
+		t.Error("egress policy is installed AFTER the VM is marked running — that window is a VM live with no filter")
+	}
+}
+
+// The restore path fails closed. A stored policy string that no longer parses must become deny,
+// never open: an over-restricted VM is a bug report, an under-restricted one is a breach nobody
+// sees.
+func TestPolicyForRestoreFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored string
+		want         state.NetPolicyMode
+	}{
+		{"unparseable fails closed", "allow:", state.NetPolicyDeny},
+		{"garbage fails closed", "!!!not a policy!!!", state.NetPolicyDeny},
+		{"deny stays deny", "deny", state.NetPolicyDeny},
+		{"allow is preserved", "allow:github.com", state.NetPolicyAllow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := policyForRestore("vm1", tc.stored)
+			if got.Mode != tc.want {
+				t.Fatalf("policyForRestore(%q) mode = %v, want %v", tc.stored, got.Mode, tc.want)
+			}
+		})
+	}
+
+	// An unparseable string must not slip through as open — the mode that means "no filter".
+	if m := policyForRestore("vm1", "allow:").Mode; m == state.NetPolicyOpen {
+		t.Fatal("an unparseable stored policy resolved to open — this is the containment breach")
+	}
+}
+
+// A restore that cannot reinstall enforcement must fail rather than hand back a running,
+// unconstrained VM. Asserting on the source because the real path needs a live Firecracker.
+func TestRestoreRefusesToHandBackAnUnconstrainedVM(t *testing.T) {
+	src, err := os.ReadFile("tiering.go")
+	if err != nil {
+		t.Fatalf("read tiering.go: %v", err)
+	}
+	body := string(src)
+	if !strings.Contains(body, "refusing to hand back an unconstrained VM") {
+		t.Error("a failed egress reinstall during restore must return an error, not be logged and ignored")
 	}
 }

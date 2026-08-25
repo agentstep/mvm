@@ -70,7 +70,7 @@ func newStartCmd(store *state.Store) *cobra.Command {
 					return err
 				}
 			}
-			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec, secretsF, false)
+			return runStart(store, args[0], detach, portMaps, netPolicy, volumes, seccomp, watch, cpus, memoryMB, image, jsonOut, spec, secretsF, false, nil)
 		},
 	}
 
@@ -185,7 +185,16 @@ func validateStartRM(rm bool) error {
 	return nil
 }
 
-func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec, secretNames []string, quiet bool) error {
+// TieringSpec carries the idle-tiering thresholds from the CLI, nil when the caller sets none.
+//
+// Threaded rather than applied after the fact because there are two create paths — the local store
+// and the daemon — and a post-hoc UpdateVM would only ever reach the first.
+type TieringSpec struct {
+	IdleTimeout  string
+	ArchiveAfter string
+}
+
+func runStart(store *state.Store, name string, detach bool, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, watch string, cpus, memoryMB int, image string, jsonOut bool, startup *StartupSpec, secretNames []string, quiet bool, tiering *TieringSpec) error {
 	// Merge secrets from the startup spec, then validate they all exist up front
 	// (a typo'd secret should fail the start, not silently inject nothing).
 	if startup != nil {
@@ -198,7 +207,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 	// Cloud/remote mode: the local state doesn't matter — the daemon is
 	// the source of truth. Skip the local init check entirely.
 	if os.Getenv("MVM_REMOTE") != "" {
-		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, startup, secretNames, quiet)
+		return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, startup, secretNames, quiet, tiering)
 	}
 
 	initialized, err := store.IsInitialized()
@@ -213,12 +222,19 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 
 	// Apple VZ path — dispatch to separate function
 	if backend == "applevz" {
+		// The tiering sweep only walks firecracker VMs, so a threshold here would never fire.
+		// Refuse it: silently dropping a cost control the caller asked for is the same class of
+		// lie as silently dropping --net-policy.
+		if tiering != nil && (tiering.IdleTimeout != "" || tiering.ArchiveAfter != "") {
+			return fmt.Errorf("--idle-timeout/--archive-after are not yet honoured on the applevz backend; " +
+				"the tiering sweep only walks firecracker VMs")
+		}
 		out := resolveOutputMode(jsonOut, quiet)
 		_, err := runStartAppleVZ(store, name, detach, ports, netPolicy, cpus, memoryMB, volumes, out, startup, secretNames, image)
 		return err
 	}
 	// Firecracker path: route through daemon
-	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, startup, secretNames, quiet)
+	return runStartViaDaemon(name, ports, netPolicy, volumes, seccomp, cpus, memoryMB, image, startup, secretNames, quiet, tiering)
 }
 
 // runStartViaDaemon creates a VM by calling the daemon's /vms endpoint.
@@ -235,7 +251,7 @@ func runStart(store *state.Store, name string, detach bool, ports []state.PortMa
 // never co-occur in practice, but if they ever did the recipe would be
 // skipped along with the banner. This preserves quiet's pre-existing,
 // already-reviewed behavior unchanged rather than special-casing it.
-func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string, startup *StartupSpec, secretNames []string, quiet bool) error {
+func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, volumes []string, seccomp string, cpus, memoryMB int, image string, startup *StartupSpec, secretNames []string, quiet bool, tiering *TieringSpec) error {
 	sc, err := requireDaemon()
 	if err != nil {
 		return err
@@ -259,15 +275,21 @@ func runStartViaDaemon(name string, ports []state.PortMap, netPolicy string, vol
 		return nil
 	}
 
+	var idleTimeout, archiveAfter string
+	if tiering != nil {
+		idleTimeout, archiveAfter = tiering.IdleTimeout, tiering.ArchiveAfter
+	}
 	resp, err := sc.CreateVM(ctx, server.CreateVMRequest{
-		Name:      name,
-		Cpus:      cpus,
-		MemoryMB:  memoryMB,
-		Ports:     ports,
-		NetPolicy: netPolicy,
-		Volumes:   volumes,
-		Seccomp:   seccomp,
-		Image:     image,
+		Name:         name,
+		IdleTimeout:  idleTimeout,
+		ArchiveAfter: archiveAfter,
+		Cpus:         cpus,
+		MemoryMB:     memoryMB,
+		Ports:        ports,
+		NetPolicy:    netPolicy,
+		Volumes:      volumes,
+		Seccomp:      seccomp,
+		Image:        image,
 		// Only secret NAMES cross this boundary — see the package-level
 		// security invariant in this plan's Global Constraints. Values are
 		// decrypted client-side, per-exec, exactly like runExecAppleVZ does

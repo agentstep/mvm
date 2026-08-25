@@ -46,6 +46,12 @@ type CreateVMRequest struct {
 	// Secrets holds attached secret NAMES ONLY — never values. See the
 	// package-level security invariant in this plan's Global Constraints.
 	Secrets []string `json:"secrets,omitempty"`
+	// IdleTimeout and ArchiveAfter drive the daemon's idle tiering (internal/server/tiering.go).
+	// Durations like "5m" / "1h"; empty disables that tier. Without these there is no way to
+	// enable tiering at all — the sweep runs but every VM opts out, which is exactly what shipped
+	// when the fields existed on state.VM and on no request.
+	IdleTimeout  string `json:"idle_timeout,omitempty"`
+	ArchiveAfter string `json:"archive_after,omitempty"`
 }
 
 // BuildRequest is the body for POST /build.
@@ -142,6 +148,9 @@ func specFromCreateRequest(req CreateVMRequest) *state.VMSpec {
 		NetPolicy: req.NetPolicy,
 		Seccomp:   req.Seccomp,
 		Secrets:   req.Secrets,
+
+		IdleTimeout:  req.IdleTimeout,
+		ArchiveAfter: req.ArchiveAfter,
 	}
 }
 
@@ -298,7 +307,34 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	// FirecrackerVsockDialer always 500'd against it. See
 	// vm.AppleVZBackend.CreateAndBoot's doc comment for exactly what this
 	// minimal path does and doesn't support.
+	// Validate the tiering thresholds HERE, before the backend fork. parseThreshold
+	// treats anything unparseable as "no threshold", so without this a typo like
+	// idle_timeout="5min" would 201 and then never tier — the caller has a success
+	// response for cost control that was silently discarded.
+	for _, f := range []struct{ name, val string }{
+		{"idle_timeout", req.IdleTimeout},
+		{"archive_after", req.ArchiveAfter},
+	} {
+		if f.val == "" {
+			continue
+		}
+		if _, ok := parseThreshold(f.val); !ok {
+			httpError(w, fmt.Errorf("invalid %s %q: want a positive Go duration such as \"5m\" or \"1h\"", f.name, f.val), http.StatusBadRequest)
+			return
+		}
+	}
+	// Same reasoning as the net_policy refusal further down: the tiering sweep only
+	// walks Firecracker VMs, so accepting a threshold for an applevz VM would be a
+	// billing promise this daemon does not keep.
 	if s.store.GetBackend() == "applevz" {
+		if req.IdleTimeout != "" || req.ArchiveAfter != "" {
+			httpError(w, fmt.Errorf(
+				"idle_timeout/archive_after are not yet honoured for applevz VMs; "+
+					"the tiering sweep only walks firecracker VMs, so refusing rather than "+
+					"accepting a threshold that would never fire",
+			), http.StatusBadRequest)
+			return
+		}
 		s.handleCreateApplevzVM(w, req)
 		return
 	}
@@ -337,6 +373,12 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		Secrets:   req.Secrets,
 		CreatedAt: now,
 		Spec:      specFromCreateRequest(req),
+
+		// These two are what tierOnce reads. Without them on the record the sweep
+		// runs every interval and every VM opts out — which is precisely the state
+		// this feature shipped in.
+		IdleTimeout:  req.IdleTimeout,
+		ArchiveAfter: req.ArchiveAfter,
 	}
 	netIndex, err := s.store.ReserveVM(vm)
 	if err != nil {

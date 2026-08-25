@@ -19,6 +19,11 @@ type VMSpec struct {
 	Secrets   []string        `json:"secrets,omitempty"`
 	Startup   json.RawMessage `json:"startup,omitempty"`
 	Services  []Service       `json:"services,omitempty"`
+	// IdleTimeout / ArchiveAfter are the idle-tiering thresholds as requested at
+	// create time. The live values on state.VM are what the sweep reads; these are
+	// the declaration, kept so inspect shows what was asked for.
+	IdleTimeout  string `json:"idle_timeout,omitempty"`
+	ArchiveAfter string `json:"archive_after,omitempty"`
 }
 
 // Service is a long-running process mvm keeps alive inside a VM.

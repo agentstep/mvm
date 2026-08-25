@@ -299,7 +299,7 @@ func TestRunStartQuietSuppressesDaemonBanner(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 
 	out := captureStdout(t, func() {
-		if err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, nil, true); err != nil {
+		if err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, nil, true, nil); err != nil {
 			t.Fatalf("runStart: %v", err)
 		}
 	})
@@ -316,7 +316,7 @@ func TestRunStartNotQuietPrintsDaemonBanner(t *testing.T) {
 	store := state.NewStore(filepath.Join(t.TempDir(), "state.json"))
 
 	out := captureStdout(t, func() {
-		if err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, nil, false); err != nil {
+		if err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, nil, false, nil); err != nil {
 			t.Fatalf("runStart: %v", err)
 		}
 	})
@@ -346,7 +346,7 @@ func TestRunStartViaDaemonSendsSecretNamesNotValues(t *testing.T) {
 	defer ts.Close()
 	t.Setenv("MVM_REMOTE", ts.URL)
 
-	err := runStartViaDaemon("web", nil, "open", nil, "", 0, 0, "", nil, []string{"OPENAI_API_KEY"}, false)
+	err := runStartViaDaemon("web", nil, "open", nil, "", 0, 0, "", nil, []string{"OPENAI_API_KEY"}, false, nil)
 	if err != nil {
 		t.Fatalf("runStartViaDaemon: %v", err)
 	}
@@ -375,7 +375,7 @@ func TestRunStartNoLongerRejectsStartupOrSecretsOnDaemonPath(t *testing.T) {
 	// (no MVM_SECRET_KEY, no secret store), so validateSecretsExist rejects
 	// it — but critically, it must fail with a secret-not-found error, not
 	// the old "not yet supported on the daemon/firecracker path" message.
-	err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, []string{"OPENAI_API_KEY"}, false)
+	err := runStart(store, "web", true, nil, "open", nil, "", "", 0, 0, "", false, nil, []string{"OPENAI_API_KEY"}, false, nil)
 	if err == nil || strings.Contains(err.Error(), "not yet supported") {
 		t.Fatalf("runStart() = %v, want a secret-not-found error, not the old unsupported-path rejection", err)
 	}
@@ -436,7 +436,7 @@ func TestRunStartViaDaemonResumesStopped(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("MVM_REMOTE", srv.URL)
 	t.Setenv("MVM_API_KEY", "")
-	if err := runStartViaDaemon("box", nil, "open", nil, "", 0, 0, "", nil, nil, false); err != nil {
+	if err := runStartViaDaemon("box", nil, "open", nil, "", 0, 0, "", nil, nil, false, nil); err != nil {
 		t.Fatalf("runStartViaDaemon() = %v, want nil", err)
 	}
 	if !startCalled {
@@ -462,7 +462,7 @@ func TestRunStartViaDaemonCreatesFreshName(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("MVM_REMOTE", srv.URL)
 	t.Setenv("MVM_API_KEY", "")
-	if err := runStartViaDaemon("newbox", nil, "open", nil, "", 0, 0, "", nil, nil, false); err != nil {
+	if err := runStartViaDaemon("newbox", nil, "open", nil, "", 0, 0, "", nil, nil, false, nil); err != nil {
 		t.Fatalf("runStartViaDaemon() = %v, want nil", err)
 	}
 	if !createCalled {

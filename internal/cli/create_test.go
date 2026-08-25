@@ -15,7 +15,7 @@ func TestRunCreateRejectsExistingName(t *testing.T) {
 	if err := store.AddVM(&state.VM{Name: "box", Backend: "applevz", Status: "stopped", CreatedAt: time.Now()}); err != nil {
 		t.Fatalf("AddVM: %v", err)
 	}
-	err := runCreate(store, "box", "base", 0, 0, "open", nil, nil, "")
+	err := runCreate(store, "box", "base", 0, 0, "open", nil, nil, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("runCreate() = %v, want an \"already exists\" error", err)
 	}
