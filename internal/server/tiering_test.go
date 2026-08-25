@@ -149,15 +149,67 @@ func TestPolicyForRestoreFailsClosed(t *testing.T) {
 	}
 }
 
-// A restore that cannot reinstall enforcement must fail rather than hand back a running,
-// unconstrained VM. Asserting on the source because the real path needs a live Firecracker.
-func TestRestoreRefusesToHandBackAnUnconstrainedVM(t *testing.T) {
+// A restore that cannot reinstall enforcement must STOP the VM, not merely return an error.
+//
+// By that point the microVM is running: returning without tearing it down leaves a live Firecracker
+// process, with a guest executing on a network allocation the record no longer claims, that nothing
+// will ever reap. Refusing to hand back an unconstrained VM is only safe if refusing also stops it.
+// Asserting on the source because the real path needs a live Firecracker.
+func TestRestoreStopsAVMItCannotConstrain(t *testing.T) {
 	src, err := os.ReadFile("tiering.go")
 	if err != nil {
 		t.Fatalf("read tiering.go: %v", err)
 	}
 	body := string(src)
-	if !strings.Contains(body, "refusing to hand back an unconstrained VM") {
-		t.Error("a failed egress reinstall during restore must return an error, not be logged and ignored")
+
+	// Both post-boot failure paths must tear down before returning.
+	if strings.Count(body, "s.abandonRestoredVM(name, pid, uffdPid, alloc, preserved)") < 2 {
+		t.Error("a post-boot restore failure returns without stopping the VM — that is a leaked Firecracker process")
+	}
+	for _, step := range []struct{ frag, why string }{
+		{"kill -9", "the Firecracker process keeps running"},
+		{"ip link del", "the TAP device leaks"},
+		{"KillUFFDHandler", "the UFFD handler process leaks"},
+		{"RemoveEgressPolicy", "the host-side rules for a dead VM stay installed"},
+	} {
+		if !strings.Contains(body, step.frag) {
+			t.Errorf("teardown omits %q — %s", step.frag, step.why)
+		}
+	}
+
+	// And the sandbox must stay recoverable: the checkpoint is still on disk, so the record goes
+	// back to archived rather than being left mid-restore or deleted.
+	idx := strings.Index(body, "func (s *Server) abandonRestoredVM")
+	if idx == -1 {
+		t.Fatal("no teardown helper")
+	}
+	tail := body[idx:]
+	end := strings.Index(tail, "\n}\n")
+	if end != -1 {
+		tail = tail[:end]
+	}
+	if !strings.Contains(tail, `v.Status = "archived"`) || !strings.Contains(tail, "v.ArchivedSnapshot = preserved.ArchivedSnapshot") {
+		t.Error("teardown must return the record to archived WITH its snapshot name, or the sandbox is unrecoverable")
+	}
+}
+
+// The reserved record must carry the snapshot name from the moment it exists.
+//
+// Between RemoveVM and the final update the daemon can die. A record left in "restoring" with an
+// empty ArchivedSnapshot fails restoreArchivedVM's own opening guard forever — the checkpoint is
+// still on disk, but nothing records where it is.
+func TestRestoreReservationRecordsTheSnapshot(t *testing.T) {
+	src, err := os.ReadFile("tiering.go")
+	if err != nil {
+		t.Fatalf("read tiering.go: %v", err)
+	}
+	body := string(src)
+	reserve := strings.Index(body, "s.store.ReserveVM(&state.VM{")
+	if reserve == -1 {
+		t.Fatal("no reservation in restoreArchivedVM")
+	}
+	block := body[reserve : reserve+400]
+	if !strings.Contains(block, "ArchivedSnapshot: preserved.ArchivedSnapshot") {
+		t.Error("the reserved record omits ArchivedSnapshot — a crash mid-restore strands the VM with no way back")
 	}
 }

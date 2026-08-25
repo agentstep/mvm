@@ -159,6 +159,33 @@ func parseThreshold(v string) (time.Duration, bool) {
 	return d, true
 }
 
+// abandonRestoredVM stops a VM that came back but could not be constrained, and returns its record
+// to "archived" so a later attempt can retry from the same checkpoint.
+//
+// Mirrors archiveVM's teardown: kill the process, drop the socket and TAP, reap the UFFD handler.
+// Best-effort throughout — every step is already "|| true" shaped — because the alternative to a
+// partial cleanup is a fully live VM, which is strictly worse.
+func (s *Server) abandonRestoredVM(name string, pid, uffdPid int, alloc state.NetAllocation, preserved state.VM) {
+	firecracker.RemoveEgressPolicy(s.executor, &state.VM{Name: name, NetIndex: alloc.Index, TAPDevice: alloc.TAPDev, GuestIP: alloc.GuestIP})
+	s.dns.Stop(alloc.Index)
+	s.executor.Run(fmt.Sprintf("sudo kill -9 %d 2>/dev/null || true", pid))
+	s.executor.Run(fmt.Sprintf("sudo rm -f %s; sudo ip link del %s 2>/dev/null || true",
+		firecracker.SocketPath(name), alloc.TAPDev))
+	if uffdPid != 0 {
+		firecracker.KillUFFDHandler(uffdPid)
+	}
+
+	// Back to archived, with the snapshot still named: the checkpoint on disk is untouched, so the
+	// sandbox is recoverable rather than lost.
+	s.store.UpdateVM(name, func(v *state.VM) {
+		v.Status = "archived"
+		v.ArchivedSnapshot = preserved.ArchivedSnapshot
+		v.PID = 0
+		v.UFFDPid = 0
+	})
+	log.Printf("tiering: VM %s restored but could not be constrained; stopped and returned to archived (checkpoint %s kept)", name, preserved.ArchivedSnapshot)
+}
+
 // policyForRestore decides what egress policy a returning VM gets.
 //
 // Its whole job is the failure case. The stored NetPolicy string is the only surviving record of
@@ -199,11 +226,17 @@ func (s *Server) restoreArchivedVM(vm *state.VM) error {
 	preserved := *vm
 	name := vm.Name
 
+	// ArchivedSnapshot goes on the reserved record immediately, not after the restore succeeds.
+	// Between RemoveVM and the final update the daemon can die, and a record left in "restoring"
+	// with an empty ArchivedSnapshot fails this function's own opening guard forever — the
+	// checkpoint is still on disk, but nothing records where. Writing it up front means any crash
+	// leaves enough to recover from.
 	s.store.RemoveVM(name)
 	netIndex, err := s.store.ReserveVM(&state.VM{
-		Name:      name,
-		Status:    "restoring",
-		CreatedAt: preserved.CreatedAt,
+		Name:             name,
+		Status:           "restoring",
+		CreatedAt:        preserved.CreatedAt,
+		ArchivedSnapshot: preserved.ArchivedSnapshot,
 	})
 	if err != nil {
 		return fmt.Errorf("reserve %q for restore: %w", name, err)
@@ -232,9 +265,14 @@ func (s *Server) restoreArchivedVM(vm *state.VM) error {
 	//
 	// Fails closed exactly as handleStartVM does: a stored policy string that no longer parses
 	// becomes deny, never open.
+	// From here the microVM is RUNNING. Any failure below must tear it down before returning:
+	// abandoning it leaves a live Firecracker process — with a guest that is executing, on a
+	// network allocation the record no longer claims — that nothing will ever reap. Refusing to
+	// hand back an unconstrained VM is only safe if refusing also stops it.
 	policy := policyForRestore(name, preserved.NetPolicy)
 	if err := firecracker.InstallEgressPolicy(s.executor, alloc, policy); err != nil {
-		return fmt.Errorf("restore %q: egress policy not reinstalled, refusing to hand back an unconstrained VM: %w", name, err)
+		s.abandonRestoredVM(name, pid, uffdPid, alloc, preserved)
+		return fmt.Errorf("restore %q: egress policy not reinstalled, VM stopped rather than left unconstrained: %w", name, err)
 	}
 	if policy.Mode == state.NetPolicyAllow {
 		sets := egressdns.SetPair{
@@ -242,7 +280,8 @@ func (s *Server) restoreArchivedVM(vm *state.VM) error {
 			V6: firecracker.EgressIPSetName6(alloc.Index),
 		}
 		if err := s.dns.Start(alloc, sets, policy.Domains); err != nil {
-			return fmt.Errorf("restore %q: egress DNS not restarted, refusing to hand back an unconstrained VM: %w", name, err)
+			s.abandonRestoredVM(name, pid, uffdPid, alloc, preserved)
+			return fmt.Errorf("restore %q: egress DNS not restarted, VM stopped rather than left unconstrained: %w", name, err)
 		}
 	}
 
