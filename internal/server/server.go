@@ -57,6 +57,8 @@ type Config struct {
 	TLSCert    string
 	TLSKey     string
 	APIKey     string
+	// TieringInterval is how often the idle sweep runs. Zero uses DefaultTieringInterval.
+	TieringInterval time.Duration
 }
 
 func DefaultSocketPath() string {
@@ -194,6 +196,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	register("POST", "/vms/{name}/start", s.handleStartVM)
 	register("POST", "/vms/{name}/pause", s.handlePauseVM)
 	register("POST", "/vms/{name}/resume", s.handleResumeVM)
+	register("POST", "/vms/{name}/archive", s.handleArchiveVM)
 	register("POST", "/vms/{name}/snapshot", s.handleSnapshotCreate)
 	register("POST", "/vms/{name}/restore", s.handleSnapshotRestore)
 	register("GET", "/snapshots", s.handleSnapshotList)
@@ -229,6 +232,12 @@ func (s *Server) Start(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		return s.Shutdown(shutdownCtx)
+	})
+
+	// Idle tiering: pause the recently-idle, archive the long-idle. Per-VM thresholds, so a VM
+	// with neither set is never touched — this loop cannot act on a VM nobody opted in.
+	g.Go(func() error {
+		return s.runTieringLoop(ctx, s.cfg.TieringInterval)
 	})
 
 	// Unix socket server.

@@ -12,29 +12,38 @@ import (
 
 // VM represents a single microVM's state.
 type VM struct {
-	Name         string     `json:"name"`
-	Status       string     `json:"status"` // "running", "paused", "stopped"
-	GuestIP      string     `json:"guest_ip"`
-	TAPIP        string     `json:"tap_ip"`
-	TAPDevice    string     `json:"tap_device"`
-	GuestMAC     string     `json:"guest_mac"`
-	NetIndex     int        `json:"net_index"`
-	SocketPath   string     `json:"socket_path"`
-	PID          int        `json:"pid"`
-	UFFDPid      int        `json:"uffd_pid,omitempty"` // mvm-uffd sidecar PID (0 = File backend)
-	RootfsPath   string     `json:"rootfs_path"`
-	Ports        []PortMap  `json:"ports,omitempty"`
-	NetPolicy    string     `json:"net_policy,omitempty"`   // "open", "deny", "allow:<domains>"
-	Backend      string     `json:"backend,omitempty"`      // "firecracker" or "applevz"
-	Cpus         int        `json:"cpus,omitempty"`         // vCPU count (0 = default)
-	MemoryMB     int        `json:"memory_mb,omitempty"`    // RAM in MiB (0 = default)
-	Secrets      []string   `json:"secrets,omitempty"`      // attached secret names (injected per-exec)
-	IdleTimeout  string     `json:"idle_timeout,omitempty"` // e.g. "5m"
-	LastActivity *time.Time `json:"last_activity,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	StoppedAt    *time.Time `json:"stopped_at,omitempty"`
-	ForwarderPID int        `json:"forwarder_pid,omitempty"` // applevz: PID of the detached -p port-forwarder process, 0 if none
-	Spec         *VMSpec    `json:"spec,omitempty"`          // declarative create request, returned by inspect
+	Name        string    `json:"name"`
+	Status      string    `json:"status"` // "running", "paused", "stopped"
+	GuestIP     string    `json:"guest_ip"`
+	TAPIP       string    `json:"tap_ip"`
+	TAPDevice   string    `json:"tap_device"`
+	GuestMAC    string    `json:"guest_mac"`
+	NetIndex    int       `json:"net_index"`
+	SocketPath  string    `json:"socket_path"`
+	PID         int       `json:"pid"`
+	UFFDPid     int       `json:"uffd_pid,omitempty"` // mvm-uffd sidecar PID (0 = File backend)
+	RootfsPath  string    `json:"rootfs_path"`
+	Ports       []PortMap `json:"ports,omitempty"`
+	NetPolicy   string    `json:"net_policy,omitempty"`   // "open", "deny", "allow:<domains>"
+	Backend     string    `json:"backend,omitempty"`      // "firecracker" or "applevz"
+	Cpus        int       `json:"cpus,omitempty"`         // vCPU count (0 = default)
+	MemoryMB    int       `json:"memory_mb,omitempty"`    // RAM in MiB (0 = default)
+	Secrets     []string  `json:"secrets,omitempty"`      // attached secret names (injected per-exec)
+	IdleTimeout string    `json:"idle_timeout,omitempty"` // e.g. "5m"
+	// ArchiveAfter is the SECOND idle threshold. A paused VM still holds all of its RAM — vCPUs are
+	// frozen but memory is untouched — so pause alone bounds CPU, not the resource that actually
+	// limits how many sandboxes a host holds. After this longer idle the VM is archived: checkpointed
+	// to disk and stopped, releasing its memory. Empty disables it.
+	ArchiveAfter string `json:"archive_after,omitempty"` // e.g. "1h"
+	// ArchivedSnapshot names the checkpoint an archived VM restores from. Set by archive, cleared on
+	// restore. Without it an archived VM is unrecoverable — the memory is gone and nothing records
+	// where its state went.
+	ArchivedSnapshot string     `json:"archived_snapshot,omitempty"`
+	LastActivity     *time.Time `json:"last_activity,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	StoppedAt        *time.Time `json:"stopped_at,omitempty"`
+	ForwarderPID     int        `json:"forwarder_pid,omitempty"` // applevz: PID of the detached -p port-forwarder process, 0 if none
+	Spec             *VMSpec    `json:"spec,omitempty"`          // declarative create request, returned by inspect
 }
 
 // PortMap represents a host:guest port forwarding rule.

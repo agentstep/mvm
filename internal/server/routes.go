@@ -898,6 +898,92 @@ func (s *Server) handleStopVM(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleArchiveVM checkpoints a VM to disk and then stops it, releasing its RAM.
+//
+// This is the operation pause is not. Pause freezes vCPUs and leaves memory untouched, so a paused
+// VM still occupies the resource that actually limits how many sandboxes a host holds. Snapshot on
+// its own does not help either — it pauses, checkpoints and RESUMES, so the VM keeps running and
+// keeps its memory. Archive is snapshot followed by stop: the state survives on disk, the memory
+// comes back to the host.
+//
+// Ordering is load-bearing. The snapshot must be written and verified BEFORE anything kills the
+// VM; reversing it turns a full memory image into an unrecoverable sandbox. A failed snapshot
+// leaves the VM exactly as it was and returns an error.
+//
+// Reverse with POST /vms/{name}/restore, which brings the VM back under the same name.
+func (s *Server) handleArchiveVM(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+
+	vm, err := s.store.GetVM(name)
+	if err != nil {
+		httpError(w, err, http.StatusNotFound)
+		return
+	}
+	if vm.Status == "archived" {
+		// Idempotent: archiving an archived VM is what a retrying caller does, and re-snapshotting
+		// a stopped VM would fail confusingly.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if vm.Status != "running" && vm.Status != "paused" {
+		httpError(w, fmt.Errorf("VM %q is %s, must be running or paused to archive", name, vm.Status), http.StatusConflict)
+		return
+	}
+
+	snapName, err := s.archiveVM(vm)
+	if err != nil {
+		httpError(w, err, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":   "archived",
+		"snapshot": snapName,
+		"memory":   fmt.Sprintf("%dMB released", vm.MemoryMB),
+	})
+}
+
+// archiveVM is the operation itself, shared by the HTTP handler and the idle sweep so the two
+// cannot drift. Returns the snapshot name it checkpointed to.
+//
+// Ordering is load-bearing: the snapshot must be on disk before anything kills the VM. Reversed,
+// a crash between the two turns a live sandbox into nothing. A failed snapshot returns an error
+// with the VM untouched and still running.
+func (s *Server) archiveVM(vm *state.VM) (string, error) {
+	snapName := vm.Name + "-archive"
+	if err := state.ValidateName(snapName); err != nil {
+		return "", fmt.Errorf("invalid archive name %q: %w", snapName, err)
+	}
+
+	// 1. Checkpoint. Nothing destructive happens until this succeeds.
+	snapDir := filepath.Join(snapshotsBaseDir(), snapName)
+	if err := firecracker.SnapshotVM(s.executor, vm, snapDir); err != nil {
+		return "", fmt.Errorf("archive %q: snapshot failed, VM left running: %w", vm.Name, err)
+	}
+
+	// 2. Release the memory. Force-kill rather than a graceful agent shutdown: the guest state is
+	// already captured, so running shutdown scripts would diverge from the checkpoint just taken.
+	firecracker.RemovePortForwarding(s.executor, vm)
+	firecracker.RemoveEgressPolicy(s.executor, vm)
+	s.dns.Stop(vm.NetIndex)
+	s.executor.Run(fmt.Sprintf("sudo kill -9 %d 2>/dev/null || true", vm.PID))
+	s.executor.Run(fmt.Sprintf("sudo rm -f %s; sudo ip link del %s 2>/dev/null || true",
+		firecracker.SocketPath(vm.Name), vm.TAPDevice))
+	if vm.UFFDPid != 0 {
+		firecracker.KillUFFDHandler(vm.UFFDPid)
+	}
+
+	now := time.Now()
+	s.store.UpdateVM(vm.Name, func(v *state.VM) {
+		v.Status = "archived"
+		v.ArchivedSnapshot = snapName
+		v.StoppedAt = &now
+		v.UFFDPid = 0
+	})
+	return snapName, nil
+}
+
 func (s *Server) handlePauseVM(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
