@@ -60,6 +60,19 @@ func (s *Server) tierOnce(now time.Time) {
 	}
 
 	for _, vm := range st.VMs {
+		// Firecracker only, for now. Both tiers call firecracker.* directly — Pause here and
+		// SnapshotVM inside archiveVM — and every handler in routes.go that touches a VM branches
+		// on vm.Backend == "applevz" first. Without this guard the sweep calls the wrong backend's
+		// code on an applevz VM, and it does so UNATTENDED, which is worse than a handler doing it
+		// in response to an explicit request.
+		//
+		// applevz can pause (internal/vzhelper/client.go's Pause is a memory-resident freeze), so
+		// this is a wiring gap rather than a capability one: tiering it needs the vzhelper path
+		// here and an applevz equivalent of SnapshotVM for the archive tier.
+		if vm.Backend != "" && vm.Backend != "firecracker" {
+			continue
+		}
+
 		// A VM that has never reported activity has no idle age to measure. Falling back to
 		// CreatedAt would archive a freshly created VM that simply has not been used yet.
 		if vm.LastActivity == nil {
