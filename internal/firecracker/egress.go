@@ -99,8 +99,23 @@ func EgressInstallScript(alloc state.NetAllocation, policy state.ParsedNetPolicy
 
 		switch policy.Mode {
 		case state.NetPolicyDeny:
-			// No carve-outs, not even DNS: a reachable resolver is an
-			// exfiltration channel under a policy named "deny".
+			// Replies to connections opened FROM outside are accepted; nothing the guest
+			// originates is.
+			//
+			// Without this the chain was an unconditional DROP, and a published port was
+			// silently dead: the inbound SYN reaches the guest (DNAT'd, so it never traverses
+			// this chain) but the guest's SYN-ACK leaves on tapN and was dropped. Meanwhile
+			// allow: has always carried this same accept, so the two policies disagreed about
+			// whether ingress works — an accident in both directions, not a decision.
+			//
+			// This cannot become an egress hole. A guest-originated flow is dropped at its SYN,
+			// so conntrack never promotes it past NEW — ESTABLISHED can only match a flow whose
+			// first packet came from outside, i.e. a port the operator deliberately published.
+			// "deny" now means exactly one thing: the guest may not originate connections.
+			//
+			// Still no DNS carve-out: a reachable resolver is an exfiltration channel under a
+			// policy named "deny".
+			b.WriteString("sudo \"$IPT\" -A \"$CHAIN\" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT\n")
 			b.WriteString("sudo \"$IPT\" -A \"$CHAIN\" -j DROP\n")
 
 		case state.NetPolicyAllow:

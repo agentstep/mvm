@@ -24,21 +24,57 @@ func TestEgressNamesAreKeyedOnIndex(t *testing.T) {
 	}
 }
 
-// TestEgressDenyHasNoAcceptAtAll is a regression guard on the behavior change.
-// The old in-guest ruleset punched holes for DNS (--dport 53), which left a
-// working exfiltration channel under a policy literally named "deny".
-func TestEgressDenyHasNoAcceptAtAll(t *testing.T) {
+// TestEgressDenyAcceptsNothingTheGuestOriginates pins what "deny" means.
+//
+// This replaces an earlier guard that asserted the deny ruleset contained no ACCEPT string at all.
+// That was a blunt proxy for the real property: the original defect it guarded was a DNS carve-out
+// (--dport 53) leaving a working exfiltration channel under a policy named "deny". The string check
+// also forbade the one accept that is not a hole.
+//
+// The contract now: nothing the GUEST originates is accepted, and replies on connections opened
+// from outside are. A guest-originated flow is dropped at its SYN, so conntrack never promotes it
+// past NEW — an ESTABLISHED,RELATED accept can therefore only match a flow whose first packet came
+// from outside, i.e. a port the operator deliberately published. Without it, publishing a port on a
+// deny VM was silently dead: the inbound SYN arrived via DNAT but the guest's SYN-ACK left on tapN
+// and was dropped.
+//
+// This does widen deny: a published port on a deny sandbox is now a working channel in and out, and
+// that is a wider one than the DNS hole this test originally closed. It is allowed deliberately —
+// publishing is an explicit act — and belongs in the docs beside the ingress axis, not forbidden
+// here.
+func TestEgressDenyAcceptsNothingTheGuestOriginates(t *testing.T) {
 	alloc := state.AllocateNet(0)
 	script := EgressInstallScript(alloc, state.ParsedNetPolicy{Mode: state.NetPolicyDeny})
 
 	if !strings.Contains(script, `-A "$CHAIN" -j DROP`) {
-		t.Error("deny ruleset must end in an unconditional DROP")
+		t.Error("deny ruleset must still end in an unconditional DROP")
 	}
-	if strings.Contains(script, "ACCEPT") {
-		t.Errorf("deny ruleset must contain no ACCEPT rule, got:\n%s", script)
-	}
+
+	// The DNS hole this test was written for must stay closed.
 	if strings.Contains(script, "53") {
 		t.Errorf("deny ruleset must not carve out DNS, got:\n%s", script)
+	}
+
+	// Exactly one accept, and only the conntrack form. Any other ACCEPT — a port, a protocol, an
+	// address — would be a hole for guest-originated traffic.
+	for _, line := range strings.Split(script, "\n") {
+		if !strings.Contains(line, "ACCEPT") {
+			continue
+		}
+		if !strings.Contains(line, "--ctstate ESTABLISHED,RELATED") {
+			t.Errorf("deny ruleset has an accept that is not the conntrack reply rule — that is a hole for guest-originated traffic:\n%s", line)
+		}
+	}
+
+	// Ordering is load-bearing: iptables takes the first match, so an accept placed after the
+	// unconditional DROP would never run and published ports would stay dead.
+	accept := strings.Index(script, "--ctstate ESTABLISHED,RELATED")
+	drop := strings.Index(script, `-A "$CHAIN" -j DROP`)
+	if accept == -1 {
+		t.Fatal("deny ruleset accepts no established replies — a published port's SYN-ACK is dropped and the port is silently dead")
+	}
+	if accept > drop {
+		t.Error("the established-reply accept comes after the DROP, so it never matches")
 	}
 }
 
