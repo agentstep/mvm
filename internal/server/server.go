@@ -259,6 +259,21 @@ func (s *Server) Start(ctx context.Context) error {
 		hasTLS := s.cfg.TLSCert != "" && s.cfg.TLSKey != ""
 		insecure := os.Getenv("MVM_INSECURE") == "true"
 
+		// MVM_INSECURE only applies to a loopback listener.
+		//
+		// It disables TLS on the TCP listener, which puts the bearer token — root over every VM on this
+		// host — on the wire in cleartext. That is defensible while debugging against 127.0.0.1 and
+		// indefensible on any address a second machine can reach, and the env var could not tell the
+		// difference. The client side already refuses to send the token over plain http; this is the
+		// same rule enforced by the side that owns the risk.
+		if insecure && !isLoopbackAddr(s.cfg.ListenAddr) {
+			return fmt.Errorf(
+				"MVM_INSECURE=true refused for listen address %q: it disables TLS, and the API bearer "+
+					"token is root-equivalent on every VM here. Bind to 127.0.0.1 to debug without TLS, "+
+					"or configure TLSCert/TLSKey",
+				s.cfg.ListenAddr)
+		}
+
 		g.Go(func() error {
 			var err error
 			if hasTLS && !insecure {
@@ -298,4 +313,23 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	os.Remove(s.sockPath)
 	RemovePID(s.pidPath)
 	return nil
+}
+
+// isLoopbackAddr reports whether a listen address binds only to the local machine.
+//
+// An empty host means "all interfaces" and is NOT loopback — that is the shape most likely to be
+// typed by accident (":19876"), and the one where treating it as safe would be worst.
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

@@ -792,36 +792,77 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 // backends in handleExec so the NDJSON-vs-JSON framing logic exists exactly
 // once.
 func (s *Server) execAndRespond(w http.ResponseWriter, client *agentclient.Client, req ExecRequest, ctx context.Context) {
+	if req.Stream {
+		s.execStreamAndRespond(w, client, req, ctx)
+		return
+	}
+
 	result, execErr := client.Exec(ctx, req.Command, req.Stdin)
 	if execErr != nil {
 		httpError(w, execErr, http.StatusInternalServerError)
 		return
 	}
 
-	if req.Stream {
-		w.Header().Set("Content-Type", "application/x-ndjson")
-		flusher, _ := w.(http.Flusher)
-
-		// Send output as a single stdout frame + exit frame.
-		if result.Output != "" {
-			frame, _ := json.Marshal(map[string]interface{}{"type": "stdout", "data": result.Output})
-			w.Write(frame)
-			w.Write([]byte("\n"))
-			if flusher != nil {
-				flusher.Flush()
-			}
-		}
-		exitFrame, _ := json.Marshal(map[string]interface{}{"type": "exit", "exit_code": result.ExitCode})
-		w.Write(exitFrame)
-		w.Write([]byte("\n"))
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ExecResponse{Output: result.Output, ExitCode: result.ExitCode})
+}
+
+// streamWriteTimeout bounds a single frame write, not the whole command. The listener's
+// WriteTimeout cannot serve here: it is armed once, before the handler runs.
+const streamWriteTimeout = 30 * time.Second
+
+// execStreamAndRespond streams NDJSON frames as the command produces them.
+//
+// stream:true used to be a lie: the handler called the blocking Exec, waited for the command to
+// finish, and then emitted the whole buffer as a single stdout frame followed by an exit frame.
+// The wire shape was right, so clients could not tell — but nothing arrived until the command was
+// over, which makes watching a build impossible and is the reason the TS provider's spawn() hands
+// back a "stream" that is really a finished string.
+//
+// The frame vocabulary is unchanged, so a client that reads NDJSON until the exit frame keeps
+// working: the old behaviour was a degenerate case of this one, with every byte in a single frame.
+// stderr now arrives as its own frame type — the guest has always sent it separately and the split
+// was being discarded here.
+func (s *Server) execStreamAndRespond(w http.ResponseWriter, client *agentclient.Client, req ExecRequest, ctx context.Context) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+
+	rc := http.NewResponseController(w)
+
+	// The TCP listener's 5-minute WriteTimeout was armed before this handler ran, and a streaming
+	// response outlives it — the write simply starts failing mid-command. Push the deadline out on
+	// every frame instead, so the bound is per-write rather than per-command.
+	writeFrame := func(v any) error {
+		if derr := rc.SetWriteDeadline(time.Now().Add(streamWriteTimeout)); derr != nil && !errors.Is(derr, http.ErrNotSupported) {
+			return derr
+		}
+		line, merr := json.Marshal(v)
+		if merr != nil {
+			return merr
+		}
+		if _, werr := w.Write(append(line, '\n')); werr != nil {
+			return werr
+		}
+		return rc.Flush()
+	}
+
+	exitCode, err := client.ExecStream(ctx, req.Command, req.Stdin, func(f agentclient.ExecStreamFrame) error {
+		switch f.Kind {
+		case "exit":
+			return writeFrame(map[string]any{"type": "exit", "exit_code": f.ExitCode})
+		default:
+			return writeFrame(map[string]any{"type": f.Kind, "data": string(f.Data)})
+		}
+	})
+	if err != nil {
+		// The header is already sent, so this cannot become a status code. An error frame is the
+		// only way to tell the client the difference between "the command ended" and "we stopped
+		// being able to watch it" — silence would read as a clean exit.
+		log.Printf("exec stream: %v", err)
+		_ = writeFrame(map[string]any{"type": "error", "error": err.Error()})
+		return
+	}
+	_ = exitCode
 }
 
 // handleInteractiveExec hijacks the HTTP connection and bridges it to the
@@ -889,6 +930,20 @@ func (s *Server) handleInteractiveExec(w http.ResponseWriter, r *http.Request, v
 		return
 	}
 	defer conn.Close()
+
+	// Clear the deadlines net/http armed before this handler ran.
+	//
+	// The TCP listener sets ReadTimeout 30s and WriteTimeout 5m (server.go). Those are applied to
+	// the connection up front, and Hijack does NOT clear them — so over TCP, an interactive session
+	// starts failing reads about 30 seconds in, and any long-lived relay dies at five minutes. The
+	// Unix-socket listener sets no timeouts, which is why this has never been seen locally: it is a
+	// remote-only failure, on the one transport a containerised client must use.
+	//
+	// A hijacked connection is no longer request/response shaped, so a request-scoped deadline is
+	// meaningless on it; the session ends when either side closes.
+	if derr := conn.SetDeadline(time.Time{}); derr != nil {
+		log.Printf("interactive exec %s: could not clear connection deadline: %v", vmName, derr)
+	}
 
 	// 5. Write HTTP 101 Switching Protocols response.
 	bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n")

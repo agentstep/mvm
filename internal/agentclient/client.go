@@ -522,3 +522,77 @@ func newID() string {
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
 }
+
+// ExecStreamFrame is one chunk of a streaming exec: output as it is produced, or the final exit.
+type ExecStreamFrame struct {
+	// Kind is "stdout", "stderr", or "exit".
+	Kind     string
+	Data     []byte
+	ExitCode int
+}
+
+// ExecStream runs a command on the guest and delivers output frames to onFrame AS THEY ARRIVE,
+// returning the exit code once the command finishes.
+//
+// The difference from Exec is the whole point: Exec waits for the command to finish and hands back
+// one buffer, so a caller cannot watch a build or notice a command that has stopped producing
+// output. It also merges stdout and stderr, because the buffered guest verb does. The guest's
+// exec_stream handler has kept them separate all along (agent/internal/handler/exec_stream.go
+// writes RespStdout and RespStderr frames) — that split was being discarded at this boundary.
+//
+// Holds one connection open for the command's lifetime, like ExecInteractive. Cancelling ctx closes
+// the connection, which is what stops the command: the guest's stream handler notices its writes
+// failing. There is no signal verb in the agent protocol to do it more precisely.
+func (c *Client) ExecStream(ctx context.Context, command, stdin string, onFrame func(ExecStreamFrame) error) (int, error) {
+	conn, err := c.dialer.Dial(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("dial agent: %w", err)
+	}
+	defer conn.Close()
+
+	// Close the connection when the caller gives up, so a cancelled request does not leave the
+	// guest running a command nobody is reading.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			conn.Close()
+		case <-done:
+		}
+	}()
+
+	req := &request{
+		Type: reqExecStream,
+		ID:   newID(),
+		Exec: &execPayload{Command: command, Stdin: stdin},
+	}
+	if err := writeFrame(conn, req); err != nil {
+		return 0, fmt.Errorf("send exec_stream: %w", err)
+	}
+
+	for {
+		var resp response
+		if err := readFrame(conn, &resp); err != nil {
+			if ctx.Err() != nil {
+				return 0, ctx.Err()
+			}
+			return 0, fmt.Errorf("read exec_stream frame: %w", err)
+		}
+		switch resp.Type {
+		case respStdout, respStderr:
+			if ferr := onFrame(ExecStreamFrame{Kind: resp.Type, Data: resp.Data}); ferr != nil {
+				return 0, ferr
+			}
+		case respExit:
+			if ferr := onFrame(ExecStreamFrame{Kind: respExit, ExitCode: resp.ExitCode}); ferr != nil {
+				return 0, ferr
+			}
+			return resp.ExitCode, nil
+		case respError:
+			return 0, fmt.Errorf("agent error: %s", resp.Error)
+		default:
+			return 0, fmt.Errorf("unexpected exec_stream response type: %q", resp.Type)
+		}
+	}
+}

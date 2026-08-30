@@ -22,6 +22,7 @@ import (
 const (
 	reqPing       = "ping"
 	reqExec       = "exec"
+	reqExecStream = "exec_stream"
 	reqExecPty    = "exec_pty"
 	reqPoweroff   = "poweroff"
 	reqTCPForward = "tcp_forward"
@@ -45,6 +46,7 @@ const (
 	respError  = "error"
 	respExit   = "exit"
 	respStdout = "stdout"
+	respStderr = "stderr"
 	respStdin  = "stdin"  // host→agent: terminal input
 	respResize = "resize" // host→agent: window resize (exit_code = rows<<16|cols)
 )
